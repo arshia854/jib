@@ -1,4 +1,6 @@
 import { Suspense } from "react";
+import { redirect } from "next/navigation";
+import { getSession } from "@/lib/auth/session";
 import { listTransactions } from "@/lib/data/transactions";
 import { listCategories } from "@/lib/data/categories";
 import { TransactionFilterBar } from "@/components/transactions/transaction-filter-bar";
@@ -12,14 +14,17 @@ interface PageProps {
 }
 
 export default async function TransactionsPage({ searchParams }: PageProps) {
+  const session = await getSession();
+  if (!session) redirect("/login");
+
   const params = await searchParams;
   const type: CategoryType | undefined =
     params.type === "income" || params.type === "expense" ? params.type : undefined;
   const categoryId = params.categoryId ? Number(params.categoryId) : undefined;
 
   const [transactions, categories] = await Promise.all([
-    listTransactions({ type, categoryId }),
-    listCategories(),
+    listTransactions(session.userId, { type, categoryId }),
+    listCategories(session.userId),
   ]);
 
   return (

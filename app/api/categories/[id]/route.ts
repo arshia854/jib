@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth/session";
 import { updateCategory, deleteCategory, CategoryInUseError, CategoryNotFoundError } from "@/lib/data/categories";
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
   const { id } = await params;
   const categoryId = Number(id);
   if (!Number.isInteger(categoryId)) {
@@ -19,17 +25,25 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   }
 
   try {
-    const category = await updateCategory(categoryId, data);
+    const category = await updateCategory(session.userId, categoryId, data);
     return NextResponse.json({ category });
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "P2002") {
       return NextResponse.json({ error: "دسته‌بندی با این نام و نوع قبلاً وجود دارد." }, { status: 409 });
     }
-    return NextResponse.json({ error: "دسته‌بندی یافت نشد." }, { status: 404 });
+    if (error instanceof CategoryNotFoundError) {
+      return NextResponse.json({ error: error.message }, { status: 404 });
+    }
+    throw error;
   }
 }
 
 export async function DELETE(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
   const { id } = await params;
   const categoryId = Number(id);
   if (!Number.isInteger(categoryId)) {
@@ -37,7 +51,7 @@ export async function DELETE(_request: NextRequest, { params }: { params: Promis
   }
 
   try {
-    await deleteCategory(categoryId);
+    await deleteCategory(session.userId, categoryId);
     return NextResponse.json({ ok: true });
   } catch (error) {
     if (error instanceof CategoryInUseError) {

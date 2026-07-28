@@ -3,8 +3,9 @@
 import { usePathname } from "next/navigation";
 import { BottomNav } from "./bottom-nav";
 import { Fab } from "./fab";
+import { InstallPrompt } from "@/components/pwa/install-prompt";
 
-const HIDE_FAB_ON = ["/add", "/chat"];
+const HIDE_FAB_ON = ["/app/add", "/app/chat"];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -15,6 +16,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className="flex-1 overflow-y-auto">{children}</main>
       <BottomNav />
       {showFab && <Fab />}
+      <InstallPrompt />
     </div>
   );
 }

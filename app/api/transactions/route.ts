@@ -1,15 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth/session";
 import { listTransactions, createTransaction, InvalidCategoryError } from "@/lib/data/transactions";
 import type { CategoryType } from "@/lib/categories";
 
 export async function GET(request: NextRequest) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
   const params = request.nextUrl.searchParams;
   const type = params.get("type");
   const categoryIdParam = params.get("categoryId");
   const from = params.get("from");
   const to = params.get("to");
 
-  const transactions = await listTransactions({
+  const transactions = await listTransactions(session.userId, {
     type: type === "income" || type === "expense" ? type : undefined,
     categoryId: categoryIdParam ? Number(categoryIdParam) : undefined,
     from: from ? new Date(from) : undefined,
@@ -20,6 +26,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
   const body = await request.json().catch(() => null);
 
   const amount = Number(body?.amount);
@@ -36,7 +47,7 @@ export async function POST(request: NextRequest) {
   const date = dateInput && !Number.isNaN(Date.parse(dateInput)) ? new Date(dateInput) : new Date();
 
   try {
-    const transaction = await createTransaction({
+    const transaction = await createTransaction(session.userId, {
       amount: Math.round(amount),
       type,
       categoryName,

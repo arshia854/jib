@@ -1,18 +1,20 @@
 import { prisma } from "@/lib/prisma";
 import { getJalaaliMonthRange } from "@/lib/format";
 
-export async function getDashboardData() {
+export async function getDashboardData(userId: number) {
   const { start, end, label } = getJalaaliMonthRange();
 
   const [accounts, monthTransactions, recentTransactions] = await Promise.all([
     prisma.account.findMany({
+      where: { userId },
       include: { transactions: { select: { amount: true, type: true } } },
     }),
     prisma.transaction.findMany({
-      where: { date: { gte: start, lt: end } },
+      where: { userId, date: { gte: start, lt: end } },
       include: { category: true },
     }),
     prisma.transaction.findMany({
+      where: { userId },
       orderBy: { date: "desc" },
       take: 5,
       include: { category: true },

@@ -1,14 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth/session";
 import { listCategoriesWithUsage, createCategory } from "@/lib/data/categories";
 import type { CategoryType } from "@/lib/categories";
 
 export async function GET(request: NextRequest) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
   const type = request.nextUrl.searchParams.get("type");
-  const categories = await listCategoriesWithUsage(type === "income" || type === "expense" ? type : undefined);
+  const categories = await listCategoriesWithUsage(
+    session.userId,
+    type === "income" || type === "expense" ? type : undefined
+  );
   return NextResponse.json({ categories });
 }
 
 export async function POST(request: NextRequest) {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
   const body = await request.json().catch(() => null);
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const icon = typeof body?.icon === "string" ? body.icon.trim() : "";
@@ -23,7 +37,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const category = await createCategory({ name, icon, color, type });
+    const category = await createCategory(session.userId, { name, icon, color, type });
     return NextResponse.json({ category }, { status: 201 });
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "P2002") {

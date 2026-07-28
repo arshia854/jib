@@ -65,7 +65,7 @@ export function AddTransactionForm({ categories }: { categories: CategoryOption[
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "خطا در ذخیره تراکنش.");
-      router.push("/");
+      router.push("/app");
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");

@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/prisma";
 import { streamChatCompletion, type ChatMessageInput } from "@/lib/openrouter";
 import { getFinancialContextSummary } from "@/lib/data/chat-context";
@@ -11,6 +12,11 @@ ${context}`;
 }
 
 export async function POST(request: NextRequest) {
+  const session = await getSession();
+  if (!session) {
+    return Response.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
   const body = await request.json().catch(() => null);
   const message = typeof body?.message === "string" ? body.message.trim() : "";
 
@@ -18,11 +24,11 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "پیام نمی‌تواند خالی باشد." }, { status: 400 });
   }
 
-  await prisma.chatMessage.create({ data: { role: "user", content: message } });
+  await prisma.chatMessage.create({ data: { userId: session.userId, role: "user", content: message } });
 
   const [context, history] = await Promise.all([
-    getFinancialContextSummary(),
-    prisma.chatMessage.findMany({ orderBy: { timestamp: "desc" }, take: 16 }),
+    getFinancialContextSummary(session.userId),
+    prisma.chatMessage.findMany({ where: { userId: session.userId }, orderBy: { timestamp: "desc" }, take: 16 }),
   ]);
 
   const orderedHistory = history.reverse();
@@ -53,7 +59,9 @@ export async function POST(request: NextRequest) {
       const { done, value } = await reader.read();
       if (done) {
         if (fullResponse.trim()) {
-          await prisma.chatMessage.create({ data: { role: "assistant", content: fullResponse } });
+          await prisma.chatMessage.create({
+            data: { userId: session.userId, role: "assistant", content: fullResponse },
+          });
         }
         controller.close();
         return;

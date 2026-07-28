@@ -9,9 +9,10 @@ export interface TransactionFilters {
   to?: Date;
 }
 
-export async function listTransactions(filters: TransactionFilters = {}) {
+export async function listTransactions(userId: number, filters: TransactionFilters = {}) {
   return prisma.transaction.findMany({
     where: {
+      userId,
       type: filters.type,
       categoryId: filters.categoryId,
       date: filters.from || filters.to ? { gte: filters.from, lte: filters.to } : undefined,
@@ -21,7 +22,11 @@ export async function listTransactions(filters: TransactionFilters = {}) {
   });
 }
 
-export async function deleteTransaction(id: number) {
+export async function deleteTransaction(userId: number, id: number) {
+  const existing = await prisma.transaction.findFirst({ where: { id, userId } });
+  if (!existing) {
+    throw new Error("تراکنش یافت نشد.");
+  }
   return prisma.transaction.delete({ where: { id } });
 }
 
@@ -36,10 +41,10 @@ export interface CreateTransactionInput {
 
 export class InvalidCategoryError extends Error {}
 
-export async function createTransaction(input: CreateTransactionInput) {
+export async function createTransaction(userId: number, input: CreateTransactionInput) {
   const [account, category] = await Promise.all([
-    getDefaultAccount(),
-    prisma.category.findFirst({ where: { name: input.categoryName, type: input.type } }),
+    getDefaultAccount(userId),
+    prisma.category.findFirst({ where: { userId, name: input.categoryName, type: input.type } }),
   ]);
 
   if (!category) {
@@ -53,6 +58,7 @@ export async function createTransaction(input: CreateTransactionInput) {
       description: input.description,
       rawInput: input.rawInput,
       date: input.date,
+      userId,
       accountId: account.id,
       categoryId: category.id,
     },

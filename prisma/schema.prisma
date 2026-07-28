@@ -7,6 +7,20 @@ datasource db {
   provider = "sqlite"
 }
 
+model User {
+  id          Int      @id @default(autoincrement())
+  phoneNumber String   @unique
+  name        String?
+  age         Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  accounts     Account[]
+  categories   Category[]
+  transactions Transaction[]
+  chatMessages ChatMessage[]
+}
+
 model Account {
   id             Int      @id @default(autoincrement())
   name           String
@@ -15,7 +29,12 @@ model Account {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   transactions Transaction[]
+
+  @@index([userId])
 }
 
 model Category {
@@ -26,9 +45,12 @@ model Category {
   type      String
   createdAt DateTime @default(now())
 
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   transactions Transaction[]
 
-  @@unique([name, type])
+  @@unique([userId, name, type])
 }
 
 model Transaction {
@@ -41,13 +63,16 @@ model Transaction {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   accountId Int
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   categoryId Int
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
-  @@index([date])
+  @@index([userId, date])
   @@index([type])
   @@index([categoryId])
   @@index([accountId])
@@ -58,4 +83,9 @@ model ChatMessage {
   role      String
   content   String
   timestamp DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, timestamp])
 }

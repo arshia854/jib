@@ -3,20 +3,22 @@ import { getJalaaliMonthRange } from "@/lib/format";
 
 const fa = (n: number) => Math.round(n).toLocaleString("fa-IR");
 
-export async function getFinancialContextSummary(): Promise<string> {
+export async function getFinancialContextSummary(userId: number): Promise<string> {
   const { start, end, label } = getJalaaliMonthRange();
 
   const [monthTransactions, recentTransactions, accounts] = await Promise.all([
     prisma.transaction.findMany({
-      where: { date: { gte: start, lt: end } },
+      where: { userId, date: { gte: start, lt: end } },
       include: { category: true },
     }),
     prisma.transaction.findMany({
+      where: { userId },
       orderBy: { date: "desc" },
       take: 15,
       include: { category: true },
     }),
     prisma.account.findMany({
+      where: { userId },
       include: { transactions: { select: { amount: true, type: true } } },
     }),
   ]);

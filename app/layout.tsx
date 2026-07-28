@@ -2,7 +2,6 @@ import type { Metadata, Viewport } from "next";
 import "@fontsource-variable/vazirmatn/wght.css";
 import "./globals.css";
 import { ServiceWorkerRegister } from "@/components/pwa/service-worker-register";
-import { AppShell } from "@/components/layout/app-shell";
 
 export const metadata: Metadata = {
   title: {
@@ -31,8 +30,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="fa" dir="rtl">
-      <body className="antialiased">
-        <AppShell>{children}</AppShell>
+      <body className="bg-background text-foreground antialiased">
+        {children}
         <ServiceWorkerRegister />
       </body>
     </html>
