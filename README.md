@@ -120,3 +120,4 @@ override:
 - **AI model**: defaults to `google/gemini-2.5-flash` via `OPENROUTER_MODEL`
   in `.env` — change it to any OpenRouter model slug.
 # jibo
+# jibo
