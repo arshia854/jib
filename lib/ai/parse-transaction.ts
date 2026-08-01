@@ -1,5 +1,8 @@
 import { chatCompletion } from "@/lib/openrouter";
 import type { CategoryType } from "@/lib/categories";
+import { findMerchant, type MerchantLookupResult, type MerchantMatchSource } from "@/lib/merchant-lookup";
+import { extractAmount } from "@/lib/extract-amount";
+import { extractDate } from "@/lib/extract-date";
 
 export interface ParsedTransaction {
   amount: number;
@@ -7,6 +10,9 @@ export interface ParsedTransaction {
   category: string;
   description: string;
   date: string;
+  // Where `category` came from - a learned user mapping, the global
+  // merchant list, a keyword override, or the AI's own guess.
+  source?: MerchantMatchSource | "ai";
 }
 
 interface CategoryOption {
@@ -65,10 +71,50 @@ function extractJson(text: string): unknown {
   return JSON.parse(cleaned);
 }
 
+// A merchant match's leaf category is its subcategory when present (e.g.
+// "خرید آنلاین" under "خرید"), otherwise its top-level category. Only
+// returned if it's actually a valid category for this user under the
+// given type - a stale merchant/mapping pointing at a renamed or deleted
+// category must not leak through.
+function resolveCategoryOverride(
+  match: MerchantLookupResult,
+  type: CategoryType,
+  categories: CategoryOption[]
+): string | null {
+  if (match.source === "none") return null;
+  const candidate = match.subcategory ?? match.category;
+  if (!candidate) return null;
+  return categories.some((c) => c.name === candidate && c.type === type) ? candidate : null;
+}
+
 export async function parseTransactionWithAI(
+  userId: number,
   rawInput: string,
   categories: CategoryOption[]
 ): Promise<ParsedTransaction> {
+  const merchantMatch = await findMerchant(userId, rawInput);
+
+  // Fully deterministic path: a merchant match gives us category (and its
+  // own type - no need to guess income/expense), and if amount/date also
+  // extract confidently from the raw text, there's nothing left for the
+  // AI to add. Skip OpenRouter entirely.
+  if (merchantMatch.source !== "none" && merchantMatch.type) {
+    const overrideCategory = resolveCategoryOverride(merchantMatch, merchantMatch.type, categories);
+    const amount = extractAmount(rawInput);
+    const date = extractDate(rawInput);
+
+    if (overrideCategory && amount !== null && date !== null) {
+      return {
+        amount,
+        type: merchantMatch.type,
+        category: overrideCategory,
+        description: merchantMatch.merchantName ?? rawInput.slice(0, 40),
+        date,
+        source: merchantMatch.source,
+      };
+    }
+  }
+
   const content = await chatCompletion(
     [
       { role: "system", content: buildSystemPrompt(categories) },
@@ -89,13 +135,15 @@ export async function parseTransactionWithAI(
   }
 
   const type = parsed.type as CategoryType;
-  const categoryValid = categories.some((c) => c.name === parsed.category && c.type === type);
+  const overrideCategory = resolveCategoryOverride(merchantMatch, type, categories);
+  const aiCategoryValid = categories.some((c) => c.name === parsed.category && c.type === type);
 
   return {
     amount: Math.round(parsed.amount),
     type,
-    category: categoryValid ? parsed.category : "سایر",
+    category: overrideCategory ?? (aiCategoryValid ? parsed.category : "سایر"),
     description: parsed.description?.trim() || rawInput.slice(0, 40),
     date: parsed.date && !Number.isNaN(Date.parse(parsed.date)) ? parsed.date : new Date().toISOString().slice(0, 10),
+    source: overrideCategory ? merchantMatch.source : "ai",
   };
 }

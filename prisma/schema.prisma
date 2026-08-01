@@ -15,10 +15,11 @@ model User {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  accounts     Account[]
-  categories   Category[]
-  transactions Transaction[]
-  chatMessages ChatMessage[]
+  accounts         Account[]
+  categories       Category[]
+  transactions     Transaction[]
+  chatMessages     ChatMessage[]
+  merchantMappings MerchantMapping[]
 }
 
 model Account {
@@ -38,19 +39,26 @@ model Account {
 }
 
 model Category {
-  id        Int      @id @default(autoincrement())
-  name      String
-  icon      String
-  color     String
-  type      String
-  createdAt DateTime @default(now())
+  id         Int      @id @default(autoincrement())
+  name       String
+  icon       String
+  color      String
+  type       String
+  isTransfer Boolean  @default(false)
+  createdAt  DateTime @default(now())
 
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  transactions Transaction[]
+  parentId Int?
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children Category[] @relation("CategoryHierarchy")
+
+  transactions     Transaction[]
+  merchantMappings MerchantMapping[]
 
   @@unique([userId, name, type])
+  @@index([parentId])
 }
 
 model Transaction {
@@ -76,6 +84,22 @@ model Transaction {
   @@index([type])
   @@index([categoryId])
   @@index([accountId])
+}
+
+model MerchantMapping {
+  id          Int      @id @default(autoincrement())
+  merchantKey String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  categoryId Int
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, merchantKey])
+  @@index([categoryId])
 }
 
 model ChatMessage {

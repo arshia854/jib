@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   const categoryOptions = categories.map((c) => ({ name: c.name, type: c.type as CategoryType }));
 
   try {
-    const parsed = await parseTransactionWithAI(text, categoryOptions);
+    const parsed = await parseTransactionWithAI(session.userId, text, categoryOptions);
     return NextResponse.json({ parsed });
   } catch (error) {
     const message = error instanceof Error ? error.message : "خطا در پردازش متن.";

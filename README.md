@@ -32,10 +32,12 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000) for the marketing landing
 page; the app itself lives under `/app` and requires signing in from `/login`.
 
-OTP codes are not actually sent anywhere yet — in dev they're printed to the
-server console (`[mock SMS] OTP for 0912...: 123456`). Wire up a real
-provider (Kavenegar, Ghasedak, ...) in `lib/auth/otp.ts`'s `sendOtpSms`
-using the `SMS_PROVIDER_API_KEY` env var. Without `OPENROUTER_API_KEY` set,
+OTP codes are sent via Melipayamak's pattern-based SMS API once
+`MELIPAYAMAK_USERNAME`, `MELIPAYAMAK_PASSWORD`, and `MELIPAYAMAK_BODY_ID`
+are all set (see `.env.example`). Until then - e.g. in dev, or before
+Melipayamak authentication is approved - `sendOtpSms` in `lib/auth/otp.ts`
+falls back to printing the code to the server console
+(`[mock SMS] OTP for 0912...: 123456`). Without `OPENROUTER_API_KEY` set,
 everything else works except the two AI-powered routes (add-transaction
 parsing and the chat assistant), which fail with a clear Persian error
 message pointing at the missing key.
@@ -88,9 +90,10 @@ actual Claude Design mockups, which weren't accessible from this environment
 A few implementation choices were made that the real design may want to
 override:
 
-- **Auth**: OTP is mocked (console-logged), a JWT session cookie
-  (`AUTH_SECRET`) gates `/app/*`, and `/onboarding` is forced for
-  first-time signups until name + age are set.
+- **Auth**: OTP sends via Melipayamak when configured, otherwise falls back
+  to console-logging the code; a JWT session cookie (`AUTH_SECRET`) gates
+  `/app/*`, and `/onboarding` is forced for first-time signups until name +
+  age are set.
 - **Logout**: there's no settings/profile page yet, so logout lives as an
   icon button in the Dashboard header.
 - **Install prompt**: a dismissible bottom-sheet card shown inside `/app`
@@ -116,3 +119,4 @@ override:
   navigation payloads (that needs a more involved setup, e.g. Serwist).
 - **AI model**: defaults to `google/gemini-2.5-flash` via `OPENROUTER_MODEL`
   in `.env` — change it to any OpenRouter model slug.
+# jibo
