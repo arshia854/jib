@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/prisma";
-import { streamChatCompletion, type ChatMessageInput } from "@/lib/arvan-ai";
+import { streamChatCompletion, type ChatMessageInput } from "@/lib/openrouter";
 import { getFinancialContextSummary } from "@/lib/data/chat-context";
 import { checkRateLimit, rateLimitResponse, CHAT_USER_RULE } from "@/lib/rate-limit";
 

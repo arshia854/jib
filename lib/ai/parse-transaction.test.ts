@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import { prisma } from "@/lib/prisma";
 
-vi.mock("@/lib/arvan-ai", () => ({
+vi.mock("@/lib/openrouter", () => ({
   chatCompletion: vi.fn(),
 }));
 
-import { chatCompletion } from "@/lib/arvan-ai";
+import { chatCompletion } from "@/lib/openrouter";
 import { parseTransactionWithAI, type CategoryOption } from "@/lib/ai/parse-transaction";
 
 // No fixture rows exist for this id - lookupUserMapping's findMany just
