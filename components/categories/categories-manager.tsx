@@ -168,7 +168,7 @@ export function CategoriesManager({ categories }: { categories: Category[] }) {
                   type="button"
                   onClick={() => setForm({ ...form, type: t })}
                   className={`flex-1 rounded-xl py-2 text-sm font-medium ${
-                    form.type === t ? "bg-primary text-white" : "bg-background text-muted"
+                    form.type === t ? "bg-primary-darker text-white" : "bg-background text-muted"
                   }`}
                 >
                   {t === "income" ? "درآمد" : "هزینه"}
@@ -197,7 +197,7 @@ export function CategoriesManager({ categories }: { categories: Category[] }) {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-white disabled:opacity-50"
+              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
             >
               {saving ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : <CheckIcon className="h-4 w-4" />}
               ذخیره
@@ -233,7 +233,12 @@ function CategorySection({ title, categories, onAdd, onEdit, onDelete, deletingI
           <p className="py-6 text-center text-xs text-muted">دسته‌بندی‌ای وجود ندارد.</p>
         ) : (
           categories.map((category, i) => (
-            <div key={category.id} className={`flex items-center gap-3 py-3 ${i > 0 ? "border-t border-border" : ""}`}>
+            <div
+              key={category.id}
+              className={["flex items-center gap-3 py-3", i > 0 ? "border-t border-border" : ""]
+                .filter(Boolean)
+                .join(" ")}
+            >
               <div
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-base"
                 style={{ backgroundColor: `${category.color}1f` }}

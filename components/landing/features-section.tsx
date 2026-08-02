@@ -2,7 +2,7 @@ import { Reveal } from "./reveal";
 import { EditIcon, ChatIcon, ChartIcon, type IconProps } from "@/components/icons";
 
 const TONE_CLASSES = {
-  primary: "bg-primary/10 text-primary",
+  primary: "bg-primary/10 text-primary-dark",
   accent: "bg-accent/10 text-accent",
   success: "bg-success/10 text-success",
 } as const;

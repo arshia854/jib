@@ -24,7 +24,7 @@ export function PhoneMockup() {
               <div className="h-6 w-6 rounded-full bg-primary/10" />
             </div>
 
-            <div className="rounded-2xl bg-gradient-to-br from-primary to-primary-dark p-3.5 text-white">
+            <div className="rounded-2xl bg-gradient-to-br from-primary-dark to-primary-dark p-3.5 text-white">
               <p className="text-[9px] text-white/70">موجودی کل</p>
               <p className="mt-1 text-base font-bold">۱۴,۸۰۵,۰۰۰ تومان</p>
             </div>
@@ -45,7 +45,7 @@ export function PhoneMockup() {
             <div className="space-y-2 rounded-xl border border-border bg-surface p-2.5">
               {[
                 { icon: "🍔", color: "bg-orange-100", w: "w-16" },
-                { icon: "🚗", color: "bg-blue-100", w: "w-12" },
+                { icon: "🚗", color: "bg-primary-subtle", w: "w-12" },
               ].map((row, i) => (
                 <div key={i} className="flex items-center gap-2">
                   <div className={`flex h-6 w-6 items-center justify-center rounded-full ${row.color} text-[10px]`}>
@@ -60,7 +60,7 @@ export function PhoneMockup() {
             </div>
 
             <div className="flex justify-center pt-1">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-white shadow-lg">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-dark text-white shadow-lg">
                 <span className="text-base leading-none">+</span>
               </div>
             </div>

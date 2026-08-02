@@ -9,7 +9,7 @@ const HIDE_FAB_ON = ["/app/add", "/app/chat"];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const showFab = !HIDE_FAB_ON.includes(pathname);
+  const showFab = !HIDE_FAB_ON.includes(pathname) && !pathname.startsWith("/app/admin");
 
   return (
     <div className="relative mx-auto flex h-dvh w-full max-w-md flex-col bg-background">

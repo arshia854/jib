@@ -79,7 +79,7 @@ export function ChatInterface({ initialMessages }: { initialMessages: Message[] 
           <div key={m.id} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
             <div
               className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                m.role === "user" ? "bg-primary text-white" : "border border-border bg-surface text-foreground"
+                m.role === "user" ? "bg-primary-darker text-white" : "border border-border bg-surface text-foreground"
               }`}
             >
               {m.content || (sending && m.role === "assistant" ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : "")}
@@ -109,7 +109,7 @@ export function ChatInterface({ initialMessages }: { initialMessages: Message[] 
           onClick={handleSend}
           disabled={sending || !input.trim()}
           aria-label="ارسال"
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-white disabled:opacity-50"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-dark text-white disabled:opacity-50"
         >
           <SendIcon className="h-5 w-5" />
         </button>

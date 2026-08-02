@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getSession, setSessionCookie } from "@/lib/auth/session";
+import { getSession, setOnboarded } from "@/lib/auth/session";
 import { seedDefaultsForUser } from "@/lib/data/onboarding";
 
 export async function POST(request: NextRequest) {
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
     await seedDefaultsForUser(session.userId);
   }
 
-  await setSessionCookie(session.userId, true);
+  await setOnboarded();
 
   return NextResponse.json({ ok: true });
 }

@@ -5,9 +5,13 @@
   --background: #f8fafc;
   --surface: #ffffff;
   --foreground: #0f172a;
-  --primary: #1e3a8a;
-  --primary-dark: #172554;
-  --accent: #3b82f6;
+  --primary-bg: #FFFCF0;
+  --primary-subtle: #FEF3C7;
+  --primary-soft: #FDD97C;
+  --primary: #F5A11A;
+  --primary-dark: #C9820F;
+  --primary-darker: #A1680C;
+  --accent: #FCB92E;
   --success: #10b981;
   --warning: #ef4444;
   --muted: #64748b;
@@ -18,8 +22,12 @@
   --color-background: var(--background);
   --color-surface: var(--surface);
   --color-foreground: var(--foreground);
+  --color-primary-bg: var(--primary-bg);
+  --color-primary-subtle: var(--primary-subtle);
+  --color-primary-soft: var(--primary-soft);
   --color-primary: var(--primary);
   --color-primary-dark: var(--primary-dark);
+  --color-primary-darker: var(--primary-darker);
   --color-accent: var(--accent);
   --color-success: var(--success);
   --color-warning: var(--warning);
@@ -69,7 +77,10 @@ body {
   }
 }
 
-.reveal {
+/* Visible by default (no-JS / pre-hydration safe). JS only hides an element,
+   via .pre-reveal, once it has confirmed the element is off-screen and can
+   later animate it in with IntersectionObserver. */
+.reveal.pre-reveal {
   opacity: 0;
 }
 
@@ -84,7 +95,7 @@ body {
     opacity: 1;
     transform: none;
   }
-  .reveal {
+  .reveal.pre-reveal {
     opacity: 1;
   }
 }

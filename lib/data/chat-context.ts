@@ -17,7 +17,7 @@ export async function getFinancialContextSummary(userId: number): Promise<string
       take: 15,
       include: { category: true },
     }),
-    prisma.account.findMany({
+    prisma.financeAccount.findMany({
       where: { userId },
       include: { transactions: { select: { amount: true, type: true } } },
     }),

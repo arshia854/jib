@@ -5,7 +5,7 @@ export function TrustSection() {
   return (
     <section className="bg-surface px-5 py-16 sm:py-20">
       <Reveal className="mx-auto flex max-w-3xl flex-col items-center gap-4 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary-dark">
           <ShieldIcon className="h-7 w-7" />
         </div>
         <h2 className="text-xl font-bold text-foreground sm:text-2xl">اطلاعات مالیت پیش خودت می‌مونه</h2>

@@ -6,8 +6,8 @@ import { BalanceCard } from "@/components/dashboard/balance-card";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { CategoryBreakdown } from "@/components/dashboard/category-breakdown";
 import { TransactionRow } from "@/components/transactions/transaction-row";
-import { LogoutButton } from "@/components/layout/logout-button";
-import { ArrowUpIcon, ArrowDownIcon } from "@/components/icons";
+import { ArrowUpIcon, ArrowDownIcon, ListIcon } from "@/components/icons";
+import { EmptyState } from "@/components/empty-state";
 
 export const dynamic = "force-dynamic";
 
@@ -19,12 +19,9 @@ export default async function DashboardPage() {
 
   return (
     <div className="space-y-5 px-4 pb-8 pt-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <p className="text-sm text-muted">خوش اومدی{user.name ? `، ${user.name}` : ""}</p>
-          <h1 className="text-xl font-bold text-foreground">جیب</h1>
-        </div>
-        <LogoutButton />
+      <header>
+        <p className="text-sm text-muted">خوش اومدی{user.name ? `، ${user.name}` : ""}</p>
+        <h1 className="text-xl font-bold text-foreground">جیب</h1>
       </header>
 
       <BalanceCard balance={data.totalBalance} />
@@ -56,11 +53,16 @@ export default async function DashboardPage() {
             مشاهده همه
           </Link>
         </div>
-        <div className="rounded-2xl border border-border bg-surface px-4">
-          {data.recentTransactions.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted">هنوز تراکنشی ثبت نشده است.</p>
-          ) : (
-            data.recentTransactions.map((t, i) => (
+        {data.recentTransactions.length === 0 ? (
+          <EmptyState
+            icon={<ListIcon className="h-6 w-6" />}
+            title="هنوز تراکنشی ثبت نکرده‌اید"
+            description="اولین تراکنش خود را ثبت کنید تا وضعیت مالی‌تان اینجا نمایش داده شود."
+            action={{ href: "/app/add", label: "افزودن تراکنش" }}
+          />
+        ) : (
+          <div className="rounded-2xl border border-border bg-surface px-4">
+            {data.recentTransactions.map((t, i) => (
               <div key={t.id} className={i > 0 ? "border-t border-border" : ""}>
                 <TransactionRow
                   description={t.description}
@@ -71,9 +73,9 @@ export default async function DashboardPage() {
                   category={t.category}
                 />
               </div>
-            ))
-          )}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

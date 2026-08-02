@@ -62,7 +62,7 @@ export async function updateTransaction(userId: number, id: number, input: Updat
   const [existing, category, account] = await Promise.all([
     prisma.transaction.findFirst({ where: { id, userId } }),
     prisma.category.findFirst({ where: { userId, name: input.categoryName, type: input.type } }),
-    prisma.account.findFirst({ where: { id: input.accountId, userId } }),
+    prisma.financeAccount.findFirst({ where: { id: input.accountId, userId } }),
   ]);
 
   if (!existing) {
@@ -108,7 +108,7 @@ export async function updateTransaction(userId: number, id: number, input: Updat
 
 export async function createTransaction(userId: number, input: CreateTransactionInput) {
   const [account, category] = await Promise.all([
-    prisma.account.findFirst({ where: { id: input.accountId, userId } }),
+    prisma.financeAccount.findFirst({ where: { id: input.accountId, userId } }),
     prisma.category.findFirst({ where: { userId, name: input.categoryName, type: input.type } }),
   ]);
 

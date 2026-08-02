@@ -5,7 +5,7 @@ export async function getDashboardData(userId: number) {
   const { start, end, label } = getJalaaliMonthRange();
 
   const [accounts, monthTransactions, recentTransactions] = await Promise.all([
-    prisma.account.findMany({
+    prisma.financeAccount.findMany({
       where: { userId },
       include: { transactions: { select: { amount: true, type: true } } },
     }),

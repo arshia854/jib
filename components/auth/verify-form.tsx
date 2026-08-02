@@ -2,9 +2,21 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { signIn } from "next-auth/react";
 import { SpinnerIcon } from "@/components/icons";
 
 const RESEND_SECONDS = 90;
+
+function otpErrorMessage(code: string | undefined): string {
+  if (!code) return "کد نامعتبر است.";
+  if (code === "otp_expired") return "کد منقضی شده است. دوباره درخواست کد بدهید.";
+  if (code === "otp_max_attempts") return "تعداد تلاش‌ها بیش از حد مجاز است. دوباره درخواست کد بدهید.";
+  if (code === "otp_rate_limited") return "تعداد درخواست‌های شما بیش از حد مجاز است، لطفاً کمی صبر کنید.";
+  if (code === "otp_invalid_format") return "کد باید ۶ رقم باشد.";
+  const wrongMatch = /^otp_wrong_(\d+)$/.exec(code);
+  if (wrongMatch) return `کد وارد شده اشتباه است. (${wrongMatch[1]} تلاش باقی‌مانده)`;
+  return "کد نامعتبر است.";
+}
 
 export function VerifyForm() {
   const router = useRouter();
@@ -33,16 +45,18 @@ export function VerifyForm() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch("/api/auth/verify-otp", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "کد نامعتبر است.");
-        router.push(data.onboarded ? "/app" : "/onboarding");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+        const result = await signIn("phone-otp", { code, redirect: false });
+        if (result?.error) {
+          setError(otpErrorMessage(result.code));
+          setDigits(Array(6).fill(""));
+          inputRefs.current[0]?.focus();
+          setLoading(false);
+          return;
+        }
+        router.push("/app");
+        router.refresh();
+      } catch {
+        setError("خطای ناشناخته رخ داد.");
         setDigits(Array(6).fill(""));
         inputRefs.current[0]?.focus();
         setLoading(false);

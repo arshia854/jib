@@ -8,21 +8,66 @@ datasource db {
 }
 
 model User {
-  id          Int      @id @default(autoincrement())
-  phoneNumber String   @unique
-  name        String?
-  age         Int?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            Int       @id @default(autoincrement())
+  // Optional now that email/Google-only users may not have a phone.
+  phoneNumber   String?   @unique
+  email         String?   @unique
+  emailVerified DateTime?
+  // bcrypt hash, set only for users who registered via email + password.
+  passwordHash  String?
+  // Google avatar - populated by the OAuth profile on sign-in.
+  image         String?
+  name          String?
+  age           Int?
+  // "user" | "admin". Plain string (not a Prisma enum) to match every other
+  // type-like field in this schema (FinanceAccount.type, Category.type,
+  // Transaction.type). No self-serve way to become "admin" - see README.md.
+  role          String    @default("user")
+  // Set to block a user; enforced in lib/auth/session.ts's getSession() so a
+  // blocked user is signed out (session treated as null) on their next
+  // request, same as a deleted user.
+  blockedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  accounts         Account[]
+  financeAccounts  FinanceAccount[]
   categories       Category[]
   transactions     Transaction[]
   chatMessages     ChatMessage[]
   merchantMappings MerchantMapping[]
+  // OAuth provider links (Google, etc). Named/modeled to match what
+  // @auth/prisma-adapter expects - see lib/auth/config.ts.
+  oauthAccounts    Account[]
+  errorLogs        ErrorLog[]
 }
 
+// NextAuth/Auth.js OAuth provider link table (required shape + field names
+// for @auth/prisma-adapter). Unrelated to the user's own bank/cash
+// FinanceAccount model below - this only tracks "which OAuth provider
+// identities are linked to this user".
 model Account {
+  id                String  @id @default(cuid())
+  userId            Int
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// The user's own bank/cash accounts (unrelated to sign-in). Formerly named
+// "Account" - renamed to avoid colliding with NextAuth's Account model above.
+model FinanceAccount {
   id             Int      @id @default(autoincrement())
   name           String
   type           String
@@ -75,7 +120,7 @@ model Transaction {
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   accountId Int
-  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  account   FinanceAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
   categoryId Int
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
@@ -112,4 +157,47 @@ model ChatMessage {
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, timestamp])
+}
+
+// Minimal error log for admin operational visibility (see app/app/admin).
+// Written via lib/error-log.ts from a few key spots (root error boundary,
+// AI parsing route, OTP send flow) - not a catch-all logging pipeline.
+model ErrorLog {
+  id        Int      @id @default(autoincrement())
+  timestamp DateTime @default(now())
+  // Route or context the error occurred in (e.g. "transactions/parse").
+  route     String
+  message   String
+  stack     String?
+
+  // Nullable: plenty of errors (e.g. a pre-login SMS failure) have no user
+  // to attach to. SetNull (not Cascade) so deleting a user doesn't erase
+  // otherwise-unrelated operational history.
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([timestamp])
+  @@index([userId])
+}
+
+// System-level default categories seeded onto every new user's own Category
+// rows at onboarding (see lib/data/onboarding.ts). Admin-managed (see
+// app/app/admin/categories) - this is the global counterpart to the
+// per-user Category model above, with the same hierarchy/uniqueness shape
+// minus the userId scope.
+model DefaultCategory {
+  id         Int      @id @default(autoincrement())
+  name       String
+  icon       String
+  color      String
+  type       String
+  isTransfer Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  parentId Int?
+  parent   DefaultCategory?  @relation("DefaultCategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children DefaultCategory[] @relation("DefaultCategoryHierarchy")
+
+  @@unique([name, type])
+  @@index([parentId])
 }

@@ -37,9 +37,31 @@ export function formatJalaaliDateShort(date: Date | string): string {
   return `${numberFormatter.format(jd)} ${PERSIAN_MONTHS[jm - 1]}`;
 }
 
+const PERSIAN_DIGITS = ["۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹"];
+
+/** Jalali date + zero-padded time, e.g. "۱۲ مرداد ۱۴۰۴ - ۱۴:۰۵" (admin error logs). */
+export function formatJalaaliDateTime(date: Date | string): string {
+  const d = typeof date === "string" ? new Date(date) : date;
+  const { jy, jm, jd } = toJalaali(d);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const time = `${hh}:${mm}`.replace(/\d/g, (digit) => PERSIAN_DIGITS[Number(digit)]);
+  return `${numberFormatter.format(jd)} ${PERSIAN_MONTHS[jm - 1]} ${numberFormatter.format(jy)} - ${time}`;
+}
+
 export function currentJalaaliMonthLabel(date: Date = new Date()): string {
   const { jy, jm } = toJalaali(date);
   return `${PERSIAN_MONTHS[jm - 1]} ${numberFormatter.format(jy)}`;
+}
+
+const MONTH_KEY_FORMAT = /^(\d{4})-(\d{2})$/;
+
+/** Persian month name for a Jalaali month key like "1404-05" (→ "مرداد"). */
+export function jalaaliMonthKeyToLabel(monthKey: string): string {
+  const match = MONTH_KEY_FORMAT.exec(monthKey);
+  if (!match) return monthKey;
+  const jm = Number(match[2]);
+  return PERSIAN_MONTHS[jm - 1] ?? monthKey;
 }
 
 /** Gregorian [start, end) bounds of the Jalaali month containing `date`. */

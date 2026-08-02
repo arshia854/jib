@@ -38,7 +38,7 @@ export function HeroSection() {
             <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row lg:justify-start">
               <Link
                 href="/login"
-                className="w-full rounded-2xl bg-primary px-8 py-3.5 text-center text-sm font-semibold text-white shadow-lg shadow-primary/25 transition-transform active:scale-95 sm:w-auto"
+                className="w-full rounded-2xl bg-primary-darker px-8 py-3.5 text-center text-sm font-semibold text-white shadow-lg shadow-primary/25 transition-transform active:scale-95 sm:w-auto"
               >
                 رایگان امتحان کن
               </Link>

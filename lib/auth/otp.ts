@@ -1,4 +1,5 @@
 import { SignJWT, jwtVerify } from "jose";
+import { isMelipayamakConfigured, sendOtpViaMelipayamak, type SendOtpResult } from "@/lib/sms/melipayamak";
 
 export const OTP_COOKIE = "jeeb_otp";
 export const OTP_TTL_SECONDS = 120;
@@ -44,10 +45,17 @@ export async function verifyOtpToken(token: string): Promise<OtpPayload | null> 
   }
 }
 
-/**
- * Mock SMS provider for local dev - logs the code instead of sending it.
- * Swap for Kavenegar/Ghasedak (via SMS_PROVIDER_API_KEY) when ready.
- */
-export function sendOtpSms(phone: string, code: string) {
-  console.log(`[mock SMS] OTP for ${phone}: ${code}`);
+// Falls back to logging the code to the console when Melipayamak isn't
+// configured yet (local dev, or before Melipayamak approval goes through).
+export async function sendOtpSms(phone: string, code: string): Promise<SendOtpResult> {
+  if (!isMelipayamakConfigured()) {
+    console.log(`[mock SMS] OTP for ${phone}: ${code}`);
+    return { success: true };
+  }
+
+  const result = await sendOtpViaMelipayamak(phone, code);
+  if (!result.success) {
+    console.error(`[melipayamak] failed to send OTP to ${phone}: ${result.error}`);
+  }
+  return result;
 }

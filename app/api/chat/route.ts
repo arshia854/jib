@@ -3,6 +3,7 @@ import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/prisma";
 import { streamChatCompletion, type ChatMessageInput } from "@/lib/openrouter";
 import { getFinancialContextSummary } from "@/lib/data/chat-context";
+import { checkRateLimit, rateLimitResponse, CHAT_USER_RULE } from "@/lib/rate-limit";
 
 function buildSystemPrompt(context: string): string {
   return `شما «جیب‌یار»، دستیار مالی هوشمند اپلیکیشن «جیب» هستید. به زبان فارسی، دوستانه، مختصر و کاربردی پاسخ بده. پاسخ‌هایت را بر اساس اطلاعات مالی واقعی زیر (استخراج‌شده از حساب کاربر) بنا کن و در صورت لزوم توصیه عملی برای مدیریت بهتر مالی بده. اگر داده کافی برای پاسخ دقیق نیست، صادقانه بگو و حدس نزن.
@@ -15,6 +16,11 @@ export async function POST(request: NextRequest) {
   const session = await getSession();
   if (!session) {
     return Response.json({ error: "ابتدا وارد شوید." }, { status: 401 });
+  }
+
+  const limit = checkRateLimit(`chat:user:${session.userId}`, CHAT_USER_RULE);
+  if (!limit.allowed) {
+    return rateLimitResponse(limit);
   }
 
   const body = await request.json().catch(() => null);

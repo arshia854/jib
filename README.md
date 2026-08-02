@@ -42,6 +42,29 @@ everything else works except the two AI-powered routes (add-transaction
 parsing and the chat assistant), which fail with a clear Persian error
 message pointing at the missing key.
 
+## Admin access
+
+The admin panel (`/app/admin` - stats, user management, error logs, default
+category CRUD) is gated by `User.role` (`"user"` | `"admin"`). There is no
+in-app way to grant admin - promoting the first admin (or any user) has to
+be done directly against the database:
+
+```bash
+npx prisma studio
+# open the User table, find the row by phone/email, set role = "admin"
+```
+
+Or as a one-off script/query, e.g.:
+
+```bash
+npx prisma db execute --stdin <<< "UPDATE \"User\" SET role = 'admin' WHERE id = <id>;"
+```
+
+A blocked user (`User.blockedAt` set, via the admin panel's user
+management page) is signed out on their next request - enforced in
+`lib/auth/session.ts`'s `getSession()`, the same place a deleted user's
+session is rejected.
+
 ## Project structure
 
 ```

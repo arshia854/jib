@@ -35,7 +35,7 @@ export function InstallPrompt() {
       {platform === "android" ? (
         <div className="pe-6">
           <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary-dark">
               <DownloadIcon className="h-4 w-4" />
             </div>
             <p className="text-sm font-semibold text-foreground">جیب رو نصب کن</p>
@@ -45,7 +45,7 @@ export function InstallPrompt() {
           </p>
           <button
             onClick={handleInstallClick}
-            className="mt-3 w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-white"
+            className="mt-3 w-full rounded-xl bg-primary-darker py-2.5 text-sm font-semibold text-white"
           >
             نصب اپلیکیشن
           </button>

@@ -17,7 +17,7 @@ describe("updateTransaction (merchant-mapping learning)", () => {
     });
     userId = user.id;
 
-    const account = await prisma.account.create({
+    const account = await prisma.financeAccount.create({
       data: { userId, name: "حساب تست", type: "cash" },
     });
     accountId = account.id;
@@ -37,7 +37,7 @@ describe("updateTransaction (merchant-mapping learning)", () => {
     await prisma.merchantMapping.deleteMany({ where: { userId } });
     await prisma.transaction.deleteMany({ where: { userId } });
     await prisma.category.deleteMany({ where: { userId } });
-    await prisma.account.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
     await prisma.user.delete({ where: { id: userId } });
     await prisma.$disconnect();
   });

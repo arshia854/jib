@@ -33,8 +33,8 @@ export function HowItWorksSection() {
           {STEPS.map((step, i) => (
             <Reveal key={step.title} delay={i * 120} className="relative text-center">
               <div className="relative mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-background ring-4 ring-surface">
-                <step.Icon className="h-7 w-7 text-primary" />
-                <span className="absolute -top-2 -end-2 flex h-6 w-6 items-center justify-center rounded-full bg-primary text-[11px] font-bold text-white">
+                <step.Icon className="h-7 w-7 text-primary-dark" />
+                <span className="absolute -top-2 -end-2 flex h-6 w-6 items-center justify-center rounded-full bg-primary-darker text-[11px] font-bold text-white">
                   {i + 1}
                 </span>
               </div>

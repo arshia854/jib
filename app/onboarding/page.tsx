@@ -70,7 +70,7 @@ export default function OnboardingPage() {
           <button
             type="submit"
             disabled={loading || !name.trim() || !age}
-            className="mt-2 flex items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-white disabled:opacity-50"
+            className="mt-2 flex items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
           >
             {loading ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : <CheckIcon className="h-4 w-4" />}
             بزن بریم

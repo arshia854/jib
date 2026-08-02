@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { HomeIcon, ListIcon, ChatIcon, TagIcon } from "@/components/icons";
+import { HomeIcon, ListIcon, ChartIcon, ChatIcon, SettingsIcon } from "@/components/icons";
 
 const NAV_ITEMS = [
   { href: "/app", label: "خانه", Icon: HomeIcon },
   { href: "/app/transactions", label: "تراکنش‌ها", Icon: ListIcon },
+  { href: "/app/reports", label: "گزارش‌ها", Icon: ChartIcon },
   { href: "/app/chat", label: "دستیار", Icon: ChatIcon },
-  { href: "/app/categories", label: "دسته‌ها", Icon: TagIcon },
+  { href: "/app/settings", label: "تنظیمات", Icon: SettingsIcon },
 ] as const;
 
 export function BottomNav() {
@@ -24,7 +25,7 @@ export function BottomNav() {
               <Link
                 href={href}
                 className={`flex flex-col items-center gap-1 py-2.5 text-xs ${
-                  active ? "text-primary" : "text-muted"
+                  active ? "text-primary-darker" : "text-muted"
                 }`}
               >
                 <Icon className="h-6 w-6" strokeWidth={active ? 2.2 : 1.8} />
