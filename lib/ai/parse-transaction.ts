@@ -1,4 +1,4 @@
-import { chatCompletion } from "@/lib/openrouter";
+import { chatCompletion } from "@/lib/nvidia-ai";
 import type { CategoryType } from "@/lib/categories";
 import { findMerchant, type MerchantLookupResult, type MerchantMatchSource } from "@/lib/merchant-lookup";
 import { extractAmount } from "@/lib/extract-amount";

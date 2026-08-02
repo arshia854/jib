@@ -1,15 +1,25 @@
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-
 function getApiKey(): string {
-  const key = process.env.OPENROUTER_API_KEY;
+  const key = process.env.NVIDIA_API_KEY;
   if (!key) {
-    throw new Error("OPENROUTER_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("NVIDIA_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return key;
 }
 
+function getBaseUrl(): string {
+  const url = process.env.NVIDIA_BASE_URL;
+  if (!url) {
+    throw new Error("NVIDIA_BASE_URL تنظیم نشده است. آن را در فایل .env قرار دهید.");
+  }
+  return url.replace(/\/+$/, "");
+}
+
 function getModel(): string {
-  return process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
+  const model = process.env.NVIDIA_MODEL;
+  if (!model) {
+    throw new Error("NVIDIA_MODEL تنظیم نشده است. آن را در فایل .env قرار دهید.");
+  }
+  return model;
 }
 
 export type ChatRole = "system" | "user" | "assistant";
@@ -19,21 +29,19 @@ export interface ChatMessageInput {
   content: string;
 }
 
-async function callOpenRouter(body: Record<string, unknown>): Promise<Response> {
-  const response = await fetch(OPENROUTER_URL, {
+async function callNvidiaAI(body: Record<string, unknown>): Promise<Response> {
+  const response = await fetch(`${getBaseUrl()}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${getApiKey()}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://jeeb.app",
-      "X-Title": "Jeeb",
     },
     body: JSON.stringify({ model: getModel(), ...body }),
   });
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
-    throw new Error(`درخواست به OpenRouter ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
+    throw new Error(`درخواست به NVIDIA NIM ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
   }
 
   return response;
@@ -43,7 +51,7 @@ export async function chatCompletion(
   messages: ChatMessageInput[],
   options?: { json?: boolean }
 ): Promise<string> {
-  const response = await callOpenRouter({
+  const response = await callNvidiaAI({
     messages,
     ...(options?.json ? { response_format: { type: "json_object" } } : {}),
   });
@@ -51,7 +59,7 @@ export async function chatCompletion(
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string") {
-    throw new Error("پاسخ نامعتبر از OpenRouter دریافت شد.");
+    throw new Error("پاسخ نامعتبر از NVIDIA NIM دریافت شد.");
   }
   return content;
 }
@@ -60,9 +68,9 @@ export async function chatCompletion(
 export async function streamChatCompletion(
   messages: ChatMessageInput[]
 ): Promise<ReadableStream<Uint8Array>> {
-  const response = await callOpenRouter({ messages, stream: true });
+  const response = await callNvidiaAI({ messages, stream: true });
   if (!response.body) {
-    throw new Error("پاسخ جریانی از OpenRouter دریافت نشد.");
+    throw new Error("پاسخ جریانی از NVIDIA NIM دریافت نشد.");
   }
 
   const reader = response.body.getReader();
