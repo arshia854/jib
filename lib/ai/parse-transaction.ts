@@ -1,4 +1,4 @@
-import { chatCompletion } from "@/lib/openrouter";
+import { chatCompletion } from "@/lib/arvan-ai";
 import type { CategoryType } from "@/lib/categories";
 import { findMerchant, type MerchantLookupResult, type MerchantMatchSource } from "@/lib/merchant-lookup";
 import { extractAmount } from "@/lib/extract-amount";
@@ -251,7 +251,7 @@ export async function parseTransactionWithAI(
   // Fully deterministic path: a merchant match gives us category (and its
   // own type - no need to guess income/expense), and if amount/date also
   // extract confidently from the raw text, there's nothing left for the
-  // AI to add. Skip OpenRouter entirely.
+  // AI to add. Skip the LLM call entirely.
   if (merchantMatch.source !== "none" && merchantMatch.type) {
     const overrideCategory = resolveCategoryOverride(merchantMatch, merchantMatch.type, categories);
     const amount = extractAmount(rawInput);

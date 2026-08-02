@@ -1,15 +1,21 @@
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-
 function getApiKey(): string {
-  const key = process.env.OPENROUTER_API_KEY;
+  const key = process.env.ARVAN_AI_API_KEY;
   if (!key) {
-    throw new Error("OPENROUTER_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("ARVAN_AI_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return key;
 }
 
+function getBaseUrl(): string {
+  const url = process.env.ARVAN_AI_BASE_URL;
+  if (!url) {
+    throw new Error("ARVAN_AI_BASE_URL تنظیم نشده است. آن را در فایل .env قرار دهید.");
+  }
+  return url.replace(/\/+$/, "");
+}
+
 function getModel(): string {
-  return process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
+  return process.env.ARVAN_AI_MODEL || "DeepSeek-V4-Flash";
 }
 
 export type ChatRole = "system" | "user" | "assistant";
@@ -19,21 +25,19 @@ export interface ChatMessageInput {
   content: string;
 }
 
-async function callOpenRouter(body: Record<string, unknown>): Promise<Response> {
-  const response = await fetch(OPENROUTER_URL, {
+async function callArvanAI(body: Record<string, unknown>): Promise<Response> {
+  const response = await fetch(`${getBaseUrl()}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${getApiKey()}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://jeeb.app",
-      "X-Title": "Jeeb",
     },
     body: JSON.stringify({ model: getModel(), ...body }),
   });
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
-    throw new Error(`درخواست به OpenRouter ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
+    throw new Error(`درخواست به ArvanCloud AI ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
   }
 
   return response;
@@ -43,7 +47,7 @@ export async function chatCompletion(
   messages: ChatMessageInput[],
   options?: { json?: boolean }
 ): Promise<string> {
-  const response = await callOpenRouter({
+  const response = await callArvanAI({
     messages,
     ...(options?.json ? { response_format: { type: "json_object" } } : {}),
   });
@@ -51,7 +55,7 @@ export async function chatCompletion(
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string") {
-    throw new Error("پاسخ نامعتبر از OpenRouter دریافت شد.");
+    throw new Error("پاسخ نامعتبر از ArvanCloud AI دریافت شد.");
   }
   return content;
 }
@@ -60,9 +64,9 @@ export async function chatCompletion(
 export async function streamChatCompletion(
   messages: ChatMessageInput[]
 ): Promise<ReadableStream<Uint8Array>> {
-  const response = await callOpenRouter({ messages, stream: true });
+  const response = await callArvanAI({ messages, stream: true });
   if (!response.body) {
-    throw new Error("پاسخ جریانی از OpenRouter دریافت نشد.");
+    throw new Error("پاسخ جریانی از ArvanCloud AI دریافت نشد.");
   }
 
   const reader = response.body.getReader();

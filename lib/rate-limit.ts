@@ -92,7 +92,7 @@ export const OTP_REQUEST_IP_RULE: RateLimitRule = { limit: 15, windowSeconds: 60
 // bounds total verify volume per phone across multiple requested codes.
 export const OTP_VERIFY_PHONE_RULE: RateLimitRule = { limit: 8, windowSeconds: 15 * 60 };
 
-// LLM-calling endpoints cost real money per call (OpenRouter). These caps
+// LLM-calling endpoints cost real money per call (ArvanCloud AI). These caps
 // are generous for normal manual use but stop a runaway/compromised client.
 //
 // TRANSACTION_PARSE_USER_RULE covers the add-transaction textarea's
