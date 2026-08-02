@@ -26,7 +26,7 @@ async function callOpenRouter(body: Record<string, unknown>): Promise<Response> 
       Authorization: `Bearer ${getApiKey()}`,
       "Content-Type": "application/json",
       "HTTP-Referer": "https://jeeb.app",
-      "X-Title": "جیب",
+      "X-Title": "Jeeb",
     },
     body: JSON.stringify({ model: getModel(), ...body }),
   });
