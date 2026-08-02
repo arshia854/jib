@@ -1,9 +1,17 @@
 import { PrismaClient } from "@/generated/prisma/client";
 import { PrismaLibSql } from "@prisma/adapter-libsql";
 
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} is not set`);
+  }
+  return value;
+}
+
 const adapter = new PrismaLibSql({
-  url: process.env.TURSO_DATABASE_URL,
-  authToken: process.env.TURSO_AUTH_TOKEN,
+  url: requireEnv("TURSO_DATABASE_URL"),
+  authToken: requireEnv("TURSO_AUTH_TOKEN"),
 });
 
 const globalForPrisma = globalThis as unknown as {
