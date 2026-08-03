@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { extractAmount } from "@/lib/extract-amount";
 
 describe("extractAmount", () => {
-  it("resolves a bare number as toman (no unit)", () => {
+  it("resolves a تومن-suffixed number at face value (explicit currency, unaffected by the bare-number rule)", () => {
     expect(extractAmount("۵۰ تومن")).toBe(50);
   });
 
@@ -26,7 +26,7 @@ describe("extractAmount", () => {
     expect(extractAmount("۲ تا ۵۰ تومنی")).toBeNull();
   });
 
-  it("bails on decimals (punctuation-stripped into two adjacent numbers)", () => {
+  it("bails on a decimal with a unit attached (punctuation-stripped into two adjacent numbers, not a bare X.Y pair)", () => {
     expect(extractAmount("۱۲.۵ تومن")).toBeNull();
   });
 
@@ -54,5 +54,49 @@ describe("extractAmount", () => {
 
   it("bails when Persian and Latin digits form two separate numbers", () => {
     expect(extractAmount("قیمت 20 و ۵۰ تومن")).toBeNull();
+  });
+
+  describe("bare numbers with no unit at all (new default: x1000)", () => {
+    it("multiplies a bare 1-999 number by 1000", () => {
+      expect(extractAmount("۸۰")).toBe(80000);
+    });
+
+    it("multiplies a bare number even with unrelated surrounding words, as long as none is a recognized unit", () => {
+      expect(extractAmount("ناهار ۸۰ خوردم")).toBe(80000);
+    });
+
+    it("leaves a bare number unchanged once it's 1000 or more", () => {
+      expect(extractAmount("۱۵۰۰")).toBe(1500);
+    });
+
+    it("boundary: 1 -> 1000", () => {
+      expect(extractAmount("۱")).toBe(1000);
+    });
+
+    it("boundary: 999 -> 999000", () => {
+      expect(extractAmount("۹۹۹")).toBe(999000);
+    });
+
+    it("boundary: 1000 -> unchanged", () => {
+      expect(extractAmount("۱۰۰۰")).toBe(1000);
+    });
+  });
+
+  describe('"X و Y" / "X.Y" combined pattern', () => {
+    it('resolves "X و Y" as X million + Y thousand', () => {
+      expect(extractAmount("۱ و ۱۰۰")).toBe(1_100_000);
+    });
+
+    it('resolves "X.Y" the same way', () => {
+      expect(extractAmount("۱.۱۰۰")).toBe(1_100_000);
+    });
+
+    it("bails when either part of the pair is out of the 1-999 range", () => {
+      expect(extractAmount("۱۵۰۰ و ۱۰۰")).toBeNull();
+    });
+
+    it("bails when the pair isn't the entire text", () => {
+      expect(extractAmount("قیمت ۱ و ۱۰۰ تومن")).toBeNull();
+    });
   });
 });

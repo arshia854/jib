@@ -1,25 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckIcon, XIcon, SpinnerIcon, ChatIcon } from "@/components/icons";
 import { formatToman, formatNumber, formatJalaaliDate } from "@/lib/format";
 import { toLatinDigits } from "@/lib/normalize";
-import type { ParsedTransaction } from "@/lib/ai/parse-transaction";
+import type { ParsedTransaction, SuggestedCategoryWithIcon } from "@/lib/ai/parse-transaction";
 import { getBankLabel } from "@/lib/bank/labels";
-import { getAccountTypeIcon } from "@/lib/accounts";
+import { getAccountTypeIcon, findMatchingAccount, type AccountOption } from "@/lib/accounts";
+import type { CategoryType } from "@/lib/categories";
 
 interface CategoryOption {
   id: number;
   name: string;
   icon: string;
   color: string;
-  type: string;
-}
-
-interface AccountOption {
-  id: number;
-  name: string;
   type: string;
 }
 
@@ -33,9 +28,23 @@ type Stage = "input" | "preview" | "saving";
 const PARSE_RATE_LIMIT_MESSAGE =
   "پیش‌نمایش خودکار به‌دلیل تعداد زیاد درخواست موقتاً متوقف شد؛ کمی صبر کن، خودش دوباره فعال می‌شود.";
 
+// Shared by both the inline live-preview card and the full preview stage -
+// bank-sms transactions can be submitted directly from either one, so both
+// need the same "no matching account" nudge, not just the full-preview copy.
+function getMissingBankAccountLabel(
+  transaction: Pick<ParsedTransaction, "source" | "bank"> | null,
+  accounts: AccountOption[]
+): string | null {
+  if (!transaction || transaction.source !== "bank-sms" || !transaction.bank || transaction.bank === "unknown") {
+    return null;
+  }
+  const label = getBankLabel(transaction.bank);
+  return findMatchingAccount(accounts, label) ? null : label;
+}
+
 export function AddTransactionForm({
-  categories,
-  accounts,
+  categories: initialCategories,
+  accounts: initialAccounts,
   defaultAccountId,
   editTransaction,
 }: {
@@ -49,6 +58,8 @@ export function AddTransactionForm({
   const [text, setText] = useState("");
   const [stage, setStage] = useState<Stage>(editTransaction ? "preview" : "input");
   const [parsed, setParsed] = useState<ParsedTransaction | null>(editTransaction ?? null);
+  const [accounts, setAccounts] = useState<AccountOption[]>(initialAccounts);
+  const [categories, setCategories] = useState<CategoryOption[]>(initialCategories);
   const [accountId, setAccountId] = useState<number>(editTransaction?.accountId ?? defaultAccountId);
   const [error, setError] = useState<string | null>(null);
   const [livePreview, setLivePreview] = useState<ParsedTransaction | null>(null);
@@ -56,71 +67,64 @@ export function AddTransactionForm({
   const [isParsing, setIsParsing] = useState(false);
   const [parseLimitedUntil, setParseLimitedUntil] = useState<number | null>(null);
   const [liveCategoryExpanded, setLiveCategoryExpanded] = useState(false);
+  const [isCreatingBankAccount, setIsCreatingBankAccount] = useState(false);
+  const [createAccountError, setCreateAccountError] = useState<string | null>(null);
+  const [isCreatingCategory, setIsCreatingCategory] = useState(false);
+  const [createCategoryError, setCreateCategoryError] = useState<string | null>(null);
 
-  // Auto-parses in the background while the user is still typing in the
-  // "input" stage, so a lightweight preview can appear without a button
-  // press. Debounced so we don't hit the API on every keystroke, and
-  // aborted on the next keystroke/unmount so a slow stale response can't
-  // overwrite a newer one.
-  //
-  // While parseLimitedUntil is in the future (server returned 429), this
-  // skips scheduling entirely instead of retrying on every keystroke - the
-  // companion effect below clears it once the window resets, which
-  // re-triggers this effect and resumes auto-parsing on its own.
+  const parseAbortControllerRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
-    if (stage !== "input") return;
+    return () => {
+      parseAbortControllerRef.current?.abort();
+    };
+  }, []);
+
+  async function handleProcess() {
     const trimmed = text.trim();
     if (trimmed.length < 4) return;
     if (parseLimitedUntil && Date.now() < parseLimitedUntil) return;
 
+    parseAbortControllerRef.current?.abort();
     const controller = new AbortController();
-    const timer = setTimeout(async () => {
-      setIsParsing(true);
-      try {
-        const res = await fetch("/api/transactions/parse", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: trimmed }),
-          signal: controller.signal,
-        });
+    parseAbortControllerRef.current = controller;
 
-        if (res.status === 429) {
-          const data = await res.json().catch(() => ({}));
-          const retryAfterSeconds =
-            typeof data.retryAfterSeconds === "number" && data.retryAfterSeconds > 0 ? data.retryAfterSeconds : 60;
-          setParseLimitedUntil(Date.now() + retryAfterSeconds * 1000);
-          setLiveError(PARSE_RATE_LIMIT_MESSAGE);
-          setLivePreview(null);
-          return;
-        }
+    setIsParsing(true);
+    try {
+      const res = await fetch("/api/transactions/parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: trimmed }),
+        signal: controller.signal,
+      });
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "خطا در پردازش متن.");
-        setLivePreview(data.parsed);
-        setLiveError(null);
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        setLiveError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+      if (res.status === 429) {
+        const data = await res.json().catch(() => ({}));
+        const retryAfterSeconds =
+          typeof data.retryAfterSeconds === "number" && data.retryAfterSeconds > 0 ? data.retryAfterSeconds : 60;
+        setParseLimitedUntil(Date.now() + retryAfterSeconds * 1000);
+        setLiveError(PARSE_RATE_LIMIT_MESSAGE);
         setLivePreview(null);
-      } finally {
+        return;
+      }
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "خطا در پردازش متن.");
+      setLivePreview(data.parsed);
+      setLiveError(null);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setLiveError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+      setLivePreview(null);
+    } finally {
+      // A re-click aborts the in-flight request and fires a new one; only let the
+      // still-current controller's cleanup clear the spinner, otherwise the
+      // superseded request's finally can hide it while the new one is still running.
+      if (parseAbortControllerRef.current === controller) {
         setIsParsing(false);
       }
-    }, 700);
-
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, [text, stage, parseLimitedUntil]);
-
-  // Resumes auto-parsing once the rate-limit window reported by the server
-  // has elapsed, without requiring another keystroke.
-  useEffect(() => {
-    if (!parseLimitedUntil) return;
-    const ms = Math.max(parseLimitedUntil - Date.now(), 0);
-    const timer = setTimeout(() => setParseLimitedUntil(null), ms);
-    return () => clearTimeout(timer);
-  }, [parseLimitedUntil]);
+    }
+  }
 
   // Shared by the full preview stage's confirm button and the inline
   // live-preview card's direct submit button - both promote a
@@ -172,20 +176,80 @@ export function AddTransactionForm({
   }
 
   function handleDismissLivePreview() {
+    parseAbortControllerRef.current?.abort();
     setText("");
     setLivePreview(null);
     setLiveError(null);
     setLiveCategoryExpanded(false);
+    setCreateAccountError(null);
   }
 
   function handleReset() {
     setParsed(null);
     setError(null);
+    setCreateAccountError(null);
+    setCreateCategoryError(null);
     setStage("input");
+  }
+
+  async function handleCreateBankAccount(name: string) {
+    setIsCreatingBankAccount(true);
+    setCreateAccountError(null);
+    try {
+      const res = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, type: "bank", initialBalance: 0 }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "خطا در ساخت حساب.");
+      setAccounts((prev) => [...prev, data.account]);
+      setAccountId(data.account.id);
+    } catch (err) {
+      setCreateAccountError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+    } finally {
+      setIsCreatingBankAccount(false);
+    }
+  }
+
+  async function handleCreateCategory(suggestion: SuggestedCategoryWithIcon, type: CategoryType) {
+    setIsCreatingCategory(true);
+    setCreateCategoryError(null);
+    try {
+      const res = await fetch("/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: suggestion.name,
+          parentName: suggestion.parentName,
+          icon: suggestion.icon,
+          type,
+          source: "ai-suggestion",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "خطا در ساخت دسته‌بندی.");
+      // 200 (resolvedExisting) can return a category already in local state - dedupe on id
+      // so the <select> below never renders two <option>s with the same key/value.
+      setCategories((prev) => (prev.some((c) => c.id === data.category.id) ? prev : [...prev, data.category]));
+      // Functional update (unlike the direct-closure `setParsed({ ...parsed, ... })` calls
+      // elsewhere in this file) because this fires after an await - `parsed` may have moved
+      // on (e.g. the user edited amount/description while the request was in flight).
+      setParsed((prev) => (prev ? { ...prev, category: data.category.name, suggestedCategory: undefined } : prev));
+    } catch (err) {
+      setCreateCategoryError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+    } finally {
+      setIsCreatingCategory(false);
+    }
   }
 
   const availableCategories = categories.filter((c) => c.type === parsed?.type);
   const showLiveResult = text.trim().length >= 4;
+  // Exact-match against the label handleCreateBankAccount creates the account with,
+  // so this naturally stops matching (and the prompt disappears) once that account exists.
+  const missingBankAccountLabel = getMissingBankAccountLabel(parsed, accounts);
+  const liveMissingBankAccountLabel = getMissingBankAccountLabel(livePreview, accounts);
+  const suggestedCategory = parsed?.suggestedCategory ?? null;
 
   return (
     <div className="flex h-full flex-col px-4 pb-6 pt-6">
@@ -205,6 +269,14 @@ export function AddTransactionForm({
             rows={4}
             className="w-full resize-none rounded-2xl border border-border bg-surface p-4 text-sm text-foreground outline-none focus:border-accent"
           />
+          <button
+            type="button"
+            onClick={handleProcess}
+            disabled={!showLiveResult}
+            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
+          >
+            پردازش
+          </button>
           {showLiveResult && isParsing && !livePreview && !liveError && (
             <p className="flex items-center gap-1.5 text-xs text-muted">
               <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
@@ -317,13 +389,32 @@ export function AddTransactionForm({
                     </div>
                   )}
 
+                  {liveMissingBankAccountLabel && (
+                    <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-accent/10 px-3 py-2">
+                      <p className="text-xs text-accent">
+                        حساب {liveMissingBankAccountLabel} پیدا نشد — می‌خواهید بسازید؟
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => handleCreateBankAccount(liveMissingBankAccountLabel)}
+                        disabled={isCreatingBankAccount}
+                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                      >
+                        {isCreatingBankAccount && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
+                        ساخت حساب
+                      </button>
+                    </div>
+                  )}
+                  {createAccountError && <p className="mt-1.5 text-xs text-warning">{createAccountError}</p>}
+
                   {/* Saving/error state surfaces via the full preview stage below - saveTransaction()
                       moves `stage` off "input" in the same batch as this click, so this card
                       unmounts before any loading state of its own would be visible. */}
                   <button
                     type="button"
                     onClick={handleSubmitLivePreview}
-                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white"
+                    disabled={isCreatingBankAccount}
+                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
                   >
                     ثبت تراکنش
                   </button>
@@ -396,10 +487,27 @@ export function AddTransactionForm({
               {parsed.needsConfirmation && (
                 <p className="mt-1.5 text-xs text-warning">
                   {parsed.source === "bank-sms"
-                    ? "دسته‌بندی از پیامک بانکی قابل تشخیص نبود، لطفاً انتخاب کنید"
+                    ? "چی خریدی؟ کمکم کن درست دسته‌بندی‌ش کنم 🙂"
                     : "دسته‌بندی پیشنهادی است، لطفاً بررسی کنید"}
                 </p>
               )}
+              {suggestedCategory && (
+                <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-accent/10 px-3 py-2">
+                  <p className="text-xs text-accent">
+                    دسته‌بندی «{suggestedCategory.icon} {suggestedCategory.name}» براش پیدا نشد — می‌خوای بسازمش؟
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => handleCreateCategory(suggestedCategory, parsed.type)}
+                    disabled={isCreatingCategory}
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                  >
+                    {isCreatingCategory && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
+                    بساز
+                  </button>
+                </div>
+              )}
+              {createCategoryError && <p className="mt-1.5 text-xs text-warning">{createCategoryError}</p>}
 
               <label className="mt-4 block text-xs text-muted">حساب</label>
               <select
@@ -413,6 +521,21 @@ export function AddTransactionForm({
                   </option>
                 ))}
               </select>
+              {missingBankAccountLabel && (
+                <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-accent/10 px-3 py-2">
+                  <p className="text-xs text-accent">حساب {missingBankAccountLabel} پیدا نشد — می‌خواهید بسازید؟</p>
+                  <button
+                    type="button"
+                    onClick={() => handleCreateBankAccount(missingBankAccountLabel)}
+                    disabled={isCreatingBankAccount}
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                  >
+                    {isCreatingBankAccount && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
+                    ساخت حساب
+                  </button>
+                </div>
+              )}
+              {createAccountError && <p className="mt-1.5 text-xs text-warning">{createAccountError}</p>}
 
               <label className="mt-4 block text-xs text-muted">توضیح</label>
               <input
@@ -457,7 +580,7 @@ export function AddTransactionForm({
               </button>
               <button
                 onClick={handleConfirm}
-                disabled={stage === "saving"}
+                disabled={stage === "saving" || isCreatingBankAccount || isCreatingCategory}
                 className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
               >
                 {stage === "saving" ? (

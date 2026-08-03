@@ -360,4 +360,169 @@ describe("parseTransactionWithAI", () => {
       expect(result.needsConfirmation).toBe(true); // ...but never auto-assigned
     });
   });
+
+  describe("newCategorySuggestion (last-resort new-category suggestion)", () => {
+    // "دخانیات" ("tobacco") deliberately has no existing category/subcategory
+    // in CATEGORIES_FULL, mirroring the last-resort scenario the قوانین
+    // section describes - category still safely falls back to "سایر" while
+    // newCategorySuggestion carries the additive proposal.
+    it("surfaces a well-formed suggestion as suggestedCategory", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 80,
+          type: "expense",
+          description: "خرید سیگار",
+          date: "2026-07-30",
+          category: "سایر",
+          subcategory: null,
+          confidence: 0.3,
+          reason: "هیچ دسته‌ی موجودی برای دخانیات مناسب نیست",
+          newCategorySuggestion: {
+            name: "دخانیات",
+            parentName: null,
+            reason: "یک مفهوم هزینه‌ی تکرارشونده است که دسته‌ی مجزایی ندارد",
+          },
+        })
+      );
+
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "سیگار خریدم ۸۰ تومن", CATEGORIES_FULL);
+
+      expect(result.category).toBe("سایر");
+      expect(result.suggestedCategory).toEqual({
+        name: "دخانیات",
+        parentName: null,
+        reason: "یک مفهوم هزینه‌ی تکرارشونده است که دسته‌ی مجزایی ندارد",
+        icon: "🚬",
+      });
+    });
+
+    it("resolves via findSimilarCategory instead when the suggestion actually matches an existing category (here, via alias), overwriting category/subcategory and flagging needsConfirmation rather than attaching suggestedCategory", async () => {
+      // "دخانیات" already exists for this user (unlike CATEGORIES_FULL above)
+      // - the AI still proposed a "new" category, but under an alias name
+      // ("سیگار") of one that's already there, so findSimilarCategory must
+      // catch it and win over the AI's own "سایر" guess.
+      const categoriesWithDokhaniyat: CategoryOption[] = [...CATEGORIES_FULL, { name: "دخانیات", type: "expense" }];
+
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 80,
+          type: "expense",
+          description: "خرید سیگار",
+          date: "2026-07-30",
+          category: "سایر",
+          subcategory: null,
+          confidence: 0.3,
+          reason: "هیچ دسته‌ی موجودی برای دخانیات مناسب نیست",
+          newCategorySuggestion: {
+            name: "سیگار",
+            parentName: null,
+            reason: "یک مفهوم هزینه‌ی تکرارشونده است",
+          },
+        })
+      );
+
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "سیگار خریدم ۸۰ تومن", categoriesWithDokhaniyat);
+
+      expect(result.suggestedCategory).toBeUndefined();
+      expect(result.category).toBe("دخانیات");
+      expect(result.needsConfirmation).toBe(true);
+    });
+
+    it("drops a suggestion missing a required field, without throwing", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 80,
+          type: "expense",
+          description: "خرید سیگار",
+          date: "2026-07-30",
+          category: "سایر",
+          subcategory: null,
+          confidence: 0.3,
+          reason: "هیچ دسته‌ی موجودی برای دخانیات مناسب نیست",
+          newCategorySuggestion: {
+            name: "دخانیات",
+            // parentName omitted entirely
+            reason: "یک مفهوم هزینه‌ی تکرارشونده است",
+          },
+        })
+      );
+
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "سیگار خریدم ۸۰ تومن", CATEGORIES_FULL);
+
+      expect(result.suggestedCategory).toBeUndefined();
+      expect(result.category).toBe("سایر");
+    });
+
+    it("drops a suggestion carrying an extra icon field, without throwing (icon isn't part of this schema)", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 80,
+          type: "expense",
+          description: "خرید سیگار",
+          date: "2026-07-30",
+          category: "سایر",
+          subcategory: null,
+          confidence: 0.3,
+          reason: "هیچ دسته‌ی موجودی برای دخانیات مناسب نیست",
+          newCategorySuggestion: {
+            name: "دخانیات",
+            parentName: null,
+            reason: "یک مفهوم هزینه‌ی تکرارشونده است",
+            icon: "🚬",
+          },
+        })
+      );
+
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "سیگار خریدم ۸۰ تومن", CATEGORIES_FULL);
+
+      expect(result.suggestedCategory).toBeUndefined();
+    });
+
+    it("leaves suggestedCategory as undefined, not null, when the AI omits newCategorySuggestion entirely", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 350,
+          type: "expense",
+          description: "قبض برق",
+          date: "2026-07-30",
+          category: "قبوض و اشتراک",
+          subcategory: null,
+          confidence: 0.95,
+          reason: "عبارت 'قبض برق' مستقیماً به دسته قبوض و اشتراک اشاره دارد",
+        })
+      );
+
+      const result = await parseTransactionWithAI(
+        NO_MAPPING_USER_ID,
+        "قبض برق رو پرداخت کردم ۳۵۰ تومن",
+        CATEGORIES_FULL
+      );
+
+      expect(result.suggestedCategory).toBeUndefined();
+    });
+
+    it("drops an explicit null newCategorySuggestion the same way as an omitted one", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 350,
+          type: "expense",
+          description: "قبض برق",
+          date: "2026-07-30",
+          category: "قبوض و اشتراک",
+          subcategory: null,
+          confidence: 0.95,
+          reason: "عبارت 'قبض برق' مستقیماً به دسته قبوض و اشتراک اشاره دارد",
+          newCategorySuggestion: null,
+        })
+      );
+
+      const result = await parseTransactionWithAI(
+        NO_MAPPING_USER_ID,
+        "قبض برق رو پرداخت کردم ۳۵۰ تومن",
+        CATEGORIES_FULL
+      );
+
+      expect(result.suggestedCategory).toBeUndefined();
+    });
+  });
 });

@@ -24,9 +24,24 @@ export async function listCategoriesWithUsage(userId: number, type?: CategoryTyp
 
 export async function createCategory(
   userId: number,
-  data: { name: string; icon: string; color: string; type: CategoryType }
+  data: { name: string; icon: string; color: string; type: CategoryType; parentId?: number | null }
 ) {
   return prisma.category.create({ data: { ...data, userId } });
+}
+
+// Ordered oldest-first so callers computing a rolling-window retry time
+// (see MAX_CATEGORIES_PER_24H in app/api/categories/route.ts) can read the
+// window's expiry straight off the first element.
+export async function listCategoriesCreatedSince(userId: number, since: Date) {
+  return prisma.category.findMany({
+    where: { userId, createdAt: { gte: since } },
+    orderBy: { createdAt: "asc" },
+    select: { createdAt: true },
+  });
+}
+
+export async function findCategoryByNameAndType(userId: number, name: string, type: CategoryType) {
+  return prisma.category.findFirst({ where: { userId, name, type } });
 }
 
 export class CategoryInUseError extends Error {}
