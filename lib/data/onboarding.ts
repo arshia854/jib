@@ -27,6 +27,7 @@ export async function seedDefaultCategoriesForUser(userId: number) {
           color: main.color,
           type: main.type,
           isTransfer: main.isTransfer,
+          isEssential: main.isEssential,
           userId,
         },
       });
@@ -39,6 +40,7 @@ export async function seedDefaultCategoriesForUser(userId: number) {
             color: sub.color,
             type: sub.type,
             isTransfer: sub.isTransfer,
+            isEssential: sub.isEssential,
             parentId: parent.id,
             userId,
           })),

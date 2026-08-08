@@ -12,13 +12,16 @@ const WARNING_INCREASE_THRESHOLD = 50;
 const SAVINGS_DECREASE_THRESHOLD = -50;
 const MAX_HIGHLIGHTS = 3;
 
+/** Default periodLabel — matches the previous, hardcoded "ماه قبل" wording so callers that don't pass one see no change. */
+const DEFAULT_PERIOD_LABEL = "نسبت به ماه قبل";
+
 interface Candidate {
   highlight: Highlight;
   isOverall: boolean;
   magnitude: number;
 }
 
-function overallSavingsCandidate(result: MonthlyComparisonResult): Candidate | null {
+function overallSavingsCandidate(result: MonthlyComparisonResult, periodLabel: string): Candidate | null {
   if (result.totalPercentChange === null || result.totalPercentChange >= 0) return null;
 
   const percent = Math.abs(result.totalPercentChange);
@@ -27,7 +30,7 @@ function overallSavingsCandidate(result: MonthlyComparisonResult): Candidate | n
     magnitude: percent,
     highlight: {
       type: "positive",
-      message: `عالی! هزینه‌های شما ${percent}٪ نسبت به ماه قبل کاهش یافته است.`,
+      message: `عالی! هزینه‌های شما ${percent}٪ ${periodLabel} کاهش یافته است.`,
     },
   };
 }
@@ -47,7 +50,7 @@ function largestBy(
   return best;
 }
 
-function categoryWarningCandidate(categories: CategoryComparison[]): Candidate | null {
+function categoryWarningCandidate(categories: CategoryComparison[], periodLabel: string): Candidate | null {
   const worst = largestBy(
     categories,
     (percentChange) => percentChange >= WARNING_INCREASE_THRESHOLD,
@@ -62,12 +65,12 @@ function categoryWarningCandidate(categories: CategoryComparison[]): Candidate |
     highlight: {
       type: "warning",
       category: worst.category,
-      message: `هزینه «${worst.category}» نسبت به ماه قبل ${percent}٪ افزایش یافته — کمی مراقب باشید.`,
+      message: `هزینه «${worst.category}» ${periodLabel} ${percent}٪ افزایش یافته — کمی مراقب باشید.`,
     },
   };
 }
 
-function categorySavingsCandidate(categories: CategoryComparison[]): Candidate | null {
+function categorySavingsCandidate(categories: CategoryComparison[], periodLabel: string): Candidate | null {
   const best = largestBy(
     categories,
     (percentChange) => percentChange <= SAVINGS_DECREASE_THRESHOLD,
@@ -82,16 +85,16 @@ function categorySavingsCandidate(categories: CategoryComparison[]): Candidate |
     highlight: {
       type: "positive",
       category: best.category,
-      message: `صرفه‌جویی خوب در «${best.category}»؛ ${percent}٪ کمتر از ماه قبل خرج کرده‌اید.`,
+      message: `صرفه‌جویی خوب در «${best.category}»؛ ${periodLabel} ${percent}٪ کمتر خرج کرده‌اید.`,
     },
   };
 }
 
-export function generateHighlights(result: MonthlyComparisonResult): Highlight[] {
+export function generateHighlights(result: MonthlyComparisonResult, periodLabel: string = DEFAULT_PERIOD_LABEL): Highlight[] {
   const candidates = [
-    overallSavingsCandidate(result),
-    categoryWarningCandidate(result.categories),
-    categorySavingsCandidate(result.categories),
+    overallSavingsCandidate(result, periodLabel),
+    categoryWarningCandidate(result.categories, periodLabel),
+    categorySavingsCandidate(result.categories, periodLabel),
   ].filter((candidate): candidate is Candidate => candidate !== null);
 
   if (candidates.length <= MAX_HIGHLIGHTS) {

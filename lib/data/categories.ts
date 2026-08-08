@@ -24,9 +24,19 @@ export async function listCategoriesWithUsage(userId: number, type?: CategoryTyp
 
 export async function createCategory(
   userId: number,
-  data: { name: string; icon: string; color: string; type: CategoryType; parentId?: number | null }
+  data: {
+    name: string;
+    icon: string;
+    color: string;
+    type: CategoryType;
+    parentId?: number | null;
+    // Essential vs discretionary classification (see
+    // lib/analytics/spending-summary.ts). Defaults to true, same safe
+    // default as the schema's own Category.isEssential column.
+    isEssential?: boolean;
+  }
 ) {
-  return prisma.category.create({ data: { ...data, userId } });
+  return prisma.category.create({ data: { ...data, isEssential: data.isEssential ?? true, userId } });
 }
 
 // Ordered oldest-first so callers computing a rolling-window retry time
@@ -50,7 +60,7 @@ export class CategoryNotFoundError extends Error {}
 export async function updateCategory(
   userId: number,
   id: number,
-  data: { name?: string; icon?: string; color?: string }
+  data: { name?: string; icon?: string; color?: string; isEssential?: boolean }
 ) {
   const existing = await prisma.category.findFirst({ where: { id, userId } });
   if (!existing) {

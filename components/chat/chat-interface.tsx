@@ -1,15 +1,68 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { SendIcon, SparklesIcon, SpinnerIcon } from "@/components/icons";
+import { useRouter } from "next/navigation";
+import { SendIcon, SparklesIcon, SpinnerIcon, CheckIcon, XIcon } from "@/components/icons";
+import type { ParsedTransaction } from "@/lib/ai/parse-transaction";
+
+interface PendingSuggestion {
+  transaction: ParsedTransaction;
+  rawInput: string;
+  status: "pending" | "confirming" | "confirmed" | "dismissed" | "error";
+  error?: string;
+}
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  // Session-state only, same as the rest of `messages` - never persisted as
+  // its own DB row (see app/api/chat/route.ts: only `content` above, the
+  // plain confirmation text, is saved as a ChatMessage). Absent for every
+  // ordinary reply; only set on the one assistant message produced by a
+  // suggest_transaction response.
+  suggestion?: PendingSuggestion;
 }
 
-export function ChatInterface({ initialMessages }: { initialMessages: Message[] }) {
+// Chosen alongside session's confidence gate: the chat suggestion card
+// never lets the user fix up a wrong category/amount inline - "ویرایش کن"
+// hands off to the real add-transaction form instead (see
+// components/transactions/add-transaction-form.tsx's initialTransaction
+// prop), so this file stays a thin confirm/dismiss layer, not a second
+// parallel editing UI.
+function updateSuggestion(
+  messages: Message[],
+  messageId: string,
+  patch: Partial<PendingSuggestion>
+): Message[] {
+  return messages.map((m) => (m.id === messageId && m.suggestion ? { ...m, suggestion: { ...m.suggestion, ...patch } } : m));
+}
+
+// Shown in the empty assistant bubble for the whole span between sending the
+// user's message and the first streamed chunk (or the suggest_transaction
+// JSON) arriving back - replaces a bare spinner with a labeled state so
+// it's clear the assistant is working, not stalled.
+function ThinkingIndicator() {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-muted">
+      <span className="animate-pulse">در حال فکر کردن</span>
+      <span className="flex items-center gap-0.5">
+        <span className="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.3s]" />
+        <span className="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.15s]" />
+        <span className="h-1 w-1 animate-bounce rounded-full bg-current" />
+      </span>
+    </span>
+  );
+}
+
+export function ChatInterface({
+  initialMessages,
+  defaultAccountId,
+}: {
+  initialMessages: Message[];
+  defaultAccountId: number;
+}) {
+  const router = useRouter();
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -43,6 +96,25 @@ export function ChatInterface({ initialMessages }: { initialMessages: Message[] 
         throw new Error(data.error || "خطا در ارتباط با دستیار.");
       }
 
+      // suggest_transaction responses come back as a single JSON object
+      // (not streamed) - see app/api/chat/route.ts. Everything else is the
+      // existing plain-text stream, unchanged.
+      if ((res.headers.get("Content-Type") ?? "").includes("application/json")) {
+        const data = await res.json();
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: data.message,
+                  suggestion: { transaction: data.transaction, rawInput: data.rawInput, status: "pending" },
+                }
+              : m
+          )
+        );
+        return;
+      }
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
 
@@ -58,6 +130,74 @@ export function ChatInterface({ initialMessages }: { initialMessages: Message[] 
     } finally {
       setSending(false);
     }
+  }
+
+  // "بله" - calls the exact same creation endpoint (and so the exact same
+  // createTransaction() code path, see lib/data/transactions.ts) manual
+  // entry already uses, just tagged source: "assistant-suggestion". Nothing
+  // is written before this fires.
+  async function handleConfirmSuggestion(messageId: string) {
+    const target = messages.find((m) => m.id === messageId);
+    if (!target?.suggestion || target.suggestion.status !== "pending") return;
+
+    const { transaction, rawInput } = target.suggestion;
+    setMessages((prev) => updateSuggestion(prev, messageId, { status: "confirming" }));
+
+    try {
+      const res = await fetch("/api/transactions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: transaction.amount,
+          type: transaction.type,
+          category: transaction.category,
+          description: transaction.description,
+          date: transaction.date,
+          rawInput,
+          accountId: defaultAccountId,
+          source: "assistant-suggestion",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "خطا در ثبت تراکنش.");
+
+      setMessages((prev) => [
+        ...updateSuggestion(prev, messageId, { status: "confirmed" }),
+        { id: crypto.randomUUID(), role: "assistant", content: "ثبت شد ✅" },
+      ]);
+    } catch (err) {
+      setMessages((prev) =>
+        updateSuggestion(prev, messageId, {
+          status: "error",
+          error: err instanceof Error ? err.message : "خطای ناشناخته رخ داد.",
+        })
+      );
+    }
+  }
+
+  // "ویرایش کن" - hands off to the real add/edit transaction form
+  // pre-filled with the suggested values (components/transactions/
+  // add-transaction-form.tsx's initialTransaction prop, via /app/add's
+  // query params). Nothing is written here either - if the user cancels
+  // that form, the suggestion is simply discarded, same as any unsaved
+  // manual entry.
+  function handleEditSuggestion(messageId: string) {
+    const target = messages.find((m) => m.id === messageId);
+    if (!target?.suggestion || target.suggestion.status !== "pending") return;
+
+    const { transaction, rawInput } = target.suggestion;
+    setMessages((prev) => updateSuggestion(prev, messageId, { status: "dismissed" }));
+
+    const params = new URLSearchParams({
+      fromSuggestion: "1",
+      amount: String(transaction.amount),
+      type: transaction.type,
+      category: transaction.category,
+      description: transaction.description,
+      date: transaction.date,
+      rawInput,
+    });
+    router.push(`/app/add?${params.toString()}`);
   }
 
   return (
@@ -76,14 +216,57 @@ export function ChatInterface({ initialMessages }: { initialMessages: Message[] 
           </div>
         )}
         {messages.map((m) => (
-          <div key={m.id} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
+          <div key={m.id} className={`flex flex-col ${m.role === "user" ? "items-start" : "items-end"}`}>
             <div
               className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                 m.role === "user" ? "bg-primary-darker text-white" : "border border-border bg-surface text-foreground"
               }`}
             >
-              {m.content || (sending && m.role === "assistant" ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : "")}
+              {m.content || (sending && m.role === "assistant" ? <ThinkingIndicator /> : "")}
             </div>
+
+            {m.suggestion && m.suggestion.status !== "dismissed" && (
+              <div className="mt-2 flex max-w-[80%] flex-col gap-2">
+                {m.suggestion.status === "pending" && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmSuggestion(m.id)}
+                      className="flex items-center gap-1.5 rounded-xl bg-primary-darker px-3 py-1.5 text-xs font-semibold text-white"
+                    >
+                      <CheckIcon className="h-3.5 w-3.5" />
+                      بله
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleEditSuggestion(m.id)}
+                      className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-1.5 text-xs font-semibold text-foreground"
+                    >
+                      <XIcon className="h-3.5 w-3.5" />
+                      ویرایش کن
+                    </button>
+                  </div>
+                )}
+                {m.suggestion.status === "confirming" && (
+                  <p className="flex items-center gap-1.5 text-xs text-muted">
+                    <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
+                    در حال ثبت...
+                  </p>
+                )}
+                {m.suggestion.status === "error" && (
+                  <div className="flex flex-col items-end gap-1.5">
+                    <p className="text-xs text-warning">{m.suggestion.error}</p>
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmSuggestion(m.id)}
+                      className="flex items-center gap-1.5 rounded-xl bg-primary-darker px-3 py-1.5 text-xs font-semibold text-white"
+                    >
+                      تلاش دوباره
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ))}
         {error && <p className="text-center text-xs text-warning">{error}</p>}

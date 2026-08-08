@@ -2,11 +2,12 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/session";
 import { LogoutButton } from "@/components/layout/logout-button";
-import { TagIcon, WalletIcon, ShieldIcon, BackIcon } from "@/components/icons";
+import { TagIcon, WalletIcon, ShieldIcon, BackIcon, UserIcon } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 
 const ROWS = [
+  { href: "/app/settings/profile", label: "اطلاعات شخصی", Icon: UserIcon },
   { href: "/app/settings/categories", label: "دسته‌بندی‌ها", Icon: TagIcon },
   { href: "/app/settings/accounts", label: "حساب‌ها", Icon: WalletIcon },
 ] as const;

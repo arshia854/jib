@@ -6,7 +6,12 @@ vi.mock("@/lib/nvidia-ai", () => ({
 }));
 
 import { chatCompletion } from "@/lib/nvidia-ai";
-import { parseTransactionWithAI, type CategoryOption } from "@/lib/ai/parse-transaction";
+import {
+  parseTransactionWithAI,
+  FALLBACK_EXPENSE_CATEGORY,
+  FALLBACK_INCOME_CATEGORY,
+  type CategoryOption,
+} from "@/lib/ai/parse-transaction";
 
 // No fixture rows exist for this id - lookupUserMapping's findMany just
 // returns [] for a non-matching userId, so findMerchant() falls through
@@ -16,21 +21,25 @@ const NO_MAPPING_USER_ID = 999999;
 const CATEGORIES_WITH_SHOPPING: CategoryOption[] = [
   { name: "خرید", type: "expense" },
   { name: "خرید آنلاین", type: "expense", parentName: "خرید" },
-  { name: "سایر", type: "expense" },
+  { name: FALLBACK_EXPENSE_CATEGORY, type: "expense" },
 ];
 
-const CATEGORIES_WITHOUT_SHOPPING: CategoryOption[] = [{ name: "سایر", type: "expense" }];
+const CATEGORIES_WITHOUT_SHOPPING: CategoryOption[] = [{ name: FALLBACK_EXPENSE_CATEGORY, type: "expense" }];
 
 // Fuller fixture for the confidence-bucket tests below: needs a
 // hierarchy (parentName) so (category, subcategory) pair validation is
 // actually exercised, plus a category with no subcategories at all
-// (قبوض و اشتراک) and سایر as the low-confidence landing spot.
+// (قبوض و اشتراک), the expense fallback as the low-confidence landing
+// spot, and the income fallback for type: "income" cases (e.g. the
+// AI-parsed "حقوق" test and the low-confidence income test below).
 const CATEGORIES_FULL: CategoryOption[] = [
   { name: "خرید", type: "expense" },
   { name: "خرید آنلاین", type: "expense", parentName: "خرید" },
   { name: "دیجیتال/الکترونیک", type: "expense", parentName: "خرید" },
   { name: "قبوض و اشتراک", type: "expense" },
-  { name: "سایر", type: "expense" },
+  { name: FALLBACK_EXPENSE_CATEGORY, type: "expense" },
+  { name: "حقوق", type: "income" },
+  { name: FALLBACK_INCOME_CATEGORY, type: "income" },
 ];
 
 // Reused verbatim from lib/bank/parse-bank-sms.test.ts - see that file's own
@@ -79,7 +88,7 @@ describe("parseTransactionWithAI", () => {
       expect(result).toEqual({
         amount: 150000,
         type: "expense",
-        category: "سایر",
+        category: FALLBACK_EXPENSE_CATEGORY,
         description: expect.any(String),
         date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
         source: "bank-sms",
@@ -135,8 +144,9 @@ describe("parseTransactionWithAI", () => {
     // its own line - doesn't touch the "برداشت:"/"از طريق"/"شتاب" tokens
     // the bank engine keys off (see extract-bank-amount.ts/detect-bank.ts),
     // so bank/amount/type detection stays identical to TEJARAT_SMS; only
-    // findMerchant() now returns a hit (دیجی‌کالا -> خرید/خرید آنلاین,
-    // type "expense").
+    // findMerchant() now returns a hit (دیجی‌کالا -> خرید, category-only,
+    // type "expense" - see lib/merchants.ts on why دیجی‌کالا has no default
+    // subcategory).
     const TEJARAT_SMS_WITH_MERCHANT = `بانک تجارت
 حساب:0145059220990
 برداشت:1,500,000 ریال
@@ -159,7 +169,7 @@ describe("parseTransactionWithAI", () => {
     it("overrides the category when the matched merchant's type agrees with the bank SMS's detected type", async () => {
       const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, TEJARAT_SMS_WITH_MERCHANT, CATEGORIES_FULL);
 
-      expect(result.category).toBe("خرید آنلاین");
+      expect(result.category).toBe("خرید");
       expect(result.source).toBe("globalMerchant");
       expect(result.needsConfirmation).toBe(false);
       // Unaffected by the override - still whatever buildBankSmsResult
@@ -172,14 +182,19 @@ describe("parseTransactionWithAI", () => {
       expect(chatCompletion).not.toHaveBeenCalled();
     });
 
-    it("falls back to سایر/bank-sms, unchanged, when the matched merchant's type disagrees with the bank SMS's detected type", async () => {
+    it("falls back to the income fallback category/bank-sms, unchanged, when the matched merchant's type disagrees with the bank SMS's detected type", async () => {
       const result = await parseTransactionWithAI(
         NO_MAPPING_USER_ID,
         TEJARAT_SMS_INCOME_WITH_MERCHANT,
         CATEGORIES_FULL
       );
 
-      expect(result.category).toBe("سایر");
+      // bankResult.type is "income" here (دیجی‌کالا's merchant type is
+      // "expense", so the override is rejected and buildBankSmsResult falls
+      // back on the bank SMS's own type) - this must land on
+      // FALLBACK_INCOME_CATEGORY, not the expense fallback, which is exactly
+      // the bug fixed in buildBankSmsResult/resolveFallbackCategory.
+      expect(result.category).toBe(FALLBACK_INCOME_CATEGORY);
       expect(result.source).toBe("bank-sms");
       expect(result.needsConfirmation).toBe(true);
       expect(result.type).toBe("income");
@@ -189,16 +204,17 @@ describe("parseTransactionWithAI", () => {
     // The "no merchant match at all" case (source === "none") is already
     // covered by "parses a confidently-detected bank SMS deterministically"
     // above - TEJARAT_SMS contains no merchant name, so findMerchant()
-    // returns source "none" there and category falls back to سایر.
+    // returns source "none" there and category falls back to
+    // FALLBACK_EXPENSE_CATEGORY.
 
-    it("falls back to سایر/bank-sms, unchanged, when the merchant-resolved category fails validation (deleted/renamed category)", async () => {
+    it("falls back to the expense fallback category/bank-sms, unchanged, when the merchant-resolved category fails validation (deleted/renamed category)", async () => {
       const result = await parseTransactionWithAI(
         NO_MAPPING_USER_ID,
         TEJARAT_SMS_WITH_MERCHANT,
         CATEGORIES_WITHOUT_SHOPPING
       );
 
-      expect(result.category).toBe("سایر");
+      expect(result.category).toBe(FALLBACK_EXPENSE_CATEGORY);
       expect(result.source).toBe("bank-sms");
       expect(result.needsConfirmation).toBe(true);
       expect(chatCompletion).not.toHaveBeenCalled();
@@ -215,7 +231,7 @@ describe("parseTransactionWithAI", () => {
     expect(result).toEqual({
       amount: 250000,
       type: "expense",
-      category: "خرید آنلاین",
+      category: "خرید",
       description: "دیجی‌کالا",
       date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       source: "globalMerchant",
@@ -244,7 +260,7 @@ describe("parseTransactionWithAI", () => {
 
     expect(chatCompletion).toHaveBeenCalledTimes(1);
     expect(result.amount).toBe(150);
-    expect(result.category).toBe("خرید آنلاین");
+    expect(result.category).toBe("خرید");
     expect(result.source).toBe("globalMerchant"); // still overridden by the merchant match
   });
 
@@ -270,7 +286,7 @@ describe("parseTransactionWithAI", () => {
     );
 
     expect(chatCompletion).toHaveBeenCalledTimes(1);
-    expect(result.category).toBe("سایر");
+    expect(result.category).toBe(FALLBACK_EXPENSE_CATEGORY);
     expect(result.source).toBe("ai");
   });
 
@@ -318,7 +334,7 @@ describe("parseTransactionWithAI", () => {
       expect(result.needsConfirmation).toBe(true);
     });
 
-    it("falls back to سایر when confidence is < 0.50, even though the suggested pair is valid", async () => {
+    it("falls back to FALLBACK_EXPENSE_CATEGORY when confidence is < 0.50, even though the suggested pair is valid", async () => {
       vi.mocked(chatCompletion).mockResolvedValue(
         JSON.stringify({
           amount: 40,
@@ -334,7 +350,7 @@ describe("parseTransactionWithAI", () => {
 
       const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "یه چیزی خریدم ۴۰ تومن", CATEGORIES_FULL);
 
-      expect(result.category).toBe("سایر");
+      expect(result.category).toBe(FALLBACK_EXPENSE_CATEGORY);
       expect(result.confidence).toBe(0.35); // raw reported value preserved for observability
       expect(result.needsConfirmation).toBe(true);
     });
@@ -355,7 +371,7 @@ describe("parseTransactionWithAI", () => {
 
       const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "خرید عجیب ۹۰ تومن", CATEGORIES_FULL);
 
-      expect(result.category).toBe("سایر");
+      expect(result.category).toBe(FALLBACK_EXPENSE_CATEGORY);
       expect(result.confidence).toBe(0.9); // raw reported value still surfaced...
       expect(result.needsConfirmation).toBe(true); // ...but never auto-assigned
     });
@@ -364,8 +380,9 @@ describe("parseTransactionWithAI", () => {
   describe("newCategorySuggestion (last-resort new-category suggestion)", () => {
     // "دخانیات" ("tobacco") deliberately has no existing category/subcategory
     // in CATEGORIES_FULL, mirroring the last-resort scenario the قوانین
-    // section describes - category still safely falls back to "سایر" while
-    // newCategorySuggestion carries the additive proposal.
+    // section describes - category still safely falls back to
+    // FALLBACK_EXPENSE_CATEGORY while newCategorySuggestion carries the
+    // additive proposal.
     it("surfaces a well-formed suggestion as suggestedCategory", async () => {
       vi.mocked(chatCompletion).mockResolvedValue(
         JSON.stringify({
@@ -387,7 +404,7 @@ describe("parseTransactionWithAI", () => {
 
       const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "سیگار خریدم ۸۰ تومن", CATEGORIES_FULL);
 
-      expect(result.category).toBe("سایر");
+      expect(result.category).toBe(FALLBACK_EXPENSE_CATEGORY);
       expect(result.suggestedCategory).toEqual({
         name: "دخانیات",
         parentName: null,
@@ -450,7 +467,7 @@ describe("parseTransactionWithAI", () => {
       const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "سیگار خریدم ۸۰ تومن", CATEGORIES_FULL);
 
       expect(result.suggestedCategory).toBeUndefined();
-      expect(result.category).toBe("سایر");
+      expect(result.category).toBe(FALLBACK_EXPENSE_CATEGORY);
     });
 
     it("drops a suggestion carrying an extra icon field, without throwing (icon isn't part of this schema)", async () => {
@@ -501,7 +518,152 @@ describe("parseTransactionWithAI", () => {
       expect(result.suggestedCategory).toBeUndefined();
     });
 
-    it("drops an explicit null newCategorySuggestion the same way as an omitted one", async () => {
+    // buildSystemPrompt() itself isn't exported, so its output is captured
+  // the same way the rest of this file already exercises the AI path: via
+  // the mocked chatCompletion's own call arguments, rather than importing
+  // an internal helper or adding a new export.
+  describe("few-shot categorization examples in the system prompt (Subtask 5.2)", () => {
+    it("includes the confused-category few-shot example lines added in Subtask 5.2", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 100,
+          type: "expense",
+          category: "سایر",
+          subcategory: null,
+          description: "تراکنش نامشخص",
+          date: "2026-07-30",
+          confidence: 0.3,
+          reason: "متن مبهم است",
+        })
+      );
+
+      await parseTransactionWithAI(NO_MAPPING_USER_ID, "یک تراکنش نامشخص", CATEGORIES_FULL);
+
+      expect(chatCompletion).toHaveBeenCalledTimes(1);
+      const [messages] = vi.mocked(chatCompletion).mock.calls[0];
+      const systemPrompt = messages[0].content;
+
+      expect(systemPrompt).toContain(
+        "«نون و ماست خریدم» → category: «خوراک و رستوران»، subcategory: «سوپرمارکت» (نه «رستوران و کافه»، چون خرید برای خانه است نه صرف بیرون از خانه)"
+      );
+      expect(systemPrompt).toContain("«با دوستام قهوه خوردیم» → category: «خوراک و رستوران»، subcategory: «رستوران و کافه»");
+      expect(systemPrompt).toContain(
+        "«اسنپ گرفتم برم فرودگاه» → category: «حمل‌ونقل»، subcategory: «تاکسی و اسنپ» (نه «بنزین»، چون اسنپ سرویس تاکسی است نه خرید مستقیم سوخت)"
+      );
+      expect(systemPrompt).toContain(
+        "«قبض اینترنت خونه رو پرداخت کردم» → category: «قبوض و اشتراک»، subcategory: «اینترنت و تلفن» (نه «برق، آب و گاز»، با اینکه هر دو «قبض» هستند)"
+      );
+      expect(systemPrompt).toContain(
+        "«رفتم دکتر و ویزیت دادم» → category: «سلامت»، subcategory: «ویزیت پزشک» (نه «دارو»، چون هزینه ویزیت است نه خرید دارو)"
+      );
+      expect(systemPrompt).toContain(
+        "«حقوق این ماه ریخت» → category: «حقوق» | «بابت یه پروژه فریلنس پول گرفتم» → category: «درآمد آزاد»"
+      );
+    });
+  });
+
+  // Behavioral coverage for the confused-category pairs the Subtask 5.2
+  // examples target: not testing the model's own judgment (out of scope for
+  // a unit test) - testing that a well-formed AI response naming one of
+  // these pairs correctly threads through findValidatedLeafCategory and
+  // resolveAiCategory, so a future refactor of that path can't silently
+  // regress exactly the pairs the prompt calls out as easy to confuse.
+  describe("confused-category pairs from the Subtask 5.2 few-shot examples", () => {
+    // None of "سوپرمارکت"/"رستوران"/"تاکسی"/"بنزین"/"اینترنت"/"برق" (unlike
+    // e.g. "دیجی کالا" or "اسنپ" elsewhere in this file) match any global
+    // merchant name/alias/keywordOverride in lib/merchants.ts, so
+    // findMerchant() falls through to source "none" for all three inputs
+    // below and the AI's mocked category is what actually resolves - the
+    // thing under test here, not a merchant-lookup shortcut.
+    const CATEGORIES_FEW_SHOT_PAIRS: CategoryOption[] = [
+      { name: "خوراک و رستوران", type: "expense" },
+      { name: "سوپرمارکت", type: "expense", parentName: "خوراک و رستوران" },
+      { name: "رستوران و کافه", type: "expense", parentName: "خوراک و رستوران" },
+      { name: "حمل‌ونقل", type: "expense" },
+      { name: "بنزین", type: "expense", parentName: "حمل‌ونقل" },
+      { name: "تاکسی و اسنپ", type: "expense", parentName: "حمل‌ونقل" },
+      { name: "قبوض و اشتراک", type: "expense" },
+      { name: "برق، آب و گاز", type: "expense", parentName: "قبوض و اشتراک" },
+      { name: "اینترنت و تلفن", type: "expense", parentName: "قبوض و اشتراک" },
+      { name: FALLBACK_EXPENSE_CATEGORY, type: "expense" },
+    ];
+
+    it("resolves سوپرمارکت (not رستوران و کافه) for a home-grocery sentence", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 80,
+          type: "expense",
+          category: "خوراک و رستوران",
+          subcategory: "سوپرمارکت",
+          description: "نون و ماست",
+          date: "2026-07-30",
+          confidence: 0.9,
+          reason: "خرید مواد غذایی برای خانه است",
+        })
+      );
+
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "نون و ماست خریدم ۸۰ تومن", CATEGORIES_FEW_SHOT_PAIRS);
+
+      expect(chatCompletion).toHaveBeenCalledTimes(1);
+      expect(result.source).toBe("ai");
+      expect(result.category).toBe("سوپرمارکت");
+      expect(result.needsConfirmation).toBe(false);
+    });
+
+    it("resolves تاکسی و اسنپ (not بنزین) for a taxi-ride sentence", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 120,
+          type: "expense",
+          category: "حمل‌ونقل",
+          subcategory: "تاکسی و اسنپ",
+          description: "تاکسی به فرودگاه",
+          date: "2026-07-30",
+          confidence: 0.9,
+          reason: "سرویس تاکسی است نه خرید سوخت",
+        })
+      );
+
+      const result = await parseTransactionWithAI(
+        NO_MAPPING_USER_ID,
+        "برای رفتن به فرودگاه با تاکسی ۱۲۰ تومن دادم",
+        CATEGORIES_FEW_SHOT_PAIRS
+      );
+
+      expect(chatCompletion).toHaveBeenCalledTimes(1);
+      expect(result.source).toBe("ai");
+      expect(result.category).toBe("تاکسی و اسنپ");
+      expect(result.needsConfirmation).toBe(false);
+    });
+
+    it("resolves اینترنت و تلفن (not برق، آب و گاز) for a home-internet-bill sentence", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 60,
+          type: "expense",
+          category: "قبوض و اشتراک",
+          subcategory: "اینترنت و تلفن",
+          description: "قبض اینترنت",
+          date: "2026-07-30",
+          confidence: 0.9,
+          reason: "قبض اینترنت خانه است نه برق/آب/گاز",
+        })
+      );
+
+      const result = await parseTransactionWithAI(
+        NO_MAPPING_USER_ID,
+        "قبض اینترنت خونه رو پرداخت کردم ۶۰ تومن",
+        CATEGORIES_FEW_SHOT_PAIRS
+      );
+
+      expect(chatCompletion).toHaveBeenCalledTimes(1);
+      expect(result.source).toBe("ai");
+      expect(result.category).toBe("اینترنت و تلفن");
+      expect(result.needsConfirmation).toBe(false);
+    });
+  });
+
+  it("drops an explicit null newCategorySuggestion the same way as an omitted one", async () => {
       vi.mocked(chatCompletion).mockResolvedValue(
         JSON.stringify({
           amount: 350,
@@ -523,6 +685,74 @@ describe("parseTransactionWithAI", () => {
       );
 
       expect(result.suggestedCategory).toBeUndefined();
+    });
+  });
+
+  // Guards against the exact bug fixed for the bare "سایر" fallback:
+  // FALLBACK_EXPENSE_CATEGORY/FALLBACK_INCOME_CATEGORY (see
+  // resolveFallbackCategory in parse-transaction.ts) must exactly match
+  // real seeded DefaultCategory names (prisma/seed.ts), or
+  // createTransaction's exact-name lookup throws InvalidCategoryError for
+  // every transaction landing on the fallback. Checked against the live
+  // DefaultCategory table - the actual seed source - rather than a
+  // hardcoded expected string, so a future rename on either side still
+  // gets caught instead of two copies of the same typo agreeing with each
+  // other (same pattern as lib/merchant-lookup.test.ts's اسنپ/تپسی guard).
+  describe("fallback categories resolve to real seeded DefaultCategory names", () => {
+    it("a low-confidence AI expense parse's fallback category matches a real seeded DefaultCategory", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 40,
+          type: "expense",
+          description: "خرید نامشخص",
+          date: "2026-07-30",
+          category: "این دسته وجود ندارد",
+          subcategory: null,
+          confidence: 0.2,
+          reason: "متن مبهم است و نمی‌توان با اطمینان دسته را تعیین کرد",
+        })
+      );
+
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "یه چیز نامشخصی خریدم ۴۰ تومن", CATEGORIES_FULL);
+
+      expect(result.type).toBe("expense");
+      const seeded = await prisma.defaultCategory.findFirst({
+        where: { name: result.category, type: "expense" },
+      });
+      expect(seeded).not.toBeNull();
+    });
+
+    it("a low-confidence AI income parse's fallback category matches a real seeded DefaultCategory", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 500,
+          type: "income",
+          description: "دریافتی نامشخص",
+          date: "2026-07-30",
+          category: "این دسته وجود ندارد",
+          subcategory: null,
+          confidence: 0.2,
+          reason: "متن مبهم است و نمی‌توان با اطمینان دسته را تعیین کرد",
+        })
+      );
+
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, "یه پول نامشخصی گرفتم ۵۰۰ تومن", CATEGORIES_FULL);
+
+      expect(result.type).toBe("income");
+      const seeded = await prisma.defaultCategory.findFirst({
+        where: { name: result.category, type: "income" },
+      });
+      expect(seeded).not.toBeNull();
+    });
+
+    it("a bank-SMS parse result's fallback category matches a real seeded DefaultCategory", async () => {
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, TEJARAT_SMS, CATEGORIES_FULL);
+
+      expect(result.source).toBe("bank-sms");
+      const seeded = await prisma.defaultCategory.findFirst({
+        where: { name: result.category, type: result.type },
+      });
+      expect(seeded).not.toBeNull();
     });
   });
 });

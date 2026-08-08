@@ -8,7 +8,11 @@ describe("lookupGlobalMerchant (pure, no DB)", () => {
     expect(result.source).toBe("globalMerchant");
     expect(result.merchantName).toBe("دیجی‌کالا");
     expect(result.category).toBe("خرید");
-    expect(result.subcategory).toBe("خرید آنلاین");
+    // دیجی‌کالا has no default subcategory - "خرید آنلاین" was never a
+    // real seeded DefaultCategory (see the FIXED comment in
+    // lib/merchants.ts); a general marketplace has no single honest fit
+    // among خرید's real children (پوشاک, لوازم دیجیتال).
+    expect(result.subcategory).toBeUndefined();
     expect(result.type).toBe("expense");
   });
 
@@ -16,12 +20,42 @@ describe("lookupGlobalMerchant (pure, no DB)", () => {
     const result = lookupGlobalMerchant("دیجی کالا کتاب خریدم");
     expect(result.source).toBe("keyword");
     expect(result.category).toBe("آموزش");
-    expect(result.subcategory).toBe("کتاب");
+    // آموزش has no children in DEFAULT_CATEGORIES, so this override is
+    // category-only (see the FIXED comment on the کتاب override in
+    // lib/merchants.ts) - "کتاب" was never a real seeded subcategory.
+    expect(result.subcategory).toBeUndefined();
     expect(result.type).toBe("expense");
   });
 
   it("returns none for unrelated text", () => {
     expect(lookupGlobalMerchant("سلام چطوری امروز").source).toBe("none");
+  });
+});
+
+// Guards against the class of bug fixed for اسنپ/تپسی: a
+// defaultSubcategory string in lib/merchants.ts that doesn't exactly match
+// a real seeded DefaultCategory name (see lib/merchants.ts's top-of-file
+// comment on why matching is by exact name). Checked against the live
+// DefaultCategory table - the actual seed source (prisma/seed.ts) - rather
+// than a hardcoded expected string, so a future rename on either side still
+// gets caught instead of two copies of the same typo agreeing with each
+// other.
+describe("global merchant subcategories resolve to real seeded DefaultCategory names", () => {
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  it.each(["اسنپ", "تپسی"])("%s's subcategory matches a seeded DefaultCategory under its category", async (input) => {
+    const result = lookupGlobalMerchant(input);
+    expect(result.source).toBe("globalMerchant");
+    expect(result.subcategory).toBeTruthy();
+
+    const seeded = await prisma.defaultCategory.findFirst({
+      where: { name: result.subcategory!, type: result.type },
+      include: { parent: true },
+    });
+    expect(seeded).not.toBeNull();
+    expect(seeded?.parent?.name).toBe(result.category);
   });
 });
 

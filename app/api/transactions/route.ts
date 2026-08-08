@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
-import { listTransactions, createTransaction, InvalidCategoryError, InvalidAccountError } from "@/lib/data/transactions";
+import {
+  listTransactions,
+  createTransaction,
+  InvalidCategoryError,
+  InvalidAccountError,
+  type TransactionSource,
+} from "@/lib/data/transactions";
 import type { CategoryType } from "@/lib/categories";
+
+const VALID_SOURCES: TransactionSource[] = ["assistant-suggestion"];
 
 export async function GET(request: NextRequest) {
   const session = await getSession();
@@ -40,6 +48,10 @@ export async function POST(request: NextRequest) {
   const rawInput = typeof body?.rawInput === "string" ? body.rawInput : "";
   const description = typeof body?.description === "string" ? body.description : undefined;
   const dateInput = typeof body?.date === "string" ? body.date : undefined;
+  const source =
+    typeof body?.source === "string" && VALID_SOURCES.includes(body.source as TransactionSource)
+      ? (body.source as TransactionSource)
+      : undefined;
 
   if (
     !Number.isFinite(amount) ||
@@ -63,6 +75,7 @@ export async function POST(request: NextRequest) {
       description,
       rawInput,
       date,
+      source,
     });
     return NextResponse.json({ transaction }, { status: 201 });
   } catch (error) {

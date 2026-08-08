@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { prisma } from "@/lib/prisma";
 import { normalizeText } from "@/lib/normalize";
-import { updateTransaction } from "@/lib/data/transactions";
+import { updateTransaction, createTransaction } from "@/lib/data/transactions";
 
 describe("updateTransaction (merchant-mapping learning)", () => {
   let userId: number;
@@ -180,5 +180,72 @@ describe("updateTransaction (merchant-mapping learning)", () => {
 
     const mappings = await prisma.merchantMapping.findMany({ where: { userId, merchantKey: "" } });
     expect(mappings).toHaveLength(0);
+  });
+});
+
+// Covers the new Transaction.source column (see prisma/migrations/
+// 20260808153511_add_transaction_source and schema.prisma) - the chat
+// assistant's suggest_transaction confirm/edit flow is the only caller that
+// ever passes a source today (both going through this same createTransaction
+// call - see app/api/chat/route.ts and components/transactions/
+// add-transaction-form.tsx's initialTransaction path), so this exercises
+// the field directly rather than only indirectly through those UIs.
+describe("createTransaction (source field)", () => {
+  let userId: number;
+  let accountId: number;
+  let categoryId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-CREATE-TRANSACTION-SOURCE-${Date.now()}` },
+    });
+    userId = user.id;
+
+    const account = await prisma.financeAccount.create({
+      data: { userId, name: "حساب تست", type: "cash" },
+    });
+    accountId = account.id;
+
+    const category = await prisma.category.create({
+      data: { userId, name: "دسته تست منبع", icon: "🧪", color: "#222222", type: "expense" },
+    });
+    categoryId = category.id;
+  });
+
+  afterAll(async () => {
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.category.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$disconnect();
+  });
+
+  it("stores source when explicitly passed", async () => {
+    const created = await createTransaction(userId, {
+      amount: 80000,
+      type: "expense",
+      categoryName: "دسته تست منبع",
+      accountId,
+      description: "اسنپ",
+      rawInput: "دیروز ۸۰ تومن اسنپ گرفتم",
+      date: new Date("2026-08-07"),
+      source: "assistant-suggestion",
+    });
+
+    expect(created.source).toBe("assistant-suggestion");
+  });
+
+  it("leaves source null for the ordinary manual-entry path (no source passed)", async () => {
+    const created = await createTransaction(userId, {
+      amount: 50000,
+      type: "expense",
+      categoryName: "دسته تست منبع",
+      accountId,
+      description: "ناهار",
+      rawInput: "۵۰ تومن ناهار",
+      date: new Date("2026-08-07"),
+    });
+
+    expect(created.source).toBeNull();
   });
 });

@@ -36,6 +36,11 @@ export async function deleteTransaction(userId: number, id: number) {
   return prisma.transaction.delete({ where: { id } });
 }
 
+// Closed set, validated at the API boundary (see app/api/transactions/route.ts)
+// rather than trusted as an arbitrary string - keeps this column meaningful
+// instead of becoming a free-text field callers can put anything into.
+export type TransactionSource = "assistant-suggestion";
+
 export interface CreateTransactionInput {
   amount: number;
   type: CategoryType;
@@ -44,6 +49,12 @@ export interface CreateTransactionInput {
   description?: string;
   rawInput: string;
   date: Date;
+  // Provenance of this transaction. Undefined for the original manual-entry/
+  // AI-preview flow (stored as null - see schema.prisma's comment on
+  // Transaction.source) - only ever "assistant-suggestion" so far, set when
+  // the create call originates from the chat assistant's suggest_transaction
+  // confirm ("بله") or its "ویرایش کن" -> AddTransactionForm handoff.
+  source?: TransactionSource;
 }
 
 export interface UpdateTransactionInput {
@@ -126,6 +137,7 @@ export async function createTransaction(userId: number, input: CreateTransaction
       description: input.description,
       rawInput: input.rawInput,
       date: input.date,
+      source: input.source,
       userId,
       accountId: account.id,
       categoryId: category.id,

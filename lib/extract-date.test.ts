@@ -20,6 +20,14 @@ describe("extractDate", () => {
     expect(extractDate("پریروز ۲۰۰ تومن خرید", NOW)).toBe("2026-07-28");
   });
 
+  it("resolves هفته پیش to 7 days ago", () => {
+    expect(extractDate("هفته پیش ۲۰۰ تومن آبمیوه خوردم", NOW)).toBe("2026-07-23");
+  });
+
+  it("does not treat bare هفته (without پیش) as a week-ago signal", () => {
+    expect(extractDate("هفته دیگه میرم مسافرت", NOW)).toBe("2026-07-30");
+  });
+
   it("defaults to today for an unrecognized date phrase (no fuzzy parsing)", () => {
     expect(extractDate("سه شنبه پیش ۵۰ تومن", NOW)).toBe("2026-07-30");
   });

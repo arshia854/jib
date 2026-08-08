@@ -17,6 +17,22 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Sent by the logout flow (see components/layout/logout-button.tsx) so a
+// signed-out session doesn't leave the previous user's cached authenticated
+// pages (dashboard, transactions, reports, ...) readable on a shared device.
+// Only clears PAGES_CACHE - STATIC_CACHE (content-hashed build assets/icons)
+// is unrelated to any user's data and is left untouched. Replies on the
+// provided MessagePort so the caller can await completion before navigating
+// away, instead of racing the cache clear against the redirect.
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "CLEAR_AUTH_CACHE") return;
+  event.waitUntil(
+    caches.delete(PAGES_CACHE).then(() => {
+      event.ports[0]?.postMessage({ ok: true });
+    })
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;

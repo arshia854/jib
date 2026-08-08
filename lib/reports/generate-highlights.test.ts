@@ -58,7 +58,7 @@ describe("generateHighlights", () => {
       {
         type: "positive",
         category: "سرگرمی",
-        message: "صرفه‌جویی خوب در «سرگرمی»؛ 55٪ کمتر از ماه قبل خرج کرده‌اید.",
+        message: "صرفه‌جویی خوب در «سرگرمی»؛ نسبت به ماه قبل 55٪ کمتر خرج کرده‌اید.",
       },
     ]);
   });
@@ -124,7 +124,7 @@ describe("generateHighlights", () => {
       {
         type: "positive",
         category: "سفر",
-        message: "صرفه‌جویی خوب در «سفر»؛ 90٪ کمتر از ماه قبل خرج کرده‌اید.",
+        message: "صرفه‌جویی خوب در «سفر»؛ نسبت به ماه قبل 90٪ کمتر خرج کرده‌اید.",
       },
     ]);
   });
@@ -136,5 +136,31 @@ describe("generateHighlights", () => {
     });
 
     expect(generateHighlights(input)).toEqual([]);
+  });
+
+  it("uses the given periodLabel in place of the default month wording, in all three message types", () => {
+    const input = result({
+      totalPercentChange: -25,
+      categories: [
+        category({ category: "خوراک", percentChange: 60 }),
+        category({ category: "سرگرمی", percentChange: -55 }),
+      ],
+    });
+
+    const highlights = generateHighlights(input, "نسبت به هفته قبل");
+
+    expect(highlights).toEqual([
+      { type: "positive", message: "عالی! هزینه‌های شما 25٪ نسبت به هفته قبل کاهش یافته است." },
+      {
+        type: "warning",
+        category: "خوراک",
+        message: "هزینه «خوراک» نسبت به هفته قبل 60٪ افزایش یافته — کمی مراقب باشید.",
+      },
+      {
+        type: "positive",
+        category: "سرگرمی",
+        message: "صرفه‌جویی خوب در «سرگرمی»؛ نسبت به هفته قبل 55٪ کمتر خرج کرده‌اید.",
+      },
+    ]);
   });
 });

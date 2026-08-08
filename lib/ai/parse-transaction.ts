@@ -1,5 +1,11 @@
 import { chatCompletion } from "@/lib/nvidia-ai";
-import { findSimilarCategory, resolveNewCategoryIcon, type CategoryType } from "@/lib/categories";
+import {
+  findSimilarCategory,
+  resolveNewCategoryIcon,
+  FALLBACK_EXPENSE_CATEGORY,
+  FALLBACK_INCOME_CATEGORY,
+  type CategoryType,
+} from "@/lib/categories";
 import { findMerchant, type MerchantLookupResult, type MerchantMatchSource } from "@/lib/merchant-lookup";
 import { extractAmount } from "@/lib/extract-amount";
 import { extractDate } from "@/lib/extract-date";
@@ -36,8 +42,8 @@ export interface ParsedTransaction {
   date: string;
   // Where `category` came from - a learned user mapping, the global
   // merchant list, a keyword override, the AI's own guess, or a
-  // deterministically-parsed bank SMS (which always lands on "سایر" - see
-  // buildBankSmsResult).
+  // deterministically-parsed bank SMS (which always lands on
+  // resolveFallbackCategory(type) - see buildBankSmsResult).
   source?: MerchantMatchSource | "ai" | "bank-sms";
   // Only meaningful when source is "ai" - a merchant-resolved category is
   // always confidence: 1 / needsConfirmation: false (see resolveAiCategory).
@@ -53,7 +59,8 @@ export interface ParsedTransaction {
   bank?: Bank;
   bankConfidence?: number;
   // Strictly additive - `category` above is already a valid existing
-  // category (or "سایر") regardless of whether this is set. Only ever
+  // category (or the resolveFallbackCategory(type) fallback) regardless of
+  // whether this is set. Only ever
   // populated alongside an actual AI call, and only once findSimilarCategory
   // has confirmed it doesn't already match an existing category (a match
   // instead overwrites category/subcategory above - see
@@ -166,10 +173,22 @@ ${incomeTree}
 - confidence عددی بین ۰ و ۱ است: میزان اطمینانت به انتخاب category/subcategory (نه به amount یا date).
 - reason یک جمله کوتاه فارسی است که دلیل انتخاب category/subcategory را توضیح می‌دهد.
 - description خلاصه‌ای حداکثر ۵ کلمه‌ای و طبیعی از تراکنش است.
-- date را به‌صورت YYYY-MM-DD میلادی برگردان. اگر تاریخ خاصی گفته نشده امروز را برگردان. "دیروز"/"پریروز" را نسبت به امروز محاسبه کن.`;
+- date را به‌صورت YYYY-MM-DD میلادی برگردان. اگر تاریخ خاصی گفته نشده امروز را برگردان. "دیروز"/"پریروز" را نسبت به امروز محاسبه کن. "هفته پیش" یعنی دقیقاً ۷ روز قبل از امروز.
+
+نمونه برای دسته‌های مشابه که ممکن است اشتباه گرفته شوند:
+- «نون و ماست خریدم» → category: «خوراک و رستوران»، subcategory: «سوپرمارکت» (نه «رستوران و کافه»، چون خرید برای خانه است نه صرف بیرون از خانه)
+- «با دوستام قهوه خوردیم» → category: «خوراک و رستوران»، subcategory: «رستوران و کافه»
+- «اسنپ گرفتم برم فرودگاه» → category: «حمل‌ونقل»، subcategory: «تاکسی و اسنپ» (نه «بنزین»، چون اسنپ سرویس تاکسی است نه خرید مستقیم سوخت)
+- «قبض اینترنت خونه رو پرداخت کردم» → category: «قبوض و اشتراک»، subcategory: «اینترنت و تلفن» (نه «برق، آب و گاز»، با اینکه هر دو «قبض» هستند)
+- «رفتم دکتر و ویزیت دادم» → category: «سلامت»، subcategory: «ویزیت پزشک» (نه «دارو»، چون هزینه ویزیت است نه خرید دارو)
+- «حقوق این ماه ریخت» → category: «حقوق» | «بابت یه پروژه فریلنس پول گرفتم» → category: «درآمد آزاد»`;
 }
 
-function extractJson(text: string): unknown {
+// Exported for reuse by lib/ai/detect-transaction-intent.ts, which needs
+// the exact same "strip a ```json fence if the model added one anyway"
+// tolerance for its own json-mode call - duplicating this would just be
+// two copies of the same fence-stripping regex to keep in sync.
+export function extractJson(text: string): unknown {
   const cleaned = text
     .trim()
     .replace(/^```(json)?/i, "")
@@ -192,6 +211,38 @@ function resolveCategoryOverride(
   const candidate = match.subcategory ?? match.category;
   if (!candidate) return null;
   return categories.some((c) => c.name === candidate && c.type === type) ? candidate : null;
+}
+
+// Re-exported so existing imports of these two from this module (tests,
+// mainly) keep working unchanged - the actual values now live in
+// lib/categories.ts (see the comment there for why: lib/merchants.ts needs
+// them too, and importing them from here directly would create a circular
+// import that crashes at runtime). resolveFallbackCategory and
+// warnIfFallbackCategoryMissing below still just reference these two
+// constants, so nothing else about this file's behavior changes.
+export { FALLBACK_EXPENSE_CATEGORY, FALLBACK_INCOME_CATEGORY };
+
+function resolveFallbackCategory(type: CategoryType): string {
+  return type === "income" ? FALLBACK_INCOME_CATEGORY : FALLBACK_EXPENSE_CATEGORY;
+}
+
+// Dev-only guard against the exact class of bug FALLBACK_EXPENSE_CATEGORY/
+// FALLBACK_INCOME_CATEGORY above were introduced to fix: if prisma/seed.ts
+// ever renames either seeded category without this file catching up, a
+// transaction landing on the fallback would silently fail
+// createTransaction's exact-name lookup (InvalidCategoryError) instead of
+// saving. This can't prevent that, but it makes the drift loud in dev/test
+// logs the moment a real categories list stops containing the expected
+// name, instead of surfacing only much later as a confusing save error. No
+// behavior change in production.
+function warnIfFallbackCategoryMissing(name: string, type: CategoryType, categories: CategoryOption[]): void {
+  if (process.env.NODE_ENV === "production") return;
+  const exists = categories.some((c) => c.name === name && c.type === type && !c.parentName);
+  if (!exists) {
+    console.error(
+      `[parse-transaction] fallback category "${name}" (type: ${type}) not found in the provided categories list - check it still matches the seeded DefaultCategory name in prisma/seed.ts.`
+    );
+  }
 }
 
 interface AiCategoryResolution {
@@ -231,7 +282,7 @@ function findValidatedLeafCategory(
 // still returned as-is, for observability.
 //   >= 0.80          -> auto-assign, no confirmation needed
 //   0.50 - 0.79      -> assign, but flag needsConfirmation
-//   < 0.50 / invalid -> fall back to "سایر", flag needsConfirmation
+//   < 0.50 / invalid -> fall back to resolveFallbackCategory(type), flag needsConfirmation
 function resolveAiCategory(parsed: RawParsedTransaction, type: CategoryType, categories: CategoryOption[]): AiCategoryResolution {
   const leafCategory = findValidatedLeafCategory(parsed.category, parsed.subcategory, type, categories);
   const rawConfidence =
@@ -246,20 +297,24 @@ function resolveAiCategory(parsed: RawParsedTransaction, type: CategoryType, cat
   if (effectiveConfidence >= 0.5) {
     return { category: leafCategory!, confidence: rawConfidence, needsConfirmation: true };
   }
-  return { category: "سایر", confidence: rawConfidence, needsConfirmation: true };
+  const fallback = resolveFallbackCategory(type);
+  warnIfFallbackCategoryMissing(fallback, type, categories);
+  return { category: fallback, confidence: rawConfidence, needsConfirmation: true };
 }
 
 // The bank engine only resolves amount/type/date - it has no merchant name
 // or category signal at all (SMS bodies carry a transaction label like
 // "خرید"/"برداشت", never a merchant name), so category always lands on
-// "سایر", the same generic bucket the AI path falls back to on low/invalid
-// confidence, and needsConfirmation is always true so the user picks the
-// real category on the preview screen.
-function buildBankSmsResult(bankResult: BankSmsParseResult, rawInput: string): ParsedTransaction {
+// resolveFallbackCategory(bankResult.type), the same generic bucket the AI
+// path falls back to on low/invalid confidence, and needsConfirmation is
+// always true so the user picks the real category on the preview screen.
+function buildBankSmsResult(bankResult: BankSmsParseResult, rawInput: string, categories: CategoryOption[]): ParsedTransaction {
+  const fallback = resolveFallbackCategory(bankResult.type);
+  warnIfFallbackCategoryMissing(fallback, bankResult.type, categories);
   return {
     amount: bankResult.amount,
     type: bankResult.type,
-    category: "سایر",
+    category: fallback,
     // rawInput is the raw multi-line SMS body; normalize it (collapses line
     // breaks/whitespace) before truncating so the preview description reads
     // as one line instead of a ragged mid-word cut.
@@ -291,14 +346,14 @@ export async function parseTransactionWithAI(
       const overrideCategory = resolveCategoryOverride(merchantMatch, merchantMatch.type, categories);
       if (overrideCategory) {
         return {
-          ...buildBankSmsResult(bankResult, rawInput),
+          ...buildBankSmsResult(bankResult, rawInput, categories),
           category: overrideCategory,
           source: merchantMatch.source,
           needsConfirmation: false,
         };
       }
     }
-    return buildBankSmsResult(bankResult, rawInput);
+    return buildBankSmsResult(bankResult, rawInput, categories);
   }
 
   const merchantMatch = await findMerchant(userId, rawInput);

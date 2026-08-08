@@ -47,17 +47,30 @@ export function AddTransactionForm({
   accounts: initialAccounts,
   defaultAccountId,
   editTransaction,
+  initialTransaction,
+  initialRawInput,
 }: {
   categories: CategoryOption[];
   accounts: AccountOption[];
   defaultAccountId: number;
   editTransaction?: EditTransaction;
+  // Pre-fills the preview/edit stage the same way editTransaction does, but
+  // for a transaction that doesn't exist in the DB yet (e.g. the chat
+  // assistant's suggest_transaction "ویرایش کن" handoff - see
+  // components/chat/chat-interface.tsx). Deliberately a separate prop from
+  // editTransaction: `isEdit` below (and therefore PATCH-vs-POST, the
+  // cancel button's destination, "ذخیره تغییرات" vs "تأیید و ذخیره") stays
+  // driven only by editTransaction, so a suggestion still goes through the
+  // normal create path - it just skips the raw-text step.
+  initialTransaction?: ParsedTransaction;
+  initialRawInput?: string;
 }) {
   const router = useRouter();
   const isEdit = Boolean(editTransaction);
-  const [text, setText] = useState("");
-  const [stage, setStage] = useState<Stage>(editTransaction ? "preview" : "input");
-  const [parsed, setParsed] = useState<ParsedTransaction | null>(editTransaction ?? null);
+  const isFromSuggestion = Boolean(initialTransaction);
+  const [text, setText] = useState(initialRawInput ?? "");
+  const [stage, setStage] = useState<Stage>(editTransaction || initialTransaction ? "preview" : "input");
+  const [parsed, setParsed] = useState<ParsedTransaction | null>(editTransaction ?? initialTransaction ?? null);
   const [accounts, setAccounts] = useState<AccountOption[]>(initialAccounts);
   const [categories, setCategories] = useState<CategoryOption[]>(initialCategories);
   const [accountId, setAccountId] = useState<number>(editTransaction?.accountId ?? defaultAccountId);
@@ -152,7 +165,12 @@ export function AddTransactionForm({
         : await fetch("/api/transactions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...transaction, rawInput: text.trim(), accountId }),
+            body: JSON.stringify({
+              ...transaction,
+              rawInput: text.trim(),
+              accountId,
+              ...(isFromSuggestion ? { source: "assistant-suggestion" } : {}),
+            }),
           });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || (isEdit ? "خطا در ذخیره تغییرات." : "خطا در ذخیره تراکنش."));
@@ -212,7 +230,14 @@ export function AddTransactionForm({
     }
   }
 
-  async function handleCreateCategory(suggestion: SuggestedCategoryWithIcon, type: CategoryType) {
+  // `target` picks which piece of state the resolved category gets written back
+  // to - the full preview stage's `parsed`, or the inline live-preview card's
+  // `livePreview`. Defaults to "parsed" so the existing call site below is unchanged.
+  async function handleCreateCategory(
+    suggestion: SuggestedCategoryWithIcon,
+    type: CategoryType,
+    target: "parsed" | "livePreview" = "parsed"
+  ) {
     setIsCreatingCategory(true);
     setCreateCategoryError(null);
     try {
@@ -233,9 +258,16 @@ export function AddTransactionForm({
       // so the <select> below never renders two <option>s with the same key/value.
       setCategories((prev) => (prev.some((c) => c.id === data.category.id) ? prev : [...prev, data.category]));
       // Functional update (unlike the direct-closure `setParsed({ ...parsed, ... })` calls
-      // elsewhere in this file) because this fires after an await - `parsed` may have moved
-      // on (e.g. the user edited amount/description while the request was in flight).
-      setParsed((prev) => (prev ? { ...prev, category: data.category.name, suggestedCategory: undefined } : prev));
+      // elsewhere in this file) because this fires after an await - `parsed`/`livePreview`
+      // may have moved on (e.g. the user edited amount/description while the request was
+      // in flight).
+      const applyResolvedCategory = (prev: ParsedTransaction | null) =>
+        prev ? { ...prev, category: data.category.name, suggestedCategory: undefined } : prev;
+      if (target === "livePreview") {
+        setLivePreview(applyResolvedCategory);
+      } else {
+        setParsed(applyResolvedCategory);
+      }
     } catch (err) {
       setCreateCategoryError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
     } finally {
@@ -287,6 +319,7 @@ export function AddTransactionForm({
             livePreview &&
             (() => {
               const liveCategories = categories.filter((c) => c.type === livePreview.type);
+              const liveSuggestedCategory = livePreview.suggestedCategory ?? null;
               return (
                 <div className="rounded-2xl border border-border bg-surface p-4">
                   <p className="text-xs text-muted">پیش‌نمایش هوش مصنوعی — قابل ویرایش</p>
@@ -389,6 +422,25 @@ export function AddTransactionForm({
                     </div>
                   )}
 
+                  {liveSuggestedCategory && (
+                    <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-accent/10 px-3 py-2">
+                      <p className="text-xs text-accent">
+                        دسته‌بندی «{liveSuggestedCategory.icon} {liveSuggestedCategory.name}» براش پیدا نشد — می‌خوای
+                        بسازمش؟
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => handleCreateCategory(liveSuggestedCategory, livePreview.type, "livePreview")}
+                        disabled={isCreatingCategory}
+                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                      >
+                        {isCreatingCategory && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
+                        بساز
+                      </button>
+                    </div>
+                  )}
+                  {createCategoryError && <p className="mt-1.5 text-xs text-warning">{createCategoryError}</p>}
+
                   {liveMissingBankAccountLabel && (
                     <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-accent/10 px-3 py-2">
                       <p className="text-xs text-accent">
@@ -413,7 +465,7 @@ export function AddTransactionForm({
                   <button
                     type="button"
                     onClick={handleSubmitLivePreview}
-                    disabled={isCreatingBankAccount}
+                    disabled={isCreatingBankAccount || isCreatingCategory}
                     className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
                   >
                     ثبت تراکنش

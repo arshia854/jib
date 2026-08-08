@@ -15,6 +15,30 @@ export const DEFAULT_ACCOUNT = {
   initialBalance: 0,
 };
 
+// The generic "nothing else fits" bucket each user's category list is
+// seeded with (see prisma/seed.ts's DEFAULT_CATEGORIES) - one per type,
+// since "سایر هزینه‌ها" is expense-only and "سایر درآمدها" is income-only.
+// Named as constants (rather than inlined at each fallback site) so this
+// can't silently drift out of sync with the seed in more than one place.
+//
+// Defined here (not in lib/ai/parse-transaction.ts, which re-exports these
+// for backward compatibility) specifically so lib/merchants.ts can import
+// the real values too, for merchant entries (e.g. payment gateways) that
+// have no better category than "whatever the fallback bucket is". Importing
+// them from parse-transaction.ts directly would create a circular import -
+// parse-transaction.ts -> lib/merchant-lookup.ts -> lib/merchants.ts ->
+// back to parse-transaction.ts - which is not just a lint smell here: it
+// was verified to actually throw
+// "ReferenceError: Cannot access 'FALLBACK_EXPENSE_CATEGORY' before
+// initialization" at runtime whenever something imports parse-transaction.ts
+// before merchants.ts (the realistic order, since API routes import
+// parseTransactionWithAI directly). lib/categories.ts has no runtime
+// dependency back on parse-transaction.ts (only a `import type`, erased at
+// compile time) or on merchants.ts/merchant-lookup.ts, so it's a safe
+// shared home for both sides.
+export const FALLBACK_EXPENSE_CATEGORY = "سایر هزینه‌ها";
+export const FALLBACK_INCOME_CATEGORY = "سایر درآمدها";
+
 // Below this shared-token ratio (intersection size / size of the shorter
 // name's token set), an overlap is treated as coincidental - e.g. sharing
 // one generic word - rather than a genuine near-match, so stage 3 below

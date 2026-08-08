@@ -30,15 +30,17 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  financeAccounts  FinanceAccount[]
-  categories       Category[]
-  transactions     Transaction[]
-  chatMessages     ChatMessage[]
-  merchantMappings MerchantMapping[]
+  financeAccounts      FinanceAccount[]
+  categories           Category[]
+  transactions         Transaction[]
+  chatMessages         ChatMessage[]
+  merchantMappings     MerchantMapping[]
   // OAuth provider links (Google, etc). Named/modeled to match what
   // @auth/prisma-adapter expects - see lib/auth/config.ts.
-  oauthAccounts    Account[]
-  errorLogs        ErrorLog[]
+  oauthAccounts        Account[]
+  errorLogs            ErrorLog[]
+  spendingSummaryCache SpendingSummaryCache[]
+  facts                UserFact[]
 }
 
 // NextAuth/Auth.js OAuth provider link table (required shape + field names
@@ -84,13 +86,19 @@ model FinanceAccount {
 }
 
 model Category {
-  id         Int      @id @default(autoincrement())
-  name       String
-  icon       String
-  color      String
-  type       String
-  isTransfer Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  name        String
+  icon        String
+  color       String
+  type        String
+  isTransfer  Boolean  @default(false)
+  // Whether spending in this category counts as "essential" vs
+  // "discretionary" (see lib/analytics/spending-summary.ts's
+  // discretionaryExpense/topDiscretionaryCategories). Defaults to true so a
+  // newly-created category with no explicit classification isn't silently
+  // counted as wasteful spending.
+  isEssential Boolean  @default(true)
+  createdAt   DateTime @default(now())
 
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -113,6 +121,17 @@ model Transaction {
   description String?
   rawInput    String
   date        DateTime @default(now())
+  // Provenance of how this transaction was created. Null for the app's
+  // original manual-entry/AI-parse-preview flow (POST /api/transactions
+  // without a source, the only path that existed before this field) -
+  // deliberately not backfilled to a literal "manual" string on existing
+  // rows, since null already means exactly that and doing so would be a
+  // needless bulk write. Only other value in use so far:
+  // "assistant-suggestion" (components/chat/chat-interface.tsx's "بله"
+  // confirm action and its "ویرایش کن" -> AddTransactionForm handoff, both
+  // going through the same createTransaction() call - see
+  // lib/data/transactions.ts).
+  source      String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -159,6 +178,71 @@ model ChatMessage {
   @@index([userId, timestamp])
 }
 
+// Cache of a previous (already-closed) Jalali month's spending summary, used
+// by the financial chat assistant (see lib/analytics/spending-summary.ts) to
+// avoid re-running a full transaction aggregation on every chat message.
+// Previous-month data is immutable in practice - users don't edit month-old
+// transactions often - so it's safe to cache. The current, still-in-progress
+// month is never cached here and is always computed live.
+model SpendingSummaryCache {
+  id         Int      @id @default(autoincrement())
+  // Jalali "YYYY-MM", e.g. "1404-05".
+  monthKey   String
+  // JSON-serialized MonthSummary (see lib/analytics/spending-summary.ts).
+  payload    String
+  computedAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, monthKey])
+}
+
+// A single known fact about a user - either stated explicitly by them or
+// inferred from their transaction history - used by the financial chat
+// assistant (see lib/facts/user-facts.ts, lib/facts/infer-facts.ts, and its
+// injection into the chat prompt in lib/data/chat-context.ts) so it stops
+// repeating advice/comparisons that don't fit the user's actual life (e.g.
+// suggesting they cut gas spending when they don't own a car). `key` is
+// restricted to a small fixed vocabulary registered in
+// lib/facts/known-facts.ts, not free text. One row per (user, key) - a
+// re-statement or re-inference updates the existing row rather than
+// accumulating history, since only the current value matters here.
+model UserFact {
+  id Int @id @default(autoincrement())
+
+  // Small fixed vocabulary, e.g. "has_car", "is_renter",
+  // "income_regularity" - validated against lib/facts/known-facts.ts before
+  // every write, never invented ad-hoc at the call site.
+  key        String
+  // Interpretation depends on `key` (e.g. "true"/"false", or an
+  // enum-like string such as "regular"/"irregular") - see
+  // lib/facts/known-facts.ts for each key's allowed values.
+  value      String
+  // "user_stated" | "inferred". user_stated is always authoritative: it's
+  // written once the user says something explicitly and is never
+  // overwritten by a later inference for the same key (see
+  // lib/facts/user-facts.ts's setInferredFact).
+  source     String
+  // Null for user_stated (certain by definition, no probability to
+  // express). 0-1 for inferred facts - lib/facts/user-facts.ts's
+  // formatFactsForPrompt only surfaces high-enough-confidence inferred
+  // facts to the LLM.
+  confidence Float?
+  // Optional short human-readable justification, e.g. "no gas/parking
+  // transactions in 90 days" - for admin/debugging visibility only, never
+  // shown to the end user verbatim.
+  note       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+}
+
 // Minimal error log for admin operational visibility (see app/app/admin).
 // Written via lib/error-log.ts from a few key spots (root error boundary,
 // AI parsing route, OTP send flow) - not a catch-all logging pipeline.
@@ -186,13 +270,17 @@ model ErrorLog {
 // per-user Category model above, with the same hierarchy/uniqueness shape
 // minus the userId scope.
 model DefaultCategory {
-  id         Int      @id @default(autoincrement())
-  name       String
-  icon       String
-  color      String
-  type       String
-  isTransfer Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  name        String
+  icon        String
+  color       String
+  type        String
+  isTransfer  Boolean  @default(false)
+  // Copied onto each new user's own Category.isEssential at onboarding (see
+  // lib/data/onboarding.ts) - same meaning/default as Category.isEssential
+  // above.
+  isEssential Boolean  @default(true)
+  createdAt   DateTime @default(now())
 
   parentId Int?
   parent   DefaultCategory?  @relation("DefaultCategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)

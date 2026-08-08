@@ -9,6 +9,7 @@ export interface DefaultCategoryWithChildren {
   color: string;
   type: string;
   isTransfer: boolean;
+  isEssential: boolean;
   parentId: number | null;
   children: {
     id: number;
@@ -17,6 +18,7 @@ export interface DefaultCategoryWithChildren {
     color: string;
     type: string;
     isTransfer: boolean;
+    isEssential: boolean;
     parentId: number | null;
   }[];
 }
@@ -40,6 +42,13 @@ export interface CreateDefaultCategoryInput {
   type: CategoryType;
   isTransfer?: boolean;
   parentId?: number | null;
+  // Essential vs discretionary classification (see
+  // lib/analytics/spending-summary.ts). Defaults to true, same safe default
+  // as the schema's own DefaultCategory.isEssential column. Settable via
+  // this data-layer function, but not yet exposed as a toggle in the admin
+  // categories UI (app/app/admin/categories) - noted here so it isn't
+  // silently forgotten.
+  isEssential?: boolean;
 }
 
 // Errors here (P2002 unique-constraint on name+type) are left to bubble up
@@ -55,6 +64,7 @@ export async function createDefaultCategory(data: CreateDefaultCategoryInput) {
       type: data.type,
       isTransfer: data.isTransfer ?? false,
       parentId: data.parentId ?? null,
+      isEssential: data.isEssential ?? true,
     },
   });
 }
@@ -63,6 +73,9 @@ export interface UpdateDefaultCategoryInput {
   name?: string;
   icon?: string;
   color?: string;
+  // See CreateDefaultCategoryInput.isEssential - same "data-layer only, no
+  // admin UI toggle yet" caveat applies here.
+  isEssential?: boolean;
 }
 
 export async function updateDefaultCategory(id: number, data: UpdateDefaultCategoryInput) {

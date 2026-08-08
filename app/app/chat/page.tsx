@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/prisma";
+import { getDefaultAccount } from "@/lib/data/accounts";
 import { ChatInterface } from "@/components/chat/chat-interface";
 
 export const dynamic = "force-dynamic";
@@ -9,11 +10,14 @@ export default async function ChatPage() {
   const session = await getSession();
   if (!session) redirect("/login");
 
-  const history = await prisma.chatMessage.findMany({
-    where: { userId: session.userId },
-    orderBy: { timestamp: "asc" },
-    take: 50,
-  });
+  const [history, defaultAccount] = await Promise.all([
+    prisma.chatMessage.findMany({
+      where: { userId: session.userId },
+      orderBy: { timestamp: "asc" },
+      take: 50,
+    }),
+    getDefaultAccount(session.userId),
+  ]);
 
   const initialMessages = history.map((m) => ({
     id: String(m.id),
@@ -21,5 +25,5 @@ export default async function ChatPage() {
     content: m.content,
   }));
 
-  return <ChatInterface initialMessages={initialMessages} />;
+  return <ChatInterface initialMessages={initialMessages} defaultAccountId={defaultAccount.id} />;
 }
