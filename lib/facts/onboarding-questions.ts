@@ -14,14 +14,24 @@ import type { FactKey } from "./known-facts";
 // allowedValues - there's no runtime check tying the two together, so a
 // value here that drifts from KNOWN_FACTS would just always get rejected by
 // the API instead of failing loudly at compile time.
+//
+// `emoji` is kept split out from `label` (rather than inlined at the front
+// of the label string, as it used to be) so each surface can lay them out
+// differently - the onboarding wizard's big option cards vs. Settings'
+// compact chips (which just recombine them as `${emoji} ${label}`) -
+// without either side parsing emoji back out of a string at render time.
 
 export interface FactOption {
   value: string;
+  emoji: string;
   label: string;
 }
 
 export interface FactQuestion {
   key: FactKey;
+  // Shown as a small badge above the question in the onboarding wizard -
+  // purely decorative, not used by Settings' compact chip layout.
+  emoji: string;
   question: string;
   options: FactOption[];
 }
@@ -29,29 +39,32 @@ export interface FactQuestion {
 export const ONBOARDING_FACT_QUESTIONS: FactQuestion[] = [
   {
     key: "employment_status",
+    emoji: "🧑‍💼",
     question: "وضعیت شغلی‌ت چیه؟",
     options: [
-      { value: "employed", label: "👔 کارمند" },
-      { value: "self_employed", label: "💼 آزاد / فریلنسر" },
-      { value: "business_owner", label: "🏪 صاحب کسب‌وکار" },
-      { value: "student", label: "🎓 دانشجو" },
-      { value: "unemployed", label: "🏠 غیرشاغل" },
+      { value: "employed", emoji: "👔", label: "کارمند" },
+      { value: "self_employed", emoji: "💼", label: "آزاد / فریلنسر" },
+      { value: "business_owner", emoji: "🏪", label: "صاحب کسب‌وکار" },
+      { value: "student", emoji: "🎓", label: "دانشجو" },
+      { value: "unemployed", emoji: "🏠", label: "غیرشاغل" },
     ],
   },
   {
     key: "income_regularity",
+    emoji: "💸",
     question: "درآمدت هرماه تقریباً ثابته یا متغیره؟",
     options: [
-      { value: "regular", label: "📈 ثابت" },
-      { value: "irregular", label: "🎲 متغیر" },
+      { value: "regular", emoji: "📈", label: "ثابت" },
+      { value: "irregular", emoji: "🎲", label: "متغیر" },
     ],
   },
   {
     key: "account_structure",
+    emoji: "🧾",
     question: "چطور حساب‌هاتو مدیریت می‌کنی؟",
     options: [
-      { value: "single_account", label: "👛 یک حساب ساده" },
-      { value: "multi_account", label: "🏦 چند حساب یا کارت" },
+      { value: "single_account", emoji: "👛", label: "یک حساب ساده" },
+      { value: "multi_account", emoji: "🏦", label: "چند حساب یا کارت" },
     ],
   },
 ];

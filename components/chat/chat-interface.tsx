@@ -10,6 +10,13 @@ interface PendingSuggestion {
   rawInput: string;
   status: "pending" | "confirming" | "confirmed" | "dismissed" | "error";
   error?: string;
+  // SEC-10 (docs/roadmap-status.md): generated once, when the suggestion
+  // itself is created (see handleSend() below) - not per confirm click -
+  // so every call to handleConfirmSuggestion() for this same suggestion
+  // (a double-tap on "بله", or the "تلاش دوباره" retry after an error)
+  // sends the same key, letting the server recognize a retry instead of
+  // creating a duplicate transaction.
+  idempotencyKey: string;
 }
 
 interface Message {
@@ -107,7 +114,12 @@ export function ChatInterface({
               ? {
                   ...m,
                   content: data.message,
-                  suggestion: { transaction: data.transaction, rawInput: data.rawInput, status: "pending" },
+                  suggestion: {
+                    transaction: data.transaction,
+                    rawInput: data.rawInput,
+                    status: "pending",
+                    idempotencyKey: crypto.randomUUID(),
+                  },
                 }
               : m
           )
@@ -140,7 +152,7 @@ export function ChatInterface({
     const target = messages.find((m) => m.id === messageId);
     if (!target?.suggestion || target.suggestion.status !== "pending") return;
 
-    const { transaction, rawInput } = target.suggestion;
+    const { transaction, rawInput, idempotencyKey } = target.suggestion;
     setMessages((prev) => updateSuggestion(prev, messageId, { status: "confirming" }));
 
     try {
@@ -156,6 +168,19 @@ export function ChatInterface({
           rawInput,
           accountId: defaultAccountId,
           source: "assistant-suggestion",
+          idempotencyKey,
+          // See lib/ai/parse-transaction.ts's AssetPurchaseSuggestion and
+          // app/api/chat/route.ts's buildConfirmationText, which already
+          // told the user this would happen before they said "بله".
+          ...(transaction.assetSuggestion
+            ? {
+                assetPurchase: {
+                  type: transaction.assetSuggestion.type,
+                  quantity: transaction.assetSuggestion.quantity,
+                  purchasePricePerUnit: transaction.assetSuggestion.purchasePricePerUnit,
+                },
+              }
+            : {}),
         }),
       });
       const data = await res.json();
@@ -163,7 +188,11 @@ export function ChatInterface({
 
       setMessages((prev) => [
         ...updateSuggestion(prev, messageId, { status: "confirmed" }),
-        { id: crypto.randomUUID(), role: "assistant", content: "ثبت شد ✅" },
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: transaction.assetSuggestion ? "ثبت شد ✅ و به دارایی‌هات هم اضافه شد." : "ثبت شد ✅",
+        },
       ]);
     } catch (err) {
       setMessages((prev) =>
@@ -219,7 +248,7 @@ export function ChatInterface({
           <div key={m.id} className={`flex flex-col ${m.role === "user" ? "items-start" : "items-end"}`}>
             <div
               className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                m.role === "user" ? "bg-primary-darker text-white" : "border border-border bg-surface text-foreground"
+                m.role === "user" ? "bg-primary text-on-primary" : "border border-border bg-surface text-foreground"
               }`}
             >
               {m.content || (sending && m.role === "assistant" ? <ThinkingIndicator /> : "")}
@@ -232,7 +261,7 @@ export function ChatInterface({
                     <button
                       type="button"
                       onClick={() => handleConfirmSuggestion(m.id)}
-                      className="flex items-center gap-1.5 rounded-xl bg-primary-darker px-3 py-1.5 text-xs font-semibold text-white"
+                      className="flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-semibold text-on-primary"
                     >
                       <CheckIcon className="h-3.5 w-3.5" />
                       بله
@@ -259,7 +288,7 @@ export function ChatInterface({
                     <button
                       type="button"
                       onClick={() => handleConfirmSuggestion(m.id)}
-                      className="flex items-center gap-1.5 rounded-xl bg-primary-darker px-3 py-1.5 text-xs font-semibold text-white"
+                      className="flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-semibold text-on-primary"
                     >
                       تلاش دوباره
                     </button>
@@ -292,7 +321,7 @@ export function ChatInterface({
           onClick={handleSend}
           disabled={sending || !input.trim()}
           aria-label="ارسال"
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary-dark text-white disabled:opacity-50"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-on-primary disabled:opacity-50"
         >
           <SendIcon className="h-5 w-5" />
         </button>

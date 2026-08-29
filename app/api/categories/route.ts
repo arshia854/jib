@@ -10,6 +10,10 @@ import {
 import { findSimilarCategory, resolveNewCategoryIcon, type CategoryType } from "@/lib/categories";
 import type { CategoryOption } from "@/lib/ai/parse-transaction";
 import { rateLimitResponse } from "@/lib/rate-limit";
+import { MAX_NAME_LENGTH, MAX_ICON_LENGTH } from "@/lib/limits";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
+import { isPrismaErrorCode } from "@/lib/observability/classify-error";
 
 // The ai-suggestion path never receives a color from the client (see the
 // "Required body fields" note below), so newly-created categories there all
@@ -68,7 +72,7 @@ export async function POST(request: NextRequest) {
   const type: CategoryType | null = body?.type === "income" || body?.type === "expense" ? body.type : null;
   const source: "manual" | "ai-suggestion" = body?.source === "ai-suggestion" ? "ai-suggestion" : "manual";
 
-  if (!name || !type) {
+  if (!name || !type || name.length > MAX_NAME_LENGTH) {
     return NextResponse.json({ error: "نام و نوع دسته‌بندی الزامی هستند." }, { status: 400 });
   }
 
@@ -79,7 +83,7 @@ export async function POST(request: NextRequest) {
     const icon = typeof body?.icon === "string" ? body.icon.trim() : "";
     const color = typeof body?.color === "string" ? body.color.trim() : "";
 
-    if (!icon || !color) {
+    if (!icon || !color || icon.length > MAX_ICON_LENGTH) {
       return NextResponse.json({ error: "همه فیلدها (نام، آیکون، رنگ، نوع) الزامی هستند." }, { status: 400 });
     }
     if (!/^#[0-9A-Fa-f]{6}$/.test(color)) {
@@ -93,6 +97,18 @@ export async function POST(request: NextRequest) {
       if (isUniqueConstraintError(error)) {
         return NextResponse.json({ error: "دسته‌بندی با این نام و نوع قبلاً وجود دارد." }, { status: 409 });
       }
+      // Unhandled/unexpected only - the unique-constraint case above is an
+      // already-handled, expected outcome and isn't reported here.
+      reportError({
+        errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+        route: "categories",
+        userId: session.userId,
+        message: error instanceof Error ? error.message : "Unexpected error creating category",
+        error,
+        context: isPrismaErrorCode(error)
+          ? { operation: "createCategory", model: "Category", source: "manual", code: error.code }
+          : { operation: "createCategory", model: "Category", source: "manual" },
+      });
       throw error;
     }
   }
@@ -105,6 +121,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "نام دسته والد نامعتبر است." }, { status: 400 });
   }
   const parentName: string | null = typeof parentNameRaw === "string" ? parentNameRaw.trim() : null;
+  if (parentName !== null && parentName.length > MAX_NAME_LENGTH) {
+    return NextResponse.json({ error: "نام دسته والد نامعتبر است." }, { status: 400 });
+  }
 
   const since = new Date(Date.now() - RATE_LIMIT_WINDOW_MS);
   const recentCategories = await listCategoriesCreatedSince(session.userId, since);
@@ -160,6 +179,18 @@ export async function POST(request: NextRequest) {
     if (isUniqueConstraintError(error)) {
       return NextResponse.json({ error: "دسته‌بندی با این نام و نوع قبلاً وجود دارد." }, { status: 409 });
     }
+    // Unhandled/unexpected only - the unique-constraint case above is an
+    // already-handled, expected outcome and isn't reported here.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "categories",
+      userId: session.userId,
+      message: error instanceof Error ? error.message : "Unexpected error creating category",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "createCategory", model: "Category", source: "ai-suggestion", code: error.code }
+        : { operation: "createCategory", model: "Category", source: "ai-suggestion" },
+    });
     throw error;
   }
 }

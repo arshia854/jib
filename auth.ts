@@ -23,6 +23,56 @@ interface GoogleProfile {
   email_verified?: boolean;
 }
 
+// Extracted out of the Credentials({...}) config below (Phase 16) purely so
+// it's directly unit-testable - NextAuth's own `NextAuth({...})` call gives
+// no way to reach back into a provider's `authorize()` closure from outside
+// (it's consumed internally, not exposed on the returned `{ handlers, auth,
+// ... }`), and exercising it only through `handlers.POST` would mean
+// reimplementing NextAuth's own CSRF/cookie-encoding machinery just to
+// drive a test - exactly what the roadmap's own Phase 16 prompt says not to
+// build. This is a pure extraction: same body, same behavior, just a named
+// export instead of an inline closure, so the "phone-otp" provider below is
+// unchanged at runtime.
+export async function authorizePhoneOtp(credentials: Partial<Record<"code", unknown>> | undefined, request: Request) {
+  const code = typeof credentials?.code === "string" ? credentials.code.trim() : "";
+  if (!/^\d{6}$/.test(code)) throw new OtpInvalidFormatError();
+
+  const store = await cookies();
+  const token = store.get(OTP_COOKIE)?.value;
+  const payload = token ? await verifyOtpToken(token) : null;
+  if (!payload) throw new OtpExpiredError();
+
+  const verifyLimit = checkRateLimit(`otp-verify:phone:${payload.phone}`, OTP_VERIFY_PHONE_RULE);
+  if (!verifyLimit.allowed) throw new OtpRateLimitedError();
+
+  if (payload.attempts >= MAX_ATTEMPTS) {
+    store.delete(OTP_COOKIE);
+    throw new OtpMaxAttemptsError();
+  }
+
+  if (payload.code !== code) {
+    const retryToken = await createOtpToken(payload.phone, payload.code, payload.attempts + 1);
+    store.set(OTP_COOKIE, retryToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: OTP_TTL_SECONDS,
+    });
+    throw new OtpWrongCodeError(MAX_ATTEMPTS - payload.attempts - 1);
+  }
+
+  store.delete(OTP_COOKIE);
+
+  let user = await prisma.user.findUnique({ where: { phoneNumber: payload.phone } });
+  if (!user) {
+    user = await prisma.user.create({ data: { phoneNumber: payload.phone } });
+  }
+
+  void request; // available for IP/UA logging if ever needed
+  return { ...user, id: String(user.id) };
+}
+
 export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
   adapter: PrismaAdapter(prisma),
   // Credentials providers can't have real database-backed sessions (there's
@@ -47,45 +97,7 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
       credentials: {
         code: { label: "کد تایید", type: "text" },
       },
-      async authorize(credentials, request) {
-        const code = typeof credentials?.code === "string" ? credentials.code.trim() : "";
-        if (!/^\d{6}$/.test(code)) throw new OtpInvalidFormatError();
-
-        const store = await cookies();
-        const token = store.get(OTP_COOKIE)?.value;
-        const payload = token ? await verifyOtpToken(token) : null;
-        if (!payload) throw new OtpExpiredError();
-
-        const verifyLimit = checkRateLimit(`otp-verify:phone:${payload.phone}`, OTP_VERIFY_PHONE_RULE);
-        if (!verifyLimit.allowed) throw new OtpRateLimitedError();
-
-        if (payload.attempts >= MAX_ATTEMPTS) {
-          store.delete(OTP_COOKIE);
-          throw new OtpMaxAttemptsError();
-        }
-
-        if (payload.code !== code) {
-          const retryToken = await createOtpToken(payload.phone, payload.code, payload.attempts + 1);
-          store.set(OTP_COOKIE, retryToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            path: "/",
-            maxAge: OTP_TTL_SECONDS,
-          });
-          throw new OtpWrongCodeError(MAX_ATTEMPTS - payload.attempts - 1);
-        }
-
-        store.delete(OTP_COOKIE);
-
-        let user = await prisma.user.findUnique({ where: { phoneNumber: payload.phone } });
-        if (!user) {
-          user = await prisma.user.create({ data: { phoneNumber: payload.phone } });
-        }
-
-        void request; // available for IP/UA logging if ever needed
-        return { ...user, id: String(user.id) };
-      },
+      authorize: authorizePhoneOtp,
     }),
 
     Credentials({

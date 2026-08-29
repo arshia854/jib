@@ -23,6 +23,10 @@ export function TransactionFilterBar({ categories }: { categories: CategoryOptio
       if (value === "all") params.delete(key);
       else params.set(key, value);
     }
+    // A filter change invalidates whatever page the user was on - land back
+    // on page 1 instead of e.g. showing an empty "page 4" of a now much
+    // smaller filtered result set.
+    params.delete("page");
     const query = params.toString();
     router.push(query ? `${pathname}?${query}` : pathname);
   }

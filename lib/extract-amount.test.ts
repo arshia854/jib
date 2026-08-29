@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { extractAmount } from "@/lib/extract-amount";
 
 describe("extractAmount", () => {
-  it("resolves a تومن-suffixed number at face value (explicit currency, unaffected by the bare-number rule)", () => {
-    expect(extractAmount("۵۰ تومن")).toBe(50);
+  it("no longer exempts an explicit تومن-suffixed small number from the bare-number x1000 rule", () => {
+    expect(extractAmount("۵۰ تومن")).toBe(50000);
   });
 
   it("applies the هزار scale word", () => {
@@ -41,7 +41,7 @@ describe("extractAmount", () => {
   // input that produces a negative token; the <= 0 guard only ever
   // fires on zero in practice.
   it("has no reachable path to a negative parsed value", () => {
-    expect(extractAmount("-۵۰ تومن")).toBe(50);
+    expect(extractAmount("-۵۰ تومن")).toBe(50000);
   });
 
   it("bails on an empty string", () => {
@@ -49,15 +49,15 @@ describe("extractAmount", () => {
   });
 
   it("resolves a single number written with mixed Persian/Latin digits", () => {
-    expect(extractAmount("۵0 تومن")).toBe(50);
+    expect(extractAmount("۵0 تومن")).toBe(50000);
   });
 
   it("bails when Persian and Latin digits form two separate numbers", () => {
     expect(extractAmount("قیمت 20 و ۵۰ تومن")).toBeNull();
   });
 
-  describe("bare numbers with no unit at all (new default: x1000)", () => {
-    it("multiplies a bare 1-999 number by 1000", () => {
+  describe("bare numbers, with or without a plain تومان/تومن (magnitude-based x1000 rule)", () => {
+    it("multiplies a bare 1-9999 number by 1000", () => {
       expect(extractAmount("۸۰")).toBe(80000);
     });
 
@@ -65,20 +65,36 @@ describe("extractAmount", () => {
       expect(extractAmount("ناهار ۸۰ خوردم")).toBe(80000);
     });
 
-    it("leaves a bare number unchanged once it's 1000 or more", () => {
-      expect(extractAmount("۱۵۰۰")).toBe(1500);
+    it("multiplies a 4-digit number by 1000 too - inflation means these are still colloquial shorthand", () => {
+      expect(extractAmount("۱۳۰۰ شام")).toBe(1_300_000);
+    });
+
+    it("leaves a bare number unchanged once it's 10,000 or more", () => {
+      expect(extractAmount("۵۰۰۰۰")).toBe(50000);
+    });
+
+    it("does not re-inflate an explicit تومن-suffixed number once it's already 10,000 or more", () => {
+      expect(extractAmount("۵۰۰۰۰ تومن")).toBe(50000);
     });
 
     it("boundary: 1 -> 1000", () => {
       expect(extractAmount("۱")).toBe(1000);
     });
 
-    it("boundary: 999 -> 999000", () => {
-      expect(extractAmount("۹۹۹")).toBe(999000);
+    it("boundary: 9999 -> 9999000", () => {
+      expect(extractAmount("۹۹۹۹")).toBe(9_999_000);
     });
 
-    it("boundary: 1000 -> unchanged", () => {
-      expect(extractAmount("۱۰۰۰")).toBe(1000);
+    it("boundary: 10000 -> unchanged", () => {
+      expect(extractAmount("۱۰۰۰۰")).toBe(10000);
+    });
+
+    it("real-world phrasing: '۵۰ تومن ناهار خوردم' means 50,000 toman", () => {
+      expect(extractAmount("۵۰ تومن ناهار خوردم")).toBe(50000);
+    });
+
+    it("هزار stays unaffected by the raised ceiling - already resolves correctly on its own", () => {
+      expect(extractAmount("۵۰ هزار تومن")).toBe(50000);
     });
   });
 

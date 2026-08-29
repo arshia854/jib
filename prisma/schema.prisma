@@ -21,7 +21,15 @@ model User {
   age           Int?
   // "user" | "admin". Plain string (not a Prisma enum) to match every other
   // type-like field in this schema (FinanceAccount.type, Category.type,
-  // Transaction.type). No self-serve way to become "admin" - see README.md.
+  // Transaction.type) - this installed Prisma version (7.9.1) also has no
+  // `@check`/`@@check` attribute at all (confirmed via `prisma validate`,
+  // not assumed), so a schema-level constraint isn't expressible here
+  // either way. No self-serve way to become "admin" - see README.md.
+  // Restricted to these two values at the DB level by a hand-written CHECK
+  // constraint (see prisma/migrations/20260822213426_add_user_role_check_constraint
+  // - necessarily hand-written, not `migrate diff` output, since there's
+  // nothing about this line for it to diff) and at the application level by
+  // lib/auth/session.ts's isValidRole().
   role          String    @default("user")
   // Set to block a user; enforced in lib/auth/session.ts's getSession() so a
   // blocked user is signed out (session treated as null) on their next
@@ -29,6 +37,14 @@ model User {
   blockedAt     DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+  // Settings toggle (opt-in, default off) - when true, the dashboard
+  // (app/app/page.tsx, via lib/data/dashboard.ts) also shows the user's
+  // totalBalance converted into equivalent grams of 18k gold / USD, using
+  // the same live prices as the Assets feature (lib/prices/get-live-prices.ts).
+  // Purely a display preference - never affects any stored amount, and
+  // getLivePrices() is only ever called for a user who has this on, so
+  // opting out costs nothing against brsapi.ir's daily free-tier quota.
+  showBalanceInAssets Boolean @default(false)
 
   financeAccounts      FinanceAccount[]
   categories           Category[]
@@ -41,6 +57,7 @@ model User {
   errorLogs            ErrorLog[]
   spendingSummaryCache SpendingSummaryCache[]
   facts                UserFact[]
+  assets               Asset[]
 }
 
 // NextAuth/Auth.js OAuth provider link table (required shape + field names
@@ -115,12 +132,12 @@ model Category {
 }
 
 model Transaction {
-  id          Int      @id @default(autoincrement())
-  amount      Int
-  type        String
-  description String?
-  rawInput    String
-  date        DateTime @default(now())
+  id               Int      @id @default(autoincrement())
+  amount           Int
+  type             String
+  description      String?
+  rawInput         String
+  date             DateTime @default(now())
   // Provenance of how this transaction was created. Null for the app's
   // original manual-entry/AI-parse-preview flow (POST /api/transactions
   // without a source, the only path that existed before this field) -
@@ -131,9 +148,35 @@ model Transaction {
   // confirm action and its "ویرایش کن" -> AddTransactionForm handoff, both
   // going through the same createTransaction() call - see
   // lib/data/transactions.ts).
-  source      String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  source           String?
+  // SEC-10 (docs/roadmap-status.md): optional client-generated idempotency
+  // key for POST /api/transactions - a repeat create request carrying a
+  // key already used by this same user returns the existing row instead of
+  // creating a duplicate (see createTransaction() in lib/data/transactions.ts).
+  // Null for every caller that doesn't send one (the field is optional
+  // precisely so older/cached PWA clients that predate this change keep
+  // working unmodified - see that function's own comment on how a null key
+  // skips the idempotency check entirely). Not backfilled on existing rows
+  // for the same reason `source` above wasn't: null already means "no key
+  // was used," so a bulk write here would be a needless live-DB mutation.
+  idempotencyKey   String?
+  // Background AI-enrichment state for a "quick submit" transaction (see
+  // lib/workflows/enrich-transaction.ts). Null for every transaction created
+  // through the normal AI-preview-then-confirm flow, which is already fully
+  // parsed before the row exists - this column only ever gets set by the
+  // quick-submit path (POST /api/transactions with `quick: true`).
+  //   "pending" -> workflow enqueued/running; amount/category are a
+  //                deterministic best-guess, UI shows a subtle indicator.
+  //   "failed"  -> AI enrichment exhausted retries (or was skipped by the
+  //                rate limit); best-guess values stand, UI nudges the user
+  //                to double-check/edit instead of spinning forever.
+  // Cleared back to null once enrichment succeeds (see
+  // applyTransactionEnrichment), or as soon as the user manually edits the
+  // transaction first (see updateTransaction) - a slow-finishing background
+  // job must never clobber a manual correction.
+  enrichmentStatus String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -144,10 +187,25 @@ model Transaction {
   categoryId Int
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
+  @@unique([userId, idempotencyKey])
   @@index([userId, date])
   @@index([type])
   @@index([categoryId])
   @@index([accountId])
+  // Phase 17 (docs/roadmap-status.md): serves
+  // lib/data/accounts.ts's getTotalBalance() -
+  // transaction.groupBy({ by: ["accountId", "type"], where: { userId },
+  // _sum: { amount } }) - added alongside that query, not speculatively.
+  // Measured against the local SQLite test DB (20,000 seeded rows): without
+  // this index, the query already used [userId, date]'s userId prefix to
+  // find the user's own rows, but still needed a temp B-tree to satisfy
+  // GROUP BY accountId, type (~32-40ms). With this index (column order
+  // matches the query's WHERE-then-GROUP-BY shape, `amount` trailing so the
+  // index alone covers the SUM without a row lookup), SQLite's own EXPLAIN
+  // QUERY PLAN switches from "USE TEMP B-TREE FOR GROUP BY" to "SEARCH
+  // Transaction USING COVERING INDEX" - no temp sort, no table access at
+  // all - measured at ~6ms, roughly 6-7x faster on that same seeded data.
+  @@index([userId, accountId, type, amount])
 }
 
 model MerchantMapping {
@@ -288,4 +346,72 @@ model DefaultCategory {
 
   @@unique([name, type])
   @@index([parentId])
+}
+
+// One purchase ("lot") of an asset the user tracks outside their regular
+// accounts/transactions - gold/usd/bitcoin (live-priced, see
+// lib/prices/get-live-prices.ts) or a manually-priced "custom" asset (a
+// stock, a car, ...). Lot-based (one row per purchase) rather than one
+// aggregated row per type with a weighted-average cost basis, so buying the
+// same asset at different times/prices stays simple to record, edit, and
+// delete individually while still summing cleanly for a per-type/portfolio
+// total in lib/data/assets.ts's listAssetsWithValue().
+model Asset {
+  id   Int    @id @default(autoincrement())
+  // "gold" | "usd" | "bitcoin" | "custom" - same plain-string-enum
+  // convention as User.role/FinanceAccount.type/Category.type above.
+  type String
+
+  // Only set (and only meaningful) for type="custom" - the user's own label
+  // for a manually-tracked asset (e.g. "سهام فولاد", "خودرو"). Null for
+  // gold/usd/bitcoin, which get their display label from ASSET_TYPES
+  // (lib/assets.ts) instead.
+  name String?
+
+  // Amount held, in the asset's natural unit: grams for gold, whole dollars
+  // for usd, BTC for bitcoin, an arbitrary count for custom.
+  quantity Float
+
+  // Purchase price per unit, in Toman, at the time this lot was bought.
+  // BigInt (not Int, unlike Transaction.amount/FinanceAccount.initialBalance)
+  // because a per-BTC Toman price routinely exceeds Int32's ~2.147 billion
+  // ceiling that Prisma actually enforces client-side - see the "Applying a
+  // new schema change" note in AGENTS.md's history for this project's
+  // existing Int-range precedent (MAX_TRANSACTION_AMOUNT/
+  // MAX_ACCOUNT_BALANCE_MAGNITUDE in lib/limits.ts). SQLite stores both Int
+  // and BigInt the same way (an untyped INTEGER column) so this doesn't
+  // change how the value is stored, only what range Prisma Client accepts.
+  purchasePricePerUnit BigInt
+  purchaseDate         DateTime @default(now())
+
+  // Only set/updated for type="custom" - the current per-unit value the
+  // user enters/updates by hand, since there's no live price feed for an
+  // arbitrary asset. Always null for gold/usd/bitcoin, whose current price
+  // always comes live from lib/prices/get-live-prices.ts instead of being
+  // stored per-row.
+  currentPricePerUnit BigInt?
+
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Shared (not per-user - market prices don't depend on who's asking) cache
+// of the latest gold/usd/bitcoin Toman prices fetched from brsapi.ir (see
+// lib/prices/get-live-prices.ts), so concurrent page loads from any number
+// of users reuse one fetch instead of each hitting the external API - keeps
+// usage well inside its free-tier daily request cap. Same caching motive as
+// SpendingSummaryCache above, for a different kind of value. Single-row
+// table - id is always 1.
+model LivePriceCache {
+  id                   Int      @id @default(1)
+  goldGramPricePerUnit BigInt
+  usdPricePerUnit      BigInt
+  bitcoinPricePerUnit  BigInt
+  fetchedAt            DateTime
 }

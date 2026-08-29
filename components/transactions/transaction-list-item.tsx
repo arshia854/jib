@@ -13,6 +13,7 @@ interface Props {
   amount: number;
   type: string;
   category: { name: string; icon: string; color: string };
+  enrichmentStatus?: string | null;
 }
 
 export function TransactionListItem(props: Props) {
@@ -47,6 +48,7 @@ export function TransactionListItem(props: Props) {
             amount={props.amount}
             type={props.type}
             category={props.category}
+            enrichmentStatus={props.enrichmentStatus}
           />
         </div>
         {confirming ? (

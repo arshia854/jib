@@ -1,0 +1,37 @@
+# Keeps the Docker build context small and guarantees nothing local/secret
+# ever reaches the image - mirrors .gitignore's intent, plus Docker/VCS
+# metadata .gitignore has no reason to list. See docs/deploy-runbook.md for
+# how the image actually gets its (runtime-only, never baked-in) secrets.
+
+# VCS / editor
+.git
+.gitignore
+
+# dependencies (installed fresh inside the image - see Dockerfile's deps stage)
+node_modules
+
+# build output (generated inside the image)
+.next
+generated
+out
+build
+
+# env files - never copied into the image; the running container gets these
+# from its own environment (see docs/deploy-runbook.md)
+.env
+.env.*
+!.env.example
+
+# local-only SQLite artifacts (see AGENTS.md - production is 100% remote
+# Turso, these are never used outside local dev/tests)
+dev.db
+dev.db-journal
+.vitest-test.db
+.vitest-test.db-wal
+.vitest-test.db-shm
+.vitest-test.db-journal
+
+# misc
+*.log
+.DS_Store
+coverage

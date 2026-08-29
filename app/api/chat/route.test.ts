@@ -9,11 +9,13 @@ vi.mock("@/lib/auth/session", () => ({
 vi.mock("@/lib/nvidia-ai", () => ({
   chatCompletion: vi.fn(),
   streamChatCompletion: vi.fn(),
+  AI_PROVIDER: "nvidia-nim",
 }));
 
 import { getSession } from "@/lib/auth/session";
 import { chatCompletion, streamChatCompletion } from "@/lib/nvidia-ai";
 import { POST } from "@/app/api/chat/route";
+import { MAX_CHAT_MESSAGE_LENGTH } from "@/lib/limits";
 
 const mockedGetSession = vi.mocked(getSession);
 const mockedChatCompletion = vi.mocked(chatCompletion);
@@ -153,5 +155,59 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     mockedGetSession.mockResolvedValue(null);
     const res = await POST(makeRequest("سلام"));
     expect(res.status).toBe(401);
+  });
+
+  it("rejects a message over MAX_CHAT_MESSAGE_LENGTH with a generic 400, before persisting it or calling the AI", async () => {
+    const tooLong = "ا".repeat(MAX_CHAT_MESSAGE_LENGTH + 1);
+
+    const countBefore = await prisma.chatMessage.count({ where: { userId } });
+    const res = await POST(makeRequest(tooLong));
+    const countAfter = await prisma.chatMessage.count({ where: { userId } });
+
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(typeof data.error).toBe("string");
+    expect(countAfter).toBe(countBefore);
+    expect(mockedChatCompletion).not.toHaveBeenCalled();
+    expect(mockedStreamChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("accepts a message of exactly MAX_CHAT_MESSAGE_LENGTH, sending and persisting it in full (no truncation)", async () => {
+    const atLimit = "ب".repeat(MAX_CHAT_MESSAGE_LENGTH);
+    mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": false}');
+    mockedStreamChatCompletion.mockResolvedValueOnce(textStream("چطور می‌تونم کمکتون کنم؟"));
+
+    const res = await POST(makeRequest(atLimit));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("text/plain");
+
+    // The current turn is exactly HISTORY_MESSAGE_CHAR_CAP-exempt (see
+    // truncateForPrompt in app/api/chat/route.ts) - confirm it reaches the
+    // model unmodified, not silently cut down to that 800-char figure.
+    const messagesSent = mockedStreamChatCompletion.mock.calls[0][0];
+    const lastMessage = messagesSent[messagesSent.length - 1];
+    expect(lastMessage.content).toBe(atLimit);
+    expect(lastMessage.content.length).toBe(MAX_CHAT_MESSAGE_LENGTH);
+
+    const savedUserMsg = await prisma.chatMessage.findFirst({
+      where: { userId, role: "user", content: atLimit },
+    });
+    expect(savedUserMsg).not.toBeNull();
+  });
+
+  // AI checklist item: "provider error" - end-to-end through this route's
+  // own streamChatCompletion() call site (distinct from the
+  // chatCompletion() intent-detection call, already exercised by every
+  // other test in this file).
+  it("returns 502 with a Persian error message when streamChatCompletion fails, and reports the failure", async () => {
+    mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": false}');
+    mockedStreamChatCompletion.mockRejectedValueOnce(new Error("NVIDIA NIM: connection refused"));
+
+    const res = await POST(makeRequest("این ماه چقدر خرج کردم؟"));
+
+    expect(res.status).toBe(502);
+    const data = await res.json();
+    expect(typeof data.error).toBe("string");
   });
 });

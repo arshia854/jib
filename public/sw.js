@@ -1,4 +1,10 @@
-const CACHE_VERSION = "jeeb-v1";
+// Bumped to v2: app/icon.svg and public/icons/*.png changed (amber ->
+// yellow, and the PWA icons now actually use the jib mark instead of the
+// old unrelated wallet-card art). /icons/* is cached cache-first below with
+// no revalidation, so already-installed users would otherwise keep seeing
+// the stale icon forever - bumping this version forces activate() to drop
+// the old STATIC_CACHE and refetch.
+const CACHE_VERSION = "jeeb-v2";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const PAGES_CACHE = `${CACHE_VERSION}-pages`;
 

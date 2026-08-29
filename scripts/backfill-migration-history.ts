@@ -34,9 +34,18 @@ import { createClient } from "@libsql/client";
 
 const MIGRATIONS_DIR = join(process.cwd(), "prisma/migrations");
 
-// Every migration folder currently in prisma/migrations, oldest first - all
-// three have already been applied to the live Turso DB by hand (verified:
-// live tables/columns match what each one describes).
+// Every migration folder that has actually been applied to the live Turso
+// DB by hand, oldest first (verified per-migration: live tables/columns/
+// indexes match what each one describes). Phase 19 fix (2026-08-23): this
+// list had drifted to include 20260823072849_add_transaction_balance_
+// groupby_index, but Phase 17's own roadmap entry confirms that migration's
+// DDL was never applied live - only verified against the local/test DB.
+// Adding a name here before the real DDL has actually been run against
+// Turso would let --execute insert a false "already applied" bookkeeping
+// row - the exact bug the name gets added "as part of the live-apply step
+// itself, not before it's approved" rule (see AGENTS.md step 6) exists to
+// prevent. Removed until that migration is actually applied live; add it
+// back at that point, per the normal process.
 const MIGRATION_NAMES = [
   "20260802152001_init_postgres",
   "20260802175335_add_admin_role_error_log_default_categories",
@@ -44,6 +53,9 @@ const MIGRATION_NAMES = [
   "20260806140512_add_user_fact",
   "20260806144050_add_category_is_essential",
   "20260808153511_add_transaction_source",
+  "20260819081756_add_transaction_idempotency_key",
+  "20260824095212_add_transaction_enrichment_status",
+  "20260825171540_add_assets",
 ];
 
 // The two migrations whose migration.sql was rewritten from its original

@@ -10,7 +10,7 @@ export function LandingHeader() {
         </Link>
         <Link
           href="/login"
-          className="rounded-xl bg-primary-darker px-4 py-2 text-xs font-semibold text-white transition-transform active:scale-95"
+          className="rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-on-primary transition-transform active:scale-95"
         >
           ورود / ثبت‌نام
         </Link>

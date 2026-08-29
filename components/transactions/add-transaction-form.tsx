@@ -2,13 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckIcon, XIcon, SpinnerIcon, ChatIcon } from "@/components/icons";
-import { formatToman, formatNumber, formatJalaaliDate } from "@/lib/format";
+import { CheckIcon, XIcon, SpinnerIcon, ChatIcon, ZapIcon } from "@/components/icons";
+import { formatToman, formatNumber, formatDecimal, formatJalaaliDate } from "@/lib/format";
 import { toLatinDigits } from "@/lib/normalize";
-import type { ParsedTransaction, SuggestedCategoryWithIcon } from "@/lib/ai/parse-transaction";
+import type { ParsedTransaction, SuggestedCategoryWithIcon, AssetPurchaseSuggestion } from "@/lib/ai/parse-transaction";
 import { getBankLabel } from "@/lib/bank/labels";
+import { getAssetTypeOption } from "@/lib/assets";
 import { getAccountTypeIcon, findMatchingAccount, type AccountOption } from "@/lib/accounts";
-import type { CategoryType } from "@/lib/categories";
+import { FALLBACK_EXPENSE_CATEGORY, type CategoryType } from "@/lib/categories";
+import { extractAmount } from "@/lib/extract-amount";
+import { extractDate } from "@/lib/extract-date";
+import { enqueueTransaction, deleteQueuedTransaction } from "@/lib/offline/transaction-queue";
 
 interface CategoryOption {
   id: number;
@@ -40,6 +44,55 @@ function getMissingBankAccountLabel(
   }
   const label = getBankLabel(transaction.bank);
   return findMatchingAccount(accounts, label) ? null : label;
+}
+
+// Phase 8 (docs/roadmap-status.md): wires the new named confidence levels
+// into the existing needsConfirmation warning as a supplementary hint, not
+// a replacement for it - needsConfirmation itself still gates whether this
+// warning shows at all, unchanged (see lib/ai/confidence.ts's top-of-file
+// note on why retrofitting that gate from confidenceLevel was deliberately
+// rejected). categorizationConfidence: "low" (bank-SMS with no merchant
+// match, or an AI guess below the 0.50 floor) gets a stronger nudge to
+// pick the category deliberately; "medium" (an AI guess in the 0.50-0.79
+// band, or a findSimilarCategory name-match override) keeps the softer,
+// already-shipped "please double check" wording.
+function getConfirmationHintText(parsed: ParsedTransaction): string {
+  if (parsed.source === "bank-sms") return "چی خریدی؟ کمکم کن درست دسته‌بندی‌ش کنم 🙂";
+  if (parsed.categorizationConfidence === "low") return "دسته‌بندی را مطمئن نیستم، لطفاً خودت انتخاب کن";
+  return "دسته‌بندی پیشنهادی است، لطفاً بررسی کنید";
+}
+
+// Shown whenever lib/ai/parse-transaction.ts detected the text as buying a
+// live-priced asset (gold/usd/bitcoin) - in both the inline live-preview
+// card and the full preview stage, since either can be the one the user
+// actually submits from (see saveTransaction's own comment on why the
+// inline card is the primary path). Checked by default - unchecking it
+// keeps the expense transaction but skips creating the matching Asset row,
+// for when the AI got this wrong.
+function AssetPurchaseNotice({
+  assetSuggestion,
+  included,
+  onToggle,
+}: {
+  assetSuggestion: AssetPurchaseSuggestion;
+  included: boolean;
+  onToggle: (value: boolean) => void;
+}) {
+  const option = getAssetTypeOption(assetSuggestion.type);
+  return (
+    <label className="mt-3 flex items-start gap-2 rounded-xl bg-accent/10 px-3 py-2 text-xs text-accent">
+      <input
+        type="checkbox"
+        checked={included}
+        onChange={(e) => onToggle(e.target.checked)}
+        className="mt-0.5 shrink-0"
+      />
+      <span>
+        {option?.icon} {formatDecimal(assetSuggestion.quantity, 4)}
+        {option?.unitLabel ? ` ${option.unitLabel}` : ""} {option?.label ?? ""} هم به دارایی‌هات اضافه شود
+      </span>
+    </label>
+  );
 }
 
 export function AddTransactionForm({
@@ -84,8 +137,25 @@ export function AddTransactionForm({
   const [createAccountError, setCreateAccountError] = useState<string | null>(null);
   const [isCreatingCategory, setIsCreatingCategory] = useState(false);
   const [createCategoryError, setCreateCategoryError] = useState<string | null>(null);
+  // Whether a detected asset purchase (AssetPurchaseNotice above) should
+  // actually create the matching Asset row on submit - checked by default
+  // whenever one is detected (see the two setIncludeAssetPurchase(true)
+  // resets below, on a fresh parse / on dismissing the current attempt), so
+  // this only ever needs to be un-checked, not turned on by hand.
+  const [includeAssetPurchase, setIncludeAssetPurchase] = useState(true);
 
   const parseAbortControllerRef = useRef<AbortController | null>(null);
+  // SEC-10 (docs/roadmap-status.md): idempotency key for the create request
+  // below, generated once per submit *attempt* - not per render, and not
+  // regenerated on a retry of that same attempt (a second saveTransaction()
+  // call for the same pending transaction, e.g. the user clicking "تأیید و
+  // ذخیره" again after a failed save, or a double-tap racing ahead of
+  // React's state update). Reusing the same key means the server-side
+  // check recognizes the retry and returns the already-created transaction
+  // instead of a duplicate. Only reset in handleReset()/
+  // handleDismissLivePreview() below - the points where the user actually
+  // abandons this attempt and starts a new one.
+  const idempotencyKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -125,6 +195,10 @@ export function AddTransactionForm({
       if (!res.ok) throw new Error(data.error || "خطا در پردازش متن.");
       setLivePreview(data.parsed);
       setLiveError(null);
+      // A fresh parse result is a new asset-purchase attempt (if any) -
+      // default back to included rather than carrying over a previous
+      // attempt's un-check (see AssetPurchaseNotice's own comment).
+      setIncludeAssetPurchase(true);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setLiveError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
@@ -139,52 +213,169 @@ export function AddTransactionForm({
     }
   }
 
-  // Shared by the full preview stage's confirm button and the inline
-  // live-preview card's direct submit button - both promote a
-  // ParsedTransaction into `parsed` and save it the same way. Takes the
-  // transaction explicitly rather than reading `parsed` from state so the
-  // live-preview path can call this in the same tick as setParsed() without
-  // racing React's async state update.
-  async function saveTransaction(transaction: ParsedTransaction) {
+  // Shared by the full preview stage's confirm button, the inline
+  // live-preview card's direct submit button, and "ثبت سریع" (quick
+  // submit) below - all three promote a ParsedTransaction into `parsed` and
+  // save it the same way. Takes the transaction explicitly rather than
+  // reading `parsed` from state so the live-preview path can call this in
+  // the same tick as setParsed() without racing React's async state update.
+  //
+  // `quick`: set only by handleQuickSubmit() - forwarded verbatim to POST
+  // /api/transactions, where it marks the row for background AI
+  // enrichment (see that route's own comment and lib/workflows/
+  // enrich-transaction.ts). Not applicable to edits, same as the rest of
+  // createPayload below.
+  async function saveTransaction(transaction: ParsedTransaction, { quick = false }: { quick?: boolean } = {}) {
     setStage("saving");
     setError(null);
+    // Not applicable to the PATCH/edit path - SEC-10 only covers creation
+    // (see lib/data/transactions.ts's createTransaction()); generated
+    // lazily so an edit never allocates one it doesn't use.
+    if (!isEdit && !idempotencyKeyRef.current) {
+      idempotencyKeyRef.current = crypto.randomUUID();
+    }
+
+    // Offline queue (creation only - out of scope for edits, which have no
+    // idempotency key to safely retry with; see lib/offline/
+    // transaction-queue.ts's own comment). Built and written to IndexedDB
+    // *before* the network attempt below, on every submit regardless of
+    // actual connectivity - same code path online or offline, per this
+    // task's own brief - so a tab closed right after this line still has
+    // the item recorded when it reopens.
+    // Explicit fields (not `...transaction`) - matches exactly what
+    // POST /api/transactions actually reads (see its own body parsing),
+    // so the stored queue payload and the request body are identical and
+    // neither carries ParsedTransaction-only fields (`suggestedCategory`,
+    // `confidence`, `bank`, ...) that the server would just ignore anyway.
+    const createPayload = !isEdit
+      ? {
+          amount: transaction.amount,
+          type: transaction.type,
+          category: transaction.category,
+          description: transaction.description,
+          date: transaction.date,
+          rawInput: text.trim(),
+          accountId,
+          idempotencyKey: idempotencyKeyRef.current!,
+          ...(isFromSuggestion ? { source: "assistant-suggestion" as const } : {}),
+          ...(quick ? { quick: true as const } : {}),
+          ...(transaction.assetSuggestion && includeAssetPurchase
+            ? {
+                assetPurchase: {
+                  type: transaction.assetSuggestion.type,
+                  quantity: transaction.assetSuggestion.quantity,
+                  purchasePricePerUnit: transaction.assetSuggestion.purchasePricePerUnit,
+                },
+              }
+            : {}),
+        }
+      : null;
+    if (createPayload) {
+      try {
+        await enqueueTransaction(createPayload);
+      } catch {
+        // IndexedDB unavailable (SSR/old browser/storage disabled) -
+        // offline queuing is a progressive enhancement, same precedent as
+        // ServiceWorkerRegister's own catch-and-ignore; the fetch below
+        // still runs normally either way.
+      }
+    }
+
     try {
-      const res = isEdit
-        ? await fetch(`/api/transactions/${editTransaction!.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              amount: transaction.amount,
-              type: transaction.type,
-              category: transaction.category,
-              description: transaction.description,
-              date: transaction.date,
-              accountId,
-            }),
-          })
-        : await fetch("/api/transactions", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              ...transaction,
-              rawInput: text.trim(),
-              accountId,
-              ...(isFromSuggestion ? { source: "assistant-suggestion" } : {}),
-            }),
-          });
+      let res: Response;
+      try {
+        res = isEdit
+          ? await fetch(`/api/transactions/${editTransaction!.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                amount: transaction.amount,
+                type: transaction.type,
+                category: transaction.category,
+                description: transaction.description,
+                date: transaction.date,
+                accountId,
+              }),
+            })
+          : await fetch("/api/transactions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(createPayload),
+            });
+      } catch (networkErr) {
+        // No queued fallback for edits - same error handling as before.
+        if (!createPayload) throw networkErr;
+        // No connectivity: the "pending" row written above stays queued;
+        // OfflineSyncRegister's `online` listener (via
+        // lib/offline/sync-transactions.ts) retries it automatically once
+        // the browser reconnects, reusing this same idempotencyKey. From
+        // the user's point of view this submit succeeded (optimistically) -
+        // navigate to the transactions list, where the queued item is
+        // already visible as pending, instead of showing an error.
+        router.push("/app/transactions");
+        return;
+      }
+
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || (isEdit ? "خطا در ذخیره تغییرات." : "خطا در ذخیره تراکنش."));
+
+      if (createPayload) {
+        // Server-confirmed create - the queued row's job is done. Best-
+        // effort: a failed cleanup here isn't user-visible (the pending
+        // list only shows non-"synced" rows) and would just be a harmless
+        // no-op the next time anything touches this key.
+        deleteQueuedTransaction(createPayload.idempotencyKey).catch(() => {});
+      }
+
       router.push(isEdit ? "/app/transactions" : "/app");
       router.refresh();
     } catch (err) {
+      if (createPayload) {
+        // A real server-side rejection (validation/auth), not a
+        // connectivity failure - that's handled above, before this catch
+        // is reached. The inline error below already tells the user what's
+        // wrong on this exact screen, so there's nothing left for the
+        // offline queue to retry - remove the row instead of leaving a
+        // ghost "failed" entry for something already being corrected here.
+        deleteQueuedTransaction(createPayload.idempotencyKey).catch(() => {});
+      }
       setError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
       setStage("preview");
+      // idempotencyKeyRef deliberately NOT cleared here - see its own
+      // comment. A retry of this exact attempt (clicking "تأیید و ذخیره"
+      // again) must reuse the same key.
     }
   }
 
   function handleConfirm() {
     if (!parsed) return;
     saveTransaction(parsed);
+  }
+
+  // "ثبت سریع" - saves instantly from the raw textarea text with no AI
+  // call at all, using the same deterministic extractors the AI's own fast
+  // path already relies on (lib/extract-amount.ts, lib/extract-date.ts -
+  // see lib/ai/parse-transaction.ts's merchant-match branch). type/category
+  // can't be guessed deterministically, so they default to "expense" /
+  // FALLBACK_EXPENSE_CATEGORY, same defaults the AI prompt itself falls
+  // back to when the text doesn't say otherwise - the background workflow
+  // (lib/workflows/enrich-transaction.ts) refines both once it runs.
+  // amount is guaranteed non-null here because the button below is disabled
+  // whenever it isn't.
+  function handleQuickSubmit() {
+    const trimmed = text.trim();
+    const amount = extractAmount(trimmed);
+    if (!amount) return;
+
+    const quickParsed: ParsedTransaction = {
+      amount,
+      type: "expense",
+      category: FALLBACK_EXPENSE_CATEGORY,
+      description: trimmed.slice(0, 40),
+      date: extractDate(trimmed) ?? new Date().toISOString().slice(0, 10),
+    };
+    setParsed(quickParsed);
+    saveTransaction(quickParsed, { quick: true });
   }
 
   function handleSubmitLivePreview() {
@@ -200,6 +391,10 @@ export function AddTransactionForm({
     setLiveError(null);
     setLiveCategoryExpanded(false);
     setCreateAccountError(null);
+    setIncludeAssetPurchase(true);
+    // A new attempt starts from here (different/cleared text) - SEC-10's
+    // idempotency key must not carry over to it.
+    idempotencyKeyRef.current = null;
   }
 
   function handleReset() {
@@ -207,7 +402,12 @@ export function AddTransactionForm({
     setError(null);
     setCreateAccountError(null);
     setCreateCategoryError(null);
+    setIncludeAssetPurchase(true);
     setStage("input");
+    // Same reasoning as handleDismissLivePreview() above - "ویرایش متن"
+    // sends the user back to edit the raw text, so whatever they submit
+    // next is a new attempt, not a retry of this one.
+    idempotencyKeyRef.current = null;
   }
 
   async function handleCreateBankAccount(name: string) {
@@ -301,14 +501,31 @@ export function AddTransactionForm({
             rows={4}
             className="w-full resize-none rounded-2xl border border-border bg-surface p-4 text-sm text-foreground outline-none focus:border-accent"
           />
-          <button
-            type="button"
-            onClick={handleProcess}
-            disabled={!showLiveResult}
-            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
-          >
-            پردازش
-          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handleProcess}
+              disabled={!showLiveResult}
+              className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-on-primary disabled:opacity-50"
+            >
+              پردازش
+            </button>
+            {/* Disabled whenever the text has no deterministically-extractable
+                amount (lib/extract-amount.ts) - handleQuickSubmit relies on
+                that same extraction succeeding, so this is real feedback, not
+                just a style cue: if this is disabled, "پردازش" (the AI path)
+                is the only way to save this particular text. */}
+            <button
+              type="button"
+              onClick={handleQuickSubmit}
+              disabled={!extractAmount(text.trim())}
+              title="ثبت فوری بدون تحلیل هوش مصنوعی - دسته‌بندی بعداً خودکار تکمیل می‌شود"
+              className="flex shrink-0 items-center justify-center gap-1.5 rounded-2xl border border-accent px-4 py-3.5 text-sm font-semibold text-accent disabled:opacity-50"
+            >
+              <ZapIcon className="h-4 w-4" />
+              ثبت سریع
+            </button>
+          </div>
           {showLiveResult && isParsing && !livePreview && !liveError && (
             <p className="flex items-center gap-1.5 text-xs text-muted">
               <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
@@ -351,7 +568,7 @@ export function AddTransactionForm({
                           })
                         }
                         className={`flex-1 rounded-xl py-2 text-sm font-medium transition-colors ${
-                          livePreview.type === t ? "bg-primary-darker text-white" : "bg-background text-muted"
+                          livePreview.type === t ? "bg-primary text-on-primary" : "bg-background text-muted"
                         }`}
                       >
                         {t === "income" ? "درآمد" : "هزینه"}
@@ -381,7 +598,7 @@ export function AddTransactionForm({
                           onClick={() => setLivePreview({ ...livePreview, category: c.name })}
                           className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                             livePreview.category === c.name
-                              ? "bg-primary-darker text-white"
+                              ? "bg-primary text-on-primary"
                               : "border border-border bg-background text-muted"
                           }`}
                         >
@@ -403,7 +620,7 @@ export function AddTransactionForm({
                         const selectedCategory = liveCategories.find((c) => c.name === livePreview.category);
                         if (!selectedCategory) return null;
                         return (
-                          <span className="flex items-center gap-1.5 rounded-full bg-primary-darker px-3 py-1.5 text-xs font-medium text-white">
+                          <span className="flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-on-primary">
                             <span
                               className="h-2 w-2 shrink-0 rounded-full"
                               style={{ backgroundColor: selectedCategory.color }}
@@ -432,7 +649,7 @@ export function AddTransactionForm({
                         type="button"
                         onClick={() => handleCreateCategory(liveSuggestedCategory, livePreview.type, "livePreview")}
                         disabled={isCreatingCategory}
-                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-on-primary disabled:opacity-50"
                       >
                         {isCreatingCategory && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
                         بساز
@@ -440,6 +657,14 @@ export function AddTransactionForm({
                     </div>
                   )}
                   {createCategoryError && <p className="mt-1.5 text-xs text-warning">{createCategoryError}</p>}
+
+                  {livePreview.assetSuggestion && (
+                    <AssetPurchaseNotice
+                      assetSuggestion={livePreview.assetSuggestion}
+                      included={includeAssetPurchase}
+                      onToggle={setIncludeAssetPurchase}
+                    />
+                  )}
 
                   {liveMissingBankAccountLabel && (
                     <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-accent/10 px-3 py-2">
@@ -450,7 +675,7 @@ export function AddTransactionForm({
                         type="button"
                         onClick={() => handleCreateBankAccount(liveMissingBankAccountLabel)}
                         disabled={isCreatingBankAccount}
-                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-on-primary disabled:opacity-50"
                       >
                         {isCreatingBankAccount && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
                         ساخت حساب
@@ -466,7 +691,7 @@ export function AddTransactionForm({
                     type="button"
                     onClick={handleSubmitLivePreview}
                     disabled={isCreatingBankAccount || isCreatingCategory}
-                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
+                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-on-primary disabled:opacity-50"
                   >
                     ثبت تراکنش
                   </button>
@@ -538,9 +763,7 @@ export function AddTransactionForm({
               </select>
               {parsed.needsConfirmation && (
                 <p className="mt-1.5 text-xs text-warning">
-                  {parsed.source === "bank-sms"
-                    ? "چی خریدی؟ کمکم کن درست دسته‌بندی‌ش کنم 🙂"
-                    : "دسته‌بندی پیشنهادی است، لطفاً بررسی کنید"}
+                  {getConfirmationHintText(parsed)}
                 </p>
               )}
               {suggestedCategory && (
@@ -552,7 +775,7 @@ export function AddTransactionForm({
                     type="button"
                     onClick={() => handleCreateCategory(suggestedCategory, parsed.type)}
                     disabled={isCreatingCategory}
-                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-on-primary disabled:opacity-50"
                   >
                     {isCreatingCategory && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
                     بساز
@@ -580,7 +803,7 @@ export function AddTransactionForm({
                     type="button"
                     onClick={() => handleCreateBankAccount(missingBankAccountLabel)}
                     disabled={isCreatingBankAccount}
-                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-on-primary disabled:opacity-50"
                   >
                     {isCreatingBankAccount && <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />}
                     ساخت حساب
@@ -588,6 +811,14 @@ export function AddTransactionForm({
                 </div>
               )}
               {createAccountError && <p className="mt-1.5 text-xs text-warning">{createAccountError}</p>}
+
+              {parsed.assetSuggestion && (
+                <AssetPurchaseNotice
+                  assetSuggestion={parsed.assetSuggestion}
+                  included={includeAssetPurchase}
+                  onToggle={setIncludeAssetPurchase}
+                />
+              )}
 
               <label className="mt-4 block text-xs text-muted">توضیح</label>
               <input
@@ -633,7 +864,7 @@ export function AddTransactionForm({
               <button
                 onClick={handleConfirm}
                 disabled={stage === "saving" || isCreatingBankAccount || isCreatingCategory}
-                className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
+                className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-on-primary disabled:opacity-50"
               >
                 {stage === "saving" ? (
                   <SpinnerIcon className="h-4 w-4 animate-spin" />

@@ -74,6 +74,28 @@ describe("extractBankAmount", () => {
     expect(extractBankAmount("")).toBeNull();
   });
 
+  // Phase 7.1: real bank SMS can mix digit scripts within a single message
+  // (e.g. a Persian-digit amount alongside a Latin-digit account/card
+  // suffix) - buildFlatTextWithLines normalizes each line independently
+  // before scanning, so this must resolve identically to an all-one-script
+  // message rather than silently failing on the mismatch.
+  describe("mixed digit scripts within one message", () => {
+    it("extracts a Persian-digit amount when an unrelated Latin-digit number (account suffix) appears elsewhere", () => {
+      expect(extractBankAmount("برداشت:۹,۲۷۸,۲۰۰ از حساب 543133176713291")).toBe(9278200);
+    });
+
+    it("extracts an Arabic-Indic-digit amount alongside a Persian-digit balance on another line", () => {
+      expect(extractBankAmount("برداشت:٩,٢٧٨,٢٠٠\nمانده:۶۳,۰۹۶,۴۷۲")).toBe(9278200);
+    });
+
+    it("extracts a Latin-digit amount attached to a keyword whose label uses Persian digits nearby", () => {
+      // The "۱۴۰۴" year-like digits are just narrative text, not a
+      // comma-grouped run, so they can never be mistaken for an amount
+      // candidate in the first place - included to confirm they're inert.
+      expect(extractBankAmount("سال ۱۴۰۴ - برداشت:1,500,000 ریال")).toBe(150000);
+    });
+  });
+
   describe("same-line keyword matching (label text between keyword and number)", () => {
     it("picks the amount when a label sits between the keyword and the number, on one line", () => {
       expect(

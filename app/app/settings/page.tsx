@@ -2,7 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/session";
 import { LogoutButton } from "@/components/layout/logout-button";
-import { TagIcon, WalletIcon, ShieldIcon, BackIcon, UserIcon } from "@/components/icons";
+import { AssetDisplayToggle } from "@/components/settings/asset-display-toggle";
+import { TagIcon, WalletIcon, ShieldIcon, BackIcon, UserIcon, ChartIcon } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,7 @@ const ROWS = [
   { href: "/app/settings/profile", label: "اطلاعات شخصی", Icon: UserIcon },
   { href: "/app/settings/categories", label: "دسته‌بندی‌ها", Icon: TagIcon },
   { href: "/app/settings/accounts", label: "حساب‌ها", Icon: WalletIcon },
+  { href: "/app/settings/assets", label: "دارایی‌ها", Icon: ChartIcon },
 ] as const;
 
 export default async function SettingsPage() {
@@ -50,6 +52,14 @@ export default async function SettingsPage() {
             <BackIcon className="h-4 w-4 rotate-180 text-muted" />
           </Link>
         ))}
+      </section>
+
+      <section className="flex items-center justify-between gap-3 rounded-2xl border border-border bg-surface p-4">
+        <div>
+          <p className="text-sm font-medium text-foreground">نمایش دارایی در داشبورد</p>
+          <p className="mt-0.5 text-xs text-muted">موجودی کل رو معادل گرم طلا و دلار هم نشون بده.</p>
+        </div>
+        <AssetDisplayToggle initialEnabled={user.showBalanceInAssets} />
       </section>
 
       <section className="flex items-center justify-between rounded-2xl border border-border bg-surface p-4">

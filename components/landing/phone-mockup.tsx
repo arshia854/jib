@@ -12,9 +12,9 @@ export function PhoneMockup() {
         </p>
       </div>
 
-      <div className="rounded-[2.5rem] border-[10px] border-slate-900 bg-slate-900 shadow-2xl">
+      <div className="rounded-[2.5rem] border-[10px] border-black bg-black shadow-2xl">
         <div className="relative overflow-hidden rounded-[1.9rem] bg-background">
-          <div className="absolute left-1/2 top-0 z-10 h-5 w-24 -translate-x-1/2 rounded-b-2xl bg-slate-900" />
+          <div className="absolute left-1/2 top-0 z-10 h-5 w-24 -translate-x-1/2 rounded-b-2xl bg-black" />
           <div className="space-y-3 px-4 pb-6 pt-8">
             <div className="flex items-center justify-between">
               <div>
@@ -24,7 +24,7 @@ export function PhoneMockup() {
               <div className="h-6 w-6 rounded-full bg-primary/10" />
             </div>
 
-            <div className="rounded-2xl bg-gradient-to-br from-primary-dark to-primary-dark p-3.5 text-white">
+            <div className="rounded-2xl bg-gradient-to-br from-neutral-900 to-black p-3.5 text-white">
               <p className="text-[9px] text-white/70">موجودی کل</p>
               <p className="mt-1 text-base font-bold">۱۴,۸۰۵,۰۰۰ تومان</p>
             </div>
@@ -44,7 +44,7 @@ export function PhoneMockup() {
 
             <div className="space-y-2 rounded-xl border border-border bg-surface p-2.5">
               {[
-                { icon: "🍔", color: "bg-orange-100", w: "w-16" },
+                { icon: "🍔", color: "bg-white/10", w: "w-16" },
                 { icon: "🚗", color: "bg-primary-subtle", w: "w-12" },
               ].map((row, i) => (
                 <div key={i} className="flex items-center gap-2">
@@ -52,7 +52,7 @@ export function PhoneMockup() {
                     {row.icon}
                   </div>
                   <div className="flex-1">
-                    <div className={`h-1.5 ${row.w} rounded bg-slate-200`} />
+                    <div className={`h-1.5 ${row.w} rounded bg-white/15`} />
                   </div>
                   <div className="h-1.5 w-8 rounded bg-warning/25" />
                 </div>
@@ -60,7 +60,7 @@ export function PhoneMockup() {
             </div>
 
             <div className="flex justify-center pt-1">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary-dark text-white shadow-lg">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-on-primary shadow-lg">
                 <span className="text-base leading-none">+</span>
               </div>
             </div>

@@ -131,7 +131,7 @@ export function CategoriesManager({ categories }: { categories: Category[] }) {
 
       {form && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm"
           onClick={() => !saving && setForm(null)}
         >
           <div className="w-full max-w-md rounded-t-3xl bg-surface p-5 pb-8" onClick={(e) => e.stopPropagation()}>
@@ -168,7 +168,7 @@ export function CategoriesManager({ categories }: { categories: Category[] }) {
                   type="button"
                   onClick={() => setForm({ ...form, type: t })}
                   className={`flex-1 rounded-xl py-2 text-sm font-medium ${
-                    form.type === t ? "bg-primary-darker text-white" : "bg-background text-muted"
+                    form.type === t ? "bg-primary text-on-primary" : "bg-background text-muted"
                   }`}
                 >
                   {t === "income" ? "درآمد" : "هزینه"}
@@ -197,7 +197,7 @@ export function CategoriesManager({ categories }: { categories: Category[] }) {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
+              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-on-primary disabled:opacity-50"
             >
               {saving ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : <CheckIcon className="h-4 w-4" />}
               ذخیره

@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
-import "@fontsource-variable/vazirmatn/wght.css";
 import "./globals.css";
 import { ServiceWorkerRegister } from "@/components/pwa/service-worker-register";
+import { OfflineSyncRegister } from "@/components/pwa/offline-sync-register";
 
 export const metadata: Metadata = {
   title: {
@@ -20,7 +20,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
-  themeColor: "#F5A11A",
+  themeColor: "#000000",
 };
 
 export default function RootLayout({
@@ -33,6 +33,7 @@ export default function RootLayout({
       <body className="bg-background text-foreground antialiased">
         {children}
         <ServiceWorkerRegister />
+        <OfflineSyncRegister />
       </body>
     </html>
   );

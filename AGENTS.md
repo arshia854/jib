@@ -111,3 +111,78 @@ for the situation in the update note above — a migration.sql already
 recorded in `_prisma_migrations` gets corrected in place after the fact, so
 its stored checksum needs to catch up to the new file bytes; it reuses the
 same checksum logic rather than duplicating it.
+
+# Backing up the live database (Turso)
+
+**As of 2026-08-19, no backup of the live Turso database — automated or
+manual — exists anywhere in this repo.** `scripts/` has no export/dump
+script, and no cron/CI job runs one. This was checked, not assumed
+(`grep`-ed the whole repo for "backup"/"dump"/"snapshot"/"point-in-time" —
+the only hits were an unrelated `.env.save` mention in
+`security-audit-report.md` and this file's own migration-checksum
+discussion). Confirmed with the project owner: the live DB is on **Turso's
+free plan**.
+
+## What the free plan already gives you
+
+Every Turso plan, including free, includes self-service **point-in-time
+recovery (PITR)** — restoring to any moment is not something you have to
+build, it's already there. The only thing that changes per plan is the
+retention window: free = last **24 hours**, Developer = 10 days, Scaler =
+30 days, Pro = 90 days
+([docs.turso.tech/features/point-in-time-recovery](https://docs.turso.tech/features/point-in-time-recovery)).
+Restoring doesn't overwrite the live DB in place — it creates a **new**
+database from the old one as of a given timestamp:
+
+```bash
+turso db create jib-restored --from-db <live-db-name> --timestamp 2026-08-19T03:00:00Z
+```
+
+After that: point `TURSO_DATABASE_URL` at the new DB, generate a fresh
+`TURSO_AUTH_TOKEN` for it (`turso db tokens create jib-restored`), redeploy,
+verify, and only then delete the old (bad-state) database. This is a real,
+working safety net for anything caught within 24 hours — but nothing
+longer than that, and it's a manual, multi-step process with no rehearsal
+in this repo today (no one has run it against this project's DB as part of
+this work).
+
+## The gap PITR doesn't cover, and the minimal fix
+
+24 hours is short for a personal-finance app with no staging environment,
+whose schema migrations are already applied via manual one-off scripts
+(see above) — a mistake that isn't noticed same-day (a bad migration, an
+accidental bulk delete, a bug that silently corrupts data over several
+days) falls outside the free plan's PITR window entirely, with nothing
+else behind it. The minimal, verifiable-from-this-repo fix is a periodic
+**logical export**, kept somewhere other than Turso itself:
+
+```bash
+# Requires the Turso CLI, authenticated (`turso auth login`) — a *separate*
+# credential from this app's own TURSO_AUTH_TOKEN, so this is a manual/cron
+# step run from an operator's machine or a CI runner with its own Turso
+# login, not something lib/prisma.ts's runtime connection can do.
+turso db shell <live-db-name> .dump > "jib-backup-$(date -u +%Y%m%dT%H%M%SZ).sql"
+```
+
+`turso db shell <db> .dump` runs SQLite's own `.dump` shell command against
+the live DB non-interactively and streams a plain-SQL rebuild script to
+stdout — no libSQL/SQLite internal tables included
+([docs.turso.tech/cli/db/shell](https://docs.turso.tech/cli/db/shell)). A
+dedicated `turso db export` command doesn't exist yet (open request,
+[tursodatabase/turso-cli#965](https://github.com/tursodatabase/turso-cli/issues/965)) —
+`.dump` via `db shell` is the current documented way to get a portable file
+out. Restoring from one of these files means loading it into a fresh local
+SQLite file or a new Turso DB (`turso db shell <new-db> < backup.sql`), the
+same "new DB, then repoint, then delete the old one" shape as the PITR
+restore above.
+
+**This is a documented runbook, not automation** — no cron job or CI
+workflow actually runs the command above yet; wiring it into a schedule
+(a GitHub Actions cron job pushing the dump to some storage the operator
+controls, since Turso itself is the thing being backed up *away from*) is
+the natural next step but wasn't added here, since standing up and
+verifying a working scheduled job needs a real place to send the output to
+that this repo/session can't provision or confirm. Recommendation: run the
+command above manually on a regular cadence (weekly is reasonable given
+the 24h PITR window already covers same-day mistakes) until that's
+automated.

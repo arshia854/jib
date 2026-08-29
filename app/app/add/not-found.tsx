@@ -11,7 +11,7 @@ export default function TransactionNotFound() {
       <p className="text-xs text-muted">ممکنه حذف شده باشه یا متعلق به شما نباشه.</p>
       <Link
         href="/app/transactions"
-        className="mt-2 inline-flex items-center justify-center rounded-2xl bg-primary-darker px-6 py-3 text-sm font-semibold text-white"
+        className="mt-2 inline-flex items-center justify-center rounded-2xl bg-primary px-6 py-3 text-sm font-semibold text-on-primary"
       >
         بازگشت به تراکنش‌ها
       </Link>

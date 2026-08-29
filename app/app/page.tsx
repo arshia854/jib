@@ -3,9 +3,11 @@ import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/session";
 import { getDashboardData } from "@/lib/data/dashboard";
 import { BalanceCard } from "@/components/dashboard/balance-card";
+import { BalanceInAssets } from "@/components/dashboard/balance-in-assets";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { CategoryBreakdown } from "@/components/dashboard/category-breakdown";
 import { TransactionRow } from "@/components/transactions/transaction-row";
+import { EnrichmentPoller } from "@/components/transactions/enrichment-poller";
 import { ArrowUpIcon, ArrowDownIcon, ListIcon } from "@/components/icons";
 import { EmptyState } from "@/components/empty-state";
 
@@ -16,15 +18,20 @@ export default async function DashboardPage() {
   if (!user) redirect("/login");
 
   const data = await getDashboardData(user.id);
+  const hasPendingEnrichment = data.recentTransactions.some((t) => t.enrichmentStatus === "pending");
 
   return (
     <div className="space-y-5 px-4 pb-8 pt-6">
+      <EnrichmentPoller hasPending={hasPendingEnrichment} />
       <header>
         <p className="text-sm text-muted">خوش اومدی{user.name ? `، ${user.name}` : ""}</p>
         <h1 className="text-xl font-bold text-foreground">جیب</h1>
       </header>
 
       <BalanceCard balance={data.totalBalance} />
+      {data.balanceInGoldGrams !== null && data.balanceInUsd !== null && (
+        <BalanceInAssets goldGrams={data.balanceInGoldGrams} usd={data.balanceInUsd} />
+      )}
 
       <div>
         <p className="mb-2 text-xs text-muted">خلاصه {data.monthLabel}</p>
@@ -71,6 +78,7 @@ export default async function DashboardPage() {
                   amount={t.amount}
                   type={t.type}
                   category={t.category}
+                  enrichmentStatus={t.enrichmentStatus}
                 />
               </div>
             ))}

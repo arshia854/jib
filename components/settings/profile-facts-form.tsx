@@ -53,11 +53,11 @@ export function ProfileFactsForm({ initialValues }: { initialValues: Record<stri
                   onClick={() => handleSelect(q.key, opt.value)}
                   disabled={savingKey === q.key}
                   className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
-                    selected ? "bg-primary-darker text-white" : "border border-border bg-background text-muted"
+                    selected ? "bg-primary text-on-primary" : "border border-border bg-background text-muted"
                   }`}
                 >
                   {selected && <CheckIcon className="h-3 w-3" />}
-                  {opt.label}
+                  {opt.emoji} {opt.label}
                 </button>
               );
             })}

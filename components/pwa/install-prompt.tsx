@@ -45,7 +45,7 @@ export function InstallPrompt() {
           </p>
           <button
             onClick={handleInstallClick}
-            className="mt-3 w-full rounded-xl bg-primary-darker py-2.5 text-sm font-semibold text-white"
+            className="mt-3 w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-on-primary"
           >
             نصب اپلیکیشن
           </button>

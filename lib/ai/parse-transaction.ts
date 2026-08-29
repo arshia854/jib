@@ -1,4 +1,4 @@
-import { chatCompletion } from "@/lib/nvidia-ai";
+import { chatCompletion, AI_PROVIDER, type TokenUsage } from "@/lib/nvidia-ai";
 import {
   findSimilarCategory,
   resolveNewCategoryIcon,
@@ -12,6 +12,21 @@ import { extractDate } from "@/lib/extract-date";
 import { parseBankSms, type BankSmsParseResult } from "@/lib/bank/parse-bank-sms";
 import { normalizeText as normalizeBankSmsText } from "@/lib/bank/normalize";
 import type { Bank } from "@/lib/bank/types";
+import { getLivePrices, LivePriceUnavailableError, type LivePrices } from "@/lib/prices/get-live-prices";
+import type { LivePricedAssetType } from "@/lib/assets";
+import { logger } from "@/lib/observability/logger";
+import { getRequestId } from "@/lib/observability/request-context";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
+import {
+  combineConfidence,
+  extractionConfidenceForBankSms,
+  categorizationConfidenceForMerchantMatch,
+  EXTRACTION_CONFIDENCE_DETERMINISTIC,
+  EXTRACTION_CONFIDENCE_AI,
+  CATEGORIZATION_CONFIDENCE_NONE,
+  type ConfidenceLevel,
+} from "@/lib/ai/confidence";
 
 // The AI's proposal for a brand-new category - see buildSystemPrompt's
 // قوانین for when the model may populate this (last resort only).
@@ -32,6 +47,21 @@ export interface SuggestedCategory {
 // per SuggestedCategory above doesn't even carry one.
 export interface SuggestedCategoryWithIcon extends SuggestedCategory {
   icon: string;
+}
+
+// Populated only when the AI's own JSON response flagged this text as
+// describing the purchase of a live-priced asset (gold/usd/bitcoin) to hold
+// as an investment - see buildSystemPrompt's assetPurchase rules and
+// resolveAssetPurchase below. quantity/purchasePricePerUnit are already
+// resolved to real numbers (priced off the same live-price feed
+// lib/data/assets.ts uses), never the AI's own raw guess - so this is
+// ready to hand straight to POST /api/transactions' assetPurchase field
+// (lib/data/transactions.ts's AssetPurchaseInput) to create a matching
+// Asset row alongside the expense Transaction.
+export interface AssetPurchaseSuggestion {
+  type: LivePricedAssetType;
+  quantity: number;
+  purchasePricePerUnit: number;
 }
 
 export interface ParsedTransaction {
@@ -66,6 +96,37 @@ export interface ParsedTransaction {
   // instead overwrites category/subcategory above - see
   // parseTransactionWithAI).
   suggestedCategory?: SuggestedCategoryWithIcon;
+  // Phase 8 (docs/roadmap-status.md) confidence model - see
+  // lib/ai/confidence.ts for the full design rationale. Three separate,
+  // named ("high" | "medium" | "low", never a number - no calibration data
+  // exists) signals, always set together by every return branch of
+  // parseTransactionWithAI:
+  //   - extractionConfidence: how sure we are about amount/date themselves.
+  //   - categorizationConfidence: how sure we are about `category` itself.
+  //   - confidenceLevel: combineConfidence(extraction, categorization) -
+  //     the weaker of the two, i.e. the overall signal.
+  // Deliberately independent of `confidence`/`needsConfirmation` above,
+  // which are unchanged and still the actual UI confirmation gate (see
+  // that field's own comment and lib/ai/confidence.ts's top-of-file note
+  // on why retrofitting needsConfirmation from these was rejected -
+  // several already-shipped, already-tested "fast path, no confirmation
+  // needed" flows resolve via a tier-2/3 merchant match, which this model
+  // rates only "medium," and changing needsConfirmation to match would
+  // have added a confirmation tap to those without a deliberate product
+  // decision to do so). Optional only because
+  // app/app/add/page.tsx's parseSuggestionParams() hand-reconstructs a
+  // ParsedTransaction-shaped object from URL query params (the "ویرایش کن"
+  // chat handoff) without these fields, the same reason `source`/
+  // `confidence`/`needsConfirmation` are already optional - every actual
+  // parseTransactionWithAI() return sets all three.
+  extractionConfidence?: ConfidenceLevel;
+  categorizationConfidence?: ConfidenceLevel;
+  confidenceLevel?: ConfidenceLevel;
+  // See AssetPurchaseSuggestion's own comment. Only ever set by a real AI
+  // call (bank-sms/merchant-match fast paths never populate it - neither
+  // has a signal for "this is an asset purchase" to begin with), and only
+  // when a live price was actually available to resolve it against.
+  assetSuggestion?: AssetPurchaseSuggestion;
 }
 
 export interface CategoryOption {
@@ -75,6 +136,17 @@ export interface CategoryOption {
   // validate the AI's (category, subcategory) pair against the real
   // hierarchy, not just check each name exists somewhere.
   parentName?: string;
+}
+
+// Raw shape of the optional assetPurchase key in the AI's JSON response -
+// see buildSystemPrompt's own rules for assetType/quantity/tomanAmount's
+// exact meaning. Untrusted/unvalidated at this point (assetType could be
+// any string, quantity/tomanAmount could be missing or the wrong type) -
+// resolveAssetPurchase below is what actually validates and resolves it.
+interface RawAssetPurchase {
+  assetType?: string;
+  quantity?: number | null;
+  tomanAmount?: number | null;
 }
 
 interface RawParsedTransaction {
@@ -87,6 +159,7 @@ interface RawParsedTransaction {
   confidence?: number;
   reason?: string;
   newCategorySuggestion?: SuggestedCategory | null;
+  assetPurchase?: RawAssetPurchase | null;
 }
 
 function isRawParsedTransaction(value: unknown): value is RawParsedTransaction {
@@ -140,7 +213,7 @@ function buildSystemPrompt(categories: CategoryOption[]): string {
 
   return `شما دستیار استخراج اطلاعات مالی اپلیکیشن «جیب» هستید. کاربر یک جمله فارسی محاوره‌ای درباره یک تراکنش مالی می‌نویسد (مثلاً «۵۰ تومن ناهار خوردم» یا «حقوق ۱۵ میلیون تومن گرفتم»). گاهی متن ممکن است شامل نام فروشنده، توضیح، یا حتی متن یک پیامک بانکی paste‌شده باشد. فقط یک شیء JSON با دقیقاً همین کلیدها برگردان، بدون هیچ متن یا توضیح اضافه و بدون markdown:
 
-{"amount": number, "type": "income" | "expense", "description": string, "date": "YYYY-MM-DD", "category": string, "subcategory": string | null, "confidence": number, "reason": string, "newCategorySuggestion": {"name": string, "parentName": string | null, "reason": string} | null}
+{"amount": number, "type": "income" | "expense", "description": string, "date": "YYYY-MM-DD", "category": string, "subcategory": string | null, "confidence": number, "reason": string, "newCategorySuggestion": {"name": string, "parentName": string | null, "reason": string} | null, "assetPurchase": {"assetType": "gold" | "usd" | "bitcoin", "quantity": number | null, "tomanAmount": number | null} | null}
 
 دسته‌های هزینه مجاز (به‌همراه زیردسته‌ها):
 ${expenseTree}
@@ -152,8 +225,8 @@ ${incomeTree}
 
 قوانین:
 - amount همیشه عدد صحیح مثبت به تومان است.
-- تبدیل واحد را فقط بر اساس آنچه صریحاً در متن ذکر شده انجام بده، حدس نزن:
-  عددی کاملاً بدون واحد (نه "تومان"/"تومن"، نه "هزار"/"میلیون"، نه "ریال") که بین ۱ تا ۹۹۹ باشد → عدد×۱۰۰۰ (مثلاً «۸۰» یعنی ۸۰ هزار تومان)؛ همان حالت با عدد ۱۰۰۰ یا بیشتر → همان عدد؛ عدد به‌همراه "تومان"/"تومن" صریح → همان عدد؛ الگوی "X و Y" یا "X.Y" با هر دو بخش بین ۱ تا ۹۹۹ → (X×۱۰۰۰۰۰۰)+(Y×۱۰۰۰) (مثلاً «۱ و ۱۰۰» یعنی ۱ میلیون و ۱۰۰ هزار تومان)؛ "هزار تومان/تومن" → عدد×۱۰۰۰؛ "میلیون تومان/تومن" → عدد×۱۰۰۰۰۰۰؛ "ریال" → عدد÷۱۰.
+- تبدیل واحد را فقط بر اساس این قوانین دقیق انجام بده، حدس آزاد نزن:
+  عددی که نه "هزار"/"میلیون" و نه "ریال" همراهش نیامده - چه کاملاً بدون واحد باشد، چه فقط با "تومان"/"تومن" صریح همراه باشد - و بین ۱ تا ۹٬۹۹۹ باشد → عدد×۱۰۰۰ (مثلاً «۵۰» یا «۵۰ تومن» یعنی ۵۰ هزار تومان، «۱۳۰۰» یا «۱۳۰۰ تومن» یعنی ۱ میلیون و ۳۰۰ هزار تومان)؛ همان حالت با عدد ۱۰٬۰۰۰ یا بیشتر → همان عدد بدون تغییر (مثلاً «۵۰۰۰۰ تومن» یعنی همان ۵۰ هزار تومان، نه بیشتر - هرگز آن را دوباره در ۱۰۰۰ ضرب نکن)؛ الگوی "X و Y" یا "X.Y" با هر دو بخش بین ۱ تا ۹۹۹ → (X×۱۰۰۰۰۰۰)+(Y×۱۰۰۰) (مثلاً «۱ و ۱۰۰» یعنی ۱ میلیون و ۱۰۰ هزار تومان)؛ "هزار تومان/تومن" → عدد×۱۰۰۰؛ "میلیون تومان/تومن" → عدد×۱۰۰۰۰۰۰؛ "ریال" → عدد÷۱۰.
 - اگر نوع (درآمد/هزینه) از متن مشخص نبود، "expense" در نظر بگیر.
 - برای انتخاب category/subcategory، سیگنال‌های متن را به این ترتیب اولویت (از مهم‌ترین به کم‌اهمیت‌ترین) در نظر بگیر:
   ۱. نام فروشنده/مرچنت ذکرشده در متن
@@ -174,6 +247,11 @@ ${incomeTree}
 - reason یک جمله کوتاه فارسی است که دلیل انتخاب category/subcategory را توضیح می‌دهد.
 - description خلاصه‌ای حداکثر ۵ کلمه‌ای و طبیعی از تراکنش است.
 - date را به‌صورت YYYY-MM-DD میلادی برگردان. اگر تاریخ خاصی گفته نشده امروز را برگردان. "دیروز"/"پریروز" را نسبت به امروز محاسبه کن. "هفته پیش" یعنی دقیقاً ۷ روز قبل از امروز.
+- assetPurchase فقط برای وقتی است که کاربر واقعاً در حال خرید و نگهداری یک دارایی (طلا، دلار، یا بیت‌کوین) به‌عنوان سرمایه‌گذاری/پس‌انداز است - نه خرج‌کردن دلار برای پرداخت چیزی، نه فروش دارایی، نه دریافت هدیه بدون خرید. در هر حالت دیگر assetPurchase را null بگذار.
+  assetType باید دقیقاً یکی از "gold" | "usd" | "bitcoin" باشد (فقط همین سه نوع).
+  اگر کاربر مقدار را در واحد طبیعی خود دارایی گفته (تعداد دلار برای دلار، گرم برای طلا، تعداد بیت‌کوین برای بیت‌کوین)، همان عدد را عیناً (بدون اعمال قوانین تبدیل واحد تومان بالا) در quantity بگذار و tomanAmount را null کن.
+  اگر کاربر مبلغ خرید را به تومان گفته (نه واحد طبیعی دارایی)، آن مبلغ را طبق همان قوانین تبدیل واحد بالا در tomanAmount بگذار و quantity را null کن.
+  وقتی assetPurchase پر می‌شود، amount را طبق بهترین حدس خودت بگذار - این عدد به‌صورت خودکار با قیمت لحظه‌ای واقعی جایگزین می‌شود، فقط باید عددی مثبت باشد.
 
 نمونه برای دسته‌های مشابه که ممکن است اشتباه گرفته شوند:
 - «نون و ماست خریدم» → category: «خوراک و رستوران»، subcategory: «سوپرمارکت» (نه «رستوران و کافه»، چون خرید برای خانه است نه صرف بیرون از خانه)
@@ -181,7 +259,13 @@ ${incomeTree}
 - «اسنپ گرفتم برم فرودگاه» → category: «حمل‌ونقل»، subcategory: «تاکسی و اسنپ» (نه «بنزین»، چون اسنپ سرویس تاکسی است نه خرید مستقیم سوخت)
 - «قبض اینترنت خونه رو پرداخت کردم» → category: «قبوض و اشتراک»، subcategory: «اینترنت و تلفن» (نه «برق، آب و گاز»، با اینکه هر دو «قبض» هستند)
 - «رفتم دکتر و ویزیت دادم» → category: «سلامت»، subcategory: «ویزیت پزشک» (نه «دارو»، چون هزینه ویزیت است نه خرید دارو)
-- «حقوق این ماه ریخت» → category: «حقوق» | «بابت یه پروژه فریلنس پول گرفتم» → category: «درآمد آزاد»`;
+- «حقوق این ماه ریخت» → category: «حقوق» | «بابت یه پروژه فریلنس پول گرفتم» → category: «درآمد آزاد»
+
+نمونه برای assetPurchase:
+- «صد دلار خریدم برای سرمایه‌گذاری» → type: expense، assetPurchase: {"assetType": "usd", "quantity": 100, "tomanAmount": null}
+- «ده گرم طلا خریدم» → type: expense، assetPurchase: {"assetType": "gold", "quantity": 10, "tomanAmount": null}
+- «دو میلیون تومن دلار خریدم برای سرمایه‌گذاری» → type: expense، assetPurchase: {"assetType": "usd", "quantity": null, "tomanAmount": 2000000}
+- «قسط ماشین رو با دلار حساب کردم» → assetPurchase: null (خرج‌کردن دلار برای پرداخت است، نه خرید و نگهداری دارایی)`;
 }
 
 // Exported for reuse by lib/ai/detect-transaction-intent.ts, which needs
@@ -249,6 +333,10 @@ interface AiCategoryResolution {
   category: string;
   confidence: number;
   needsConfirmation: boolean;
+  // Phase 8: the same three-way bucket needsConfirmation already gates on
+  // below, just also exposed as a named level instead of staying an
+  // internal-only threshold check - see lib/ai/confidence.ts.
+  categorizationConfidence: ConfidenceLevel;
 }
 
 // Validates the AI's (category, subcategory) pair against the real
@@ -273,6 +361,118 @@ function findValidatedLeafCategory(
   return subcategoryValid ? subcategory : category;
 }
 
+// Phase 9.2 - the previous check here was `!Number.isNaN(Date.parse(parsed.date))`,
+// which only confirms V8's Date.parse() can make *something* of the
+// string - it doesn't confirm the AI actually followed the prompt's own
+// "YYYY-MM-DD" instruction. Date.parse()'s non-ISO fallback parsing is
+// notoriously lenient/implementation-specific (e.g. it can silently roll
+// an out-of-range day/month into a different date rather than rejecting
+// it), which matters here specifically because `date` determines which
+// calendar month a transaction lands in for every monthly report/summary
+// downstream - a loosely-parsed date is a real data-integrity risk, not
+// just a cosmetic one. This checks the exact shape the prompt asks for
+// and that the numbers form a real calendar date (a naive regex alone
+// would still accept "2024-02-30").
+function isValidIsoDateString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+const LIVE_PRICED_ASSET_TYPES: readonly LivePricedAssetType[] = ["gold", "usd", "bitcoin"];
+
+function isLivePricedAssetPurchaseType(value: unknown): value is LivePricedAssetType {
+  return typeof value === "string" && (LIVE_PRICED_ASSET_TYPES as readonly string[]).includes(value);
+}
+
+function livePriceForAssetPurchase(type: LivePricedAssetType, prices: LivePrices): number {
+  switch (type) {
+    case "gold":
+      return prices.goldGramPricePerUnit;
+    case "usd":
+      return prices.usdPricePerUnit;
+    case "bitcoin":
+      return prices.bitcoinPricePerUnit;
+  }
+}
+
+interface AssetPurchaseResolution {
+  assetSuggestion?: AssetPurchaseSuggestion;
+  // The real Toman cost of the purchase, once resolved against a live
+  // price - overrides whatever placeholder the AI put in `amount` (see
+  // buildSystemPrompt's own note that amount is just a best-effort guess
+  // when assetPurchase is set). Undefined whenever assetSuggestion is,
+  // so callers can use one check (`assetSuggestion ?`) for both.
+  tomanAmountOverride?: number;
+}
+
+// Resolves the AI's raw assetPurchase signal (a native-unit quantity OR a
+// Toman amount - never both, see buildSystemPrompt's own rules) into a
+// concrete (quantity, purchasePricePerUnit) pair, priced off the same
+// live-price feed the Assets page itself uses (lib/prices/get-live-prices.ts
+// - the same module lib/data/assets.ts's listAssetsWithValue() calls). This
+// is what keeps "خریدم صد دلار برای سرمایه‌گذاری" from being run through
+// this file's Toman-only unit-conversion هزار/میلیون heuristics (which
+// would otherwise turn a literal 100-dollar quantity into a bogus Toman
+// figure) and means the AI never needs to know today's actual market price.
+//
+// Returns {} (no asset signal at all) for anything malformed, ambiguous, or
+// when live prices simply aren't available right now - every caller treats
+// that identically to "this wasn't an asset purchase," so a live-price
+// hiccup degrades to an ordinary logged transaction rather than blocking
+// the save or throwing.
+async function resolveAssetPurchase(
+  userId: number,
+  raw: RawAssetPurchase | null | undefined
+): Promise<AssetPurchaseResolution> {
+  if (!raw || typeof raw !== "object" || !isLivePricedAssetPurchaseType(raw.assetType)) return {};
+
+  const quantity =
+    typeof raw.quantity === "number" && Number.isFinite(raw.quantity) && raw.quantity > 0 ? raw.quantity : null;
+  const tomanAmount =
+    typeof raw.tomanAmount === "number" && Number.isFinite(raw.tomanAmount) && raw.tomanAmount > 0
+      ? raw.tomanAmount
+      : null;
+  if (quantity === null && tomanAmount === null) return {};
+
+  let prices: LivePrices;
+  try {
+    prices = await getLivePrices();
+  } catch (error) {
+    // Best-effort, same spirit as detectTransactionIntent's own "fail safe,
+    // never block the normal chat/transaction flow" fallback - a live-price
+    // outage (or a genuinely unexpected error) must not turn an otherwise
+    // fine transaction save into a hard failure just because the text
+    // happened to look like an asset purchase. Only report the unexpected
+    // case; LivePriceUnavailableError itself is the documented,
+    // already-handled "no fetch has ever succeeded" outcome.
+    if (!(error instanceof LivePriceUnavailableError)) {
+      reportError({
+        errorType: ERROR_TYPES.API_ERROR,
+        route: "ai/parse-transaction",
+        userId,
+        message: error instanceof Error ? error.message : "Unexpected error fetching live prices for asset purchase",
+        error,
+        context: { operation: "resolveAssetPurchase" },
+      });
+    }
+    return {};
+  }
+
+  const purchasePricePerUnit = livePriceForAssetPurchase(raw.assetType, prices);
+  if (!Number.isFinite(purchasePricePerUnit) || purchasePricePerUnit <= 0) return {};
+
+  const resolvedQuantity = quantity ?? tomanAmount! / purchasePricePerUnit;
+  const resolvedTomanAmount = tomanAmount !== null ? Math.round(tomanAmount) : Math.round(quantity! * purchasePricePerUnit);
+
+  return {
+    assetSuggestion: { type: raw.assetType, quantity: resolvedQuantity, purchasePricePerUnit },
+    tomanAmountOverride: resolvedTomanAmount,
+  };
+}
+
 // Confidence gating per spec section 8 - only applies to the AI's own
 // category decision (a merchant override bypasses this entirely, see
 // callers). An invalid (category, subcategory) pair is treated as
@@ -292,14 +492,14 @@ function resolveAiCategory(parsed: RawParsedTransaction, type: CategoryType, cat
   const effectiveConfidence = leafCategory ? rawConfidence : 0;
 
   if (effectiveConfidence >= 0.8) {
-    return { category: leafCategory!, confidence: rawConfidence, needsConfirmation: false };
+    return { category: leafCategory!, confidence: rawConfidence, needsConfirmation: false, categorizationConfidence: "high" };
   }
   if (effectiveConfidence >= 0.5) {
-    return { category: leafCategory!, confidence: rawConfidence, needsConfirmation: true };
+    return { category: leafCategory!, confidence: rawConfidence, needsConfirmation: true, categorizationConfidence: "medium" };
   }
   const fallback = resolveFallbackCategory(type);
   warnIfFallbackCategoryMissing(fallback, type, categories);
-  return { category: fallback, confidence: rawConfidence, needsConfirmation: true };
+  return { category: fallback, confidence: rawConfidence, needsConfirmation: true, categorizationConfidence: "low" };
 }
 
 // The bank engine only resolves amount/type/date - it has no merchant name
@@ -311,6 +511,8 @@ function resolveAiCategory(parsed: RawParsedTransaction, type: CategoryType, cat
 function buildBankSmsResult(bankResult: BankSmsParseResult, rawInput: string, categories: CategoryOption[]): ParsedTransaction {
   const fallback = resolveFallbackCategory(bankResult.type);
   warnIfFallbackCategoryMissing(fallback, bankResult.type, categories);
+  const extractionConfidence = extractionConfidenceForBankSms(bankResult.bankConfidence);
+  const categorizationConfidence = CATEGORIZATION_CONFIDENCE_NONE;
   return {
     amount: bankResult.amount,
     type: bankResult.type,
@@ -324,6 +526,9 @@ function buildBankSmsResult(bankResult: BankSmsParseResult, rawInput: string, ca
     bank: bankResult.bank,
     bankConfidence: bankResult.bankConfidence,
     needsConfirmation: true,
+    extractionConfidence,
+    categorizationConfidence,
+    confidenceLevel: combineConfidence(extractionConfidence, categorizationConfidence),
   };
 }
 
@@ -345,11 +550,25 @@ export async function parseTransactionWithAI(
     if (merchantMatch.source !== "none" && merchantMatch.type === bankResult.type) {
       const overrideCategory = resolveCategoryOverride(merchantMatch, merchantMatch.type, categories);
       if (overrideCategory) {
+        // A real merchant category signal now exists (unlike the plain
+        // bank-SMS case, which has none at all - see buildBankSmsResult's
+        // own comment) - categorizationConfidence is recomputed from the
+        // merchant match itself rather than inherited from the "low"
+        // buildBankSmsResult sets by default. extractionConfidence is
+        // unaffected by which category won, so it's unchanged.
+        const extractionConfidence = extractionConfidenceForBankSms(bankResult.bankConfidence);
+        const categorizationConfidence = categorizationConfidenceForMerchantMatch(
+          merchantMatch.source,
+          merchantMatch.matchTier
+        );
         return {
           ...buildBankSmsResult(bankResult, rawInput, categories),
           category: overrideCategory,
           source: merchantMatch.source,
           needsConfirmation: false,
+          extractionConfidence,
+          categorizationConfidence,
+          confidenceLevel: combineConfidence(extractionConfidence, categorizationConfidence),
         };
       }
     }
@@ -368,6 +587,10 @@ export async function parseTransactionWithAI(
     const date = extractDate(rawInput);
 
     if (overrideCategory && amount !== null && date !== null) {
+      const categorizationConfidence = categorizationConfidenceForMerchantMatch(
+        merchantMatch.source,
+        merchantMatch.matchTier
+      );
       return {
         amount,
         type: merchantMatch.type,
@@ -377,56 +600,150 @@ export async function parseTransactionWithAI(
         source: merchantMatch.source,
         confidence: 1,
         needsConfirmation: false,
+        extractionConfidence: EXTRACTION_CONFIDENCE_DETERMINISTIC,
+        categorizationConfidence,
+        confidenceLevel: combineConfidence(EXTRACTION_CONFIDENCE_DETERMINISTIC, categorizationConfidence),
       };
     }
   }
 
-  const content = await chatCompletion(
-    [
-      { role: "system", content: buildSystemPrompt(categories) },
-      { role: "user", content: rawInput },
-    ],
-    { json: true }
-  );
+  // Reached only past both deterministic fast paths above (bank-SMS,
+  // confident merchant match) - this is a real NVIDIA NIM call, so it's
+  // the only place in this function that should ever emit an AI-latency
+  // log event (Phase 12.4.3: fast-path transactions must not).
+  const aiCallStartedAt = Date.now();
+  let content: string;
+  let usage: TokenUsage | undefined;
+  try {
+    content = await chatCompletion(
+      [
+        { role: "system", content: buildSystemPrompt(categories) },
+        { role: "user", content: rawInput },
+      ],
+      { json: true, onUsage: (u) => { usage = u; } }
+    );
+    logger.info(
+      {
+        requestId: getRequestId(),
+        route: "ai/parse-transaction",
+        userId,
+        duration: Date.now() - aiCallStartedAt,
+        provider: AI_PROVIDER,
+        // Phase 9.4 - undefined (dropped by pino, never logged as a
+        // literal "usage":null) when the response didn't carry a usage
+        // object - see chatCompletion's own onUsage doc comment.
+        usage,
+      },
+      "AI call succeeded"
+    );
+  } catch (error) {
+    // Sanitized params only - rawInput is the user's pasted bank-SMS/typed
+    // financial text, never logged/reported verbatim (Phase 12.4.1).
+    reportError({
+      errorType: ERROR_TYPES.AI_ERROR,
+      route: "ai/parse-transaction",
+      userId,
+      duration: Date.now() - aiCallStartedAt,
+      message: error instanceof Error ? error.message : "AI call failed",
+      error,
+      context: { provider: AI_PROVIDER, rawInputLength: rawInput.length, categoryCount: categories.length },
+    });
+    // Re-thrown unchanged - this function has no existing fallback around
+    // this call (parseTransactionWithAI's two callers, transactions/parse's
+    // route handler and chat's trySuggestTransaction, already handle a
+    // thrown error exactly as before this sub-task).
+    throw error;
+  }
 
   let parsed: unknown;
   try {
     parsed = extractJson(content);
-  } catch {
+  } catch (extractError) {
+    // Sanitized input only - `content` is the AI's own response text,
+    // which can echo fragments of the user's financial text back (e.g. in
+    // a `description` field) - logged as shape (length), not verbatim.
+    // No parser-version field: this codebase has no such concept anywhere
+    // (checked), so none is invented here per the Phase 12 spec.
+    reportError({
+      errorType: ERROR_TYPES.PARSER_ERROR,
+      route: "ai/parse-transaction",
+      userId,
+      message: extractError instanceof Error ? extractError.message : "Failed to extract JSON from AI response",
+      error: extractError,
+      context: { contentLength: content.length },
+    });
     throw new Error("متوجه متن تراکنش نشدم. لطفاً واضح‌تر بنویسید.");
   }
 
   if (!isRawParsedTransaction(parsed) || parsed.amount <= 0) {
+    const validationError = new Error("AI response failed transaction-shape validation");
+    reportError({
+      errorType: ERROR_TYPES.PARSER_ERROR,
+      route: "ai/parse-transaction",
+      userId,
+      message: validationError.message,
+      error: validationError,
+      context: { contentLength: content.length },
+    });
     throw new Error("پاسخ هوش مصنوعی ساختار نامعتبری داشت. دوباره تلاش کنید.");
   }
 
-  const type = parsed.type as CategoryType;
+  const assetResolution = await resolveAssetPurchase(userId, parsed.assetPurchase);
+  // Buying an asset is always cash going out, regardless of what the AI put
+  // in `type` (the prompt's own default is already "expense" when unclear,
+  // so this only ever overrides a stray/wrong "income" guess) - the whole
+  // downstream flow (trySuggestTransaction's expense-only gate, the account
+  // balance the matching Transaction row affects) assumes expense.
+  const type = (assetResolution.assetSuggestion ? "expense" : parsed.type) as CategoryType;
   const overrideCategory = resolveCategoryOverride(merchantMatch, type, categories);
   const suggestedCategory = sanitizeNewCategorySuggestion(parsed.newCategorySuggestion);
 
   const base = {
-    amount: Math.round(parsed.amount),
+    // tomanAmountOverride (the real, live-priced cost) always wins over the
+    // AI's own `amount` guess once an asset purchase resolves - see
+    // buildSystemPrompt's note that amount is a mere placeholder in that
+    // case and AssetPurchaseResolution's own comment.
+    amount: assetResolution.tomanAmountOverride ?? Math.round(parsed.amount),
     type,
     description: parsed.description?.trim() || rawInput.slice(0, 40),
-    date: parsed.date && !Number.isNaN(Date.parse(parsed.date)) ? parsed.date : new Date().toISOString().slice(0, 10),
+    date:
+      typeof parsed.date === "string" && isValidIsoDateString(parsed.date)
+        ? parsed.date
+        : new Date().toISOString().slice(0, 10),
+    ...(assetResolution.assetSuggestion ? { assetSuggestion: assetResolution.assetSuggestion } : {}),
   };
 
   // A merchant match still wins deterministically even when the AI ran
   // (e.g. it was only needed for amount/date) - confidence gating is only
   // for when the AI's own category guess is actually being used.
   if (overrideCategory) {
+    // resolveCategoryOverride only ever returns non-null past its own
+    // `match.source === "none"` check, so merchantMatch.source is
+    // guaranteed to be a real merchant source here even though TS can't
+    // narrow that through the truthiness of `overrideCategory` alone.
+    const categorizationConfidence = categorizationConfidenceForMerchantMatch(
+      merchantMatch.source as "userMapping" | "globalMerchant" | "keyword",
+      merchantMatch.matchTier
+    );
     return {
       ...base,
       category: overrideCategory,
       source: merchantMatch.source,
       confidence: 1,
       needsConfirmation: false,
+      // amount/date came from the AI's own JSON here (this branch is only
+      // reachable past the real chatCompletion() call), not a regex - see
+      // EXTRACTION_CONFIDENCE_AI's own comment.
+      extractionConfidence: EXTRACTION_CONFIDENCE_AI,
+      categorizationConfidence,
+      confidenceLevel: combineConfidence(EXTRACTION_CONFIDENCE_AI, categorizationConfidence),
     };
   }
 
   const aiResolution = resolveAiCategory(parsed, type, categories);
   let finalCategory = aiResolution.category;
   let finalNeedsConfirmation = aiResolution.needsConfirmation;
+  let finalCategorizationConfidence = aiResolution.categorizationConfidence;
   let finalSuggestedCategory: SuggestedCategoryWithIcon | undefined;
 
   // newCategorySuggestion is only ever surfaced to the user once confirmed
@@ -440,6 +757,12 @@ export async function parseTransactionWithAI(
     if (matchedCategory) {
       finalCategory = matchedCategory.name;
       finalNeedsConfirmation = true;
+      // The category actually shown is now a name-similarity match to an
+      // existing category, not literally the AI's own high-confidence
+      // pick anymore (even if aiResolution.categorizationConfidence was
+      // "high") - "medium" honestly reflects that, and matches
+      // finalNeedsConfirmation being forced true right above regardless.
+      finalCategorizationConfidence = "medium";
     } else {
       finalSuggestedCategory = {
         name: suggestedCategory.name,
@@ -458,5 +781,8 @@ export async function parseTransactionWithAI(
     needsConfirmation: finalNeedsConfirmation,
     reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
     suggestedCategory: finalSuggestedCategory,
+    extractionConfidence: EXTRACTION_CONFIDENCE_AI,
+    categorizationConfidence: finalCategorizationConfidence,
+    confidenceLevel: combineConfidence(EXTRACTION_CONFIDENCE_AI, finalCategorizationConfidence),
   };
 }

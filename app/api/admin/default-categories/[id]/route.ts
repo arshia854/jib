@@ -6,6 +6,9 @@ import {
   DefaultCategoryInUseError,
 } from "@/lib/data/admin-categories";
 import { NotAdminError } from "@/lib/auth/session";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
+import { isPrismaErrorCode } from "@/lib/observability/classify-error";
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -37,6 +40,18 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (error instanceof NotAdminError) {
       return NextResponse.json({ error: error.message }, { status: 403 });
     }
+    // No userId attached: this route relies on proxy.ts's own admin gate
+    // rather than calling getSession() itself - see
+    // app/api/admin/default-categories/route.ts's GET handler comment.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "admin/default-categories/[id]",
+      message: error instanceof Error ? error.message : "Unexpected error updating default category",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "updateDefaultCategory", model: "DefaultCategory", code: error.code }
+        : { operation: "updateDefaultCategory", model: "DefaultCategory" },
+    });
     throw error;
   }
 }
@@ -61,6 +76,16 @@ export async function DELETE(_request: NextRequest, { params }: { params: Promis
     if (error instanceof NotAdminError) {
       return NextResponse.json({ error: error.message }, { status: 403 });
     }
+    // No userId attached - see the PATCH handler's comment above.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "admin/default-categories/[id]",
+      message: error instanceof Error ? error.message : "Unexpected error deleting default category",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "deleteDefaultCategory", model: "DefaultCategory", code: error.code }
+        : { operation: "deleteDefaultCategory", model: "DefaultCategory" },
+    });
     throw error;
   }
 }

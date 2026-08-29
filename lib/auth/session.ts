@@ -1,7 +1,10 @@
+import "server-only";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { auth, unstable_update } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
 
 // Legacy cookie from the pre-NextAuth custom session system. Kept
 // read-only (get) plus one narrow re-sign path (setOnboarded below) so
@@ -24,8 +27,19 @@ export function isNextAuthSessionCookieName(name: string): boolean {
   return NEXTAUTH_SESSION_COOKIE_PATTERN.test(name);
 }
 
+// Deliberately its own env var, independent of AUTH_SECRET (NextAuth's own
+// session secret - see auth.ts) and OTP_SECRET (see lib/auth/otp.ts) -
+// previously all three read AUTH_SECRET, so a single leaked value could
+// forge legacy session cookies, OTP challenges, and full 90-day NextAuth
+// sessions alike. Set independently (not derived from AUTH_SECRET via any
+// transform) so a leak of one never implies the others. Returns null
+// (rather than throwing) when unset, same as before this split - this
+// legacy path is expected to eventually stop mattering entirely (see
+// LEGACY_SESSION_COOKIE above) once every pre-migration cookie has expired
+// or its owner has signed out, unlike OTP_SECRET/AUTH_SECRET which gate
+// active, ongoing auth flows.
 function getLegacySecretKey(): Uint8Array | null {
-  const secret = process.env.AUTH_SECRET;
+  const secret = process.env.LEGACY_SESSION_SECRET;
   if (!secret) return null;
   return new TextEncoder().encode(secret);
 }
@@ -64,6 +78,22 @@ async function getLegacySession(): Promise<LegacyPayload | null> {
 
 export type UserRole = "user" | "admin";
 
+const VALID_ROLES: readonly UserRole[] = ["user", "admin"];
+
+// `User.role` is a plain, non-enum DB column (see prisma/schema.prisma's
+// own comment on the field) - restricted to these two values at the DB
+// level too, by a hand-written CHECK constraint (Phase 15, see
+// prisma/migrations/20260822213426_add_user_role_check_constraint), since
+// Prisma's schema DSL has no way to express one for this installed
+// version. This is the one place that actually narrows an untyped DB read
+// down to UserRole - replaces the unchecked `user.role as UserRole` cast
+// this file and lib/data/admin-users.ts both used to do, and is exported
+// so admin-users.ts's own two read sites use the exact same check instead
+// of drifting.
+export function isValidRole(value: unknown): value is UserRole {
+  return typeof value === "string" && (VALID_ROLES as readonly string[]).includes(value);
+}
+
 export interface Session {
   userId: number;
   onboarded: boolean;
@@ -86,7 +116,28 @@ async function getActiveUser(userId: number): Promise<{ id: number; role: UserRo
     select: { id: true, role: true, blockedAt: true },
   });
   if (!user || user.blockedAt) return null;
-  return { id: user.id, role: user.role as UserRole };
+  if (!isValidRole(user.role)) {
+    // The DB-level CHECK constraint (see isValidRole's doc comment) should
+    // make this unreachable for any row written after it was applied -
+    // this branch exists for a row that predates the constraint, or one
+    // that somehow bypassed it. Treated as a data-integrity error to log,
+    // not silently coerced to "user" or "admin" - either guess could be
+    // wrong in either direction, and this is exactly the kind of silent
+    // bad-write the roadmap wants surfaced, not hidden by a fallback.
+    // Failing closed (no active session) is the one outcome that's never a
+    // privilege escalation, matching how a blocked/deleted user is already
+    // handled just above.
+    reportError({
+      errorType: ERROR_TYPES.AUTH_ERROR,
+      route: "auth/session",
+      userId: user.id,
+      message: `User.role held an invalid value: ${JSON.stringify(user.role)}`,
+      error: new Error("Invalid User.role value read from database"),
+      context: { operation: "getActiveUser", model: "User" },
+    });
+    return null;
+  }
+  return { id: user.id, role: user.role };
 }
 
 export async function getSession(): Promise<Session | null> {

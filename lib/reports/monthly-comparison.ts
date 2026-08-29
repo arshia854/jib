@@ -56,11 +56,19 @@ function computePercentChange(previousAmount: number, currentAmount: number): nu
   return Math.round(((currentAmount - previousAmount) / previousAmount) * 100);
 }
 
-/** Expense totals per category over [start, end). Exported for reuse by lib/reports/today-spending.ts. */
+/**
+ * Expense totals per category over [start, end). Exported for reuse by
+ * lib/reports/today-spending.ts.
+ *
+ * Excludes Category.isTransfer categories - a transfer between the user's
+ * own accounts is not real spending, so it must not inflate these totals
+ * (or, transitively, getComparison's totalCurrent/totalPrevious and
+ * generateHighlights' savings/warning messages built on top of them).
+ */
 export async function sumExpensesByCategory(userId: number, start: Date, end: Date): Promise<Map<number, number>> {
   const groups = await prisma.transaction.groupBy({
     by: ["categoryId"],
-    where: { userId, type: "expense", date: { gte: start, lt: end } },
+    where: { userId, type: "expense", date: { gte: start, lt: end }, category: { isTransfer: false } },
     _sum: { amount: true },
   });
 

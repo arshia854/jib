@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { listDefaultCategories, createDefaultCategory } from "@/lib/data/admin-categories";
 import { NotAdminError } from "@/lib/auth/session";
 import type { CategoryType } from "@/lib/categories";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
+import { isPrismaErrorCode } from "@/lib/observability/classify-error";
 
 export async function GET() {
   try {
@@ -11,6 +14,21 @@ export async function GET() {
     if (error instanceof NotAdminError) {
       return NextResponse.json({ error: error.message }, { status: 403 });
     }
+    // No userId attached here: this route (like the rest of app/api/admin/*)
+    // relies on proxy.ts's own admin gate for authorization rather than
+    // calling getSession() itself, so there's no session already in scope -
+    // adding a getSession() call solely for observability would mean a new
+    // per-request DB read this route doesn't otherwise make. Flagged as a
+    // known gap in docs/roadmap-status.md rather than added silently.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "admin/default-categories",
+      message: error instanceof Error ? error.message : "Unexpected error listing default categories",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "listDefaultCategories", model: "DefaultCategory", code: error.code }
+        : { operation: "listDefaultCategories", model: "DefaultCategory" },
+    });
     throw error;
   }
 }
@@ -41,6 +59,16 @@ export async function POST(request: NextRequest) {
     if (error instanceof NotAdminError) {
       return NextResponse.json({ error: error.message }, { status: 403 });
     }
+    // No userId attached here - see the GET handler's comment above for why.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "admin/default-categories",
+      message: error instanceof Error ? error.message : "Unexpected error creating default category",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "createDefaultCategory", model: "DefaultCategory", code: error.code }
+        : { operation: "createDefaultCategory", model: "DefaultCategory" },
+    });
     throw error;
   }
 }

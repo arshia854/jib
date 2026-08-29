@@ -8,6 +8,7 @@ import { findMerchant } from "@/lib/merchant-lookup";
 
 vi.mock("@/lib/nvidia-ai", () => ({
   chatCompletion: vi.fn(),
+  AI_PROVIDER: "nvidia-nim",
 }));
 vi.mock("@/lib/auth/session", () => ({
   getSession: vi.fn(),

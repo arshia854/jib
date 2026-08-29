@@ -20,8 +20,21 @@ const store = new Map<string, RateLimitEntry>();
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 let lastSweepAt = 0;
 
-function sweepExpired(now: number) {
-  if (now - lastSweepAt < SWEEP_INTERVAL_MS) return;
+// Hard cap on distinct keys tracked at once. Without this, a flood of
+// requests using many distinct keys (e.g. many spoofed IPs hitting
+// GENERAL_API_IP_RULE - see the getClientIp() caveat below) could grow
+// this Map without bound between scheduled sweeps, exhausting process
+// memory. Exported so tests can reference it instead of duplicating the
+// number.
+export const MAX_STORE_SIZE = 20_000;
+
+// Test-only introspection - not used by any production code path.
+export function __getStoreSizeForTests(): number {
+  return store.size;
+}
+
+function sweepExpired(now: number, force = false) {
+  if (!force && now - lastSweepAt < SWEEP_INTERVAL_MS) return;
   lastSweepAt = now;
   for (const [key, entry] of store) {
     if (entry.resetAt <= now) store.delete(key);
@@ -45,6 +58,19 @@ export function checkRateLimit(key: string, rule: RateLimitRule, now: number = D
   const entry = store.get(key);
 
   if (!entry || entry.resetAt <= now) {
+    if (store.size >= MAX_STORE_SIZE) {
+      // Reclaim anything actually expired first, out of the normal
+      // 5-minute schedule.
+      sweepExpired(now, true);
+      if (store.size >= MAX_STORE_SIZE) {
+        // Still full after reclaiming expired entries - evict the
+        // oldest-inserted key rather than let the store grow unbounded.
+        // Map iteration order is insertion order, so the first key
+        // yielded is the oldest.
+        const oldestKey = store.keys().next().value;
+        if (oldestKey !== undefined) store.delete(oldestKey);
+      }
+    }
     store.set(key, { count: 1, resetAt: now + rule.windowSeconds * 1000 });
     return { allowed: true, remaining: rule.limit - 1, retryAfterSeconds: 0 };
   }
@@ -57,14 +83,44 @@ export function checkRateLimit(key: string, rule: RateLimitRule, now: number = D
   return { allowed: true, remaining: rule.limit - entry.count, retryAfterSeconds: 0 };
 }
 
+// Every IP-keyed rate limit in the app (OTP send/verify cost control,
+// email-login brute force protection, the general per-IP API backstop)
+// depends on this function returning the real client IP rather than one
+// an attacker can freely set. Both `X-Forwarded-For` and `X-Real-IP` are
+// request headers set by *whoever connects to us* - they are ONLY
+// trustworthy if a reverse proxy in front of this app overwrites them
+// with the real TCP peer address on every request, stripping/discarding
+// whatever the client itself sent. That proxy config is infrastructure
+// outside this repo and, as of this writing, is NOT yet in place for
+// Jib's deployment - so this function alone does not make rate limiting
+// spoof-proof; it becomes effective only once the reverse proxy is
+// configured to match. Required config once a proxy is added:
+//   nginx:  proxy_set_header X-Real-IP $remote_addr;
+//   Caddy:  reverse_proxy already sets X-Real-IP to the immediate peer by
+//           default; just don't pass through an upstream client's header.
+//
+// Trust order once that's in place:
+// 1. X-Real-IP - a single scalar value the proxy overwrites outright, no
+//    list-parsing ambiguity.
+// 2. The LAST entry of X-Forwarded-For - each hop *appends* to this list
+//    (nginx's $proxy_add_x_forwarded_for, Caddy's default), so the last
+//    entry is the one added by our own proxy; the first entry is
+//    whatever the client itself sent and is fully attacker-controlled.
 export function getClientIp(headers: Headers): string {
+  const realIp = headers.get("x-real-ip");
+  if (realIp) {
+    const trimmed = realIp.trim();
+    if (trimmed) return trimmed;
+  }
   const forwardedFor = headers.get("x-forwarded-for");
   if (forwardedFor) {
-    const first = forwardedFor.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = forwardedFor
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) return last;
   }
-  const realIp = headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
   return "unknown";
 }
 

@@ -51,6 +51,120 @@ const BLU_SELF_TRANSFER_SMS = `بلو
 
 const FREE_TEXT = "۵۰ تومن ناهار خوردم";
 
+// Same fixture as TEJARAT_SMS with "واریز" (income) swapped in for
+// "برداشت" (expense) - reused from parse-transaction.test.ts's
+// TEJARAT_SMS_INCOME_WITH_MERCHANT template (minus the merchant line) to
+// cover an income/credit full result at the parseBankSms level directly,
+// not just indirectly through parseTransactionWithAI's own tests.
+const TEJARAT_INCOME_SMS = `بانک تجارت
+حساب:0145059220990
+واریز:2,000,000 ریال
+از طریق: شتاب
+مانده:134,866 ریال`;
+
+// A message containing only a balance figure - no برداشت/خرید/پرداخت/واریز/
+// انتقال keyword anywhere - must not be misparsed as a transaction. Bank
+// resolves confidently (bank name + مانده both match Sepah's rules); the
+// type check is what must correctly bail to null here.
+const SEPAH_BALANCE_ONLY_SMS = `بانک سپه
+مانده:63,096,472`;
+
+// Phase 7.1 hardening fixtures - synthetic, structurally consistent with
+// the other synthetic fixtures above (bank name + a scored transaction
+// keyword from that bank's own BANK_PATTERNS rules + a مانده/موجودی balance
+// line), extended with a comma-grouped amount so each bank now has at
+// least one fixture that resolves a *complete* parseBankSms result, not
+// just a detectBank hit - previously only 4 of 17 supported banks
+// (Tejarat, Refah, Sepah, Blu) had any fixture proving the full
+// bank+amount+type pipeline succeeds together. placeholder/synthetic -
+// replace with a real SMS sample once one is available, same caveat as
+// every other synthetic fixture in this codebase.
+const MELLI_FULL_SMS = `بانک ملی
+برداشت:2,340,000
+مانده:15,000,000`;
+
+const SAMAN_FULL_SMS = `بانک سامان
+خرید:750,000
+مانده:9,000,000`;
+
+const PARSIAN_FULL_SMS = `بانک پارسیان
+پرداخت:430,000
+مانده:6,250,000`;
+
+const PASARGAD_FULL_SMS = `بانک پاسارگاد
+خرید:1,200,000
+موجودی:8,400,000`;
+
+const POST_FULL_SMS = `پست بانک
+برداشت:600,000
+مانده:3,150,000`;
+
+const KESHAVARZI_FULL_SMS = `بانک کشاورزی
+برداشت:980,000
+مانده:12,300,000`;
+
+const MASKAN_FULL_SMS = `بانک مسکن
+برداشت:2,100,000
+مانده:40,000,000`;
+
+const AYANDEH_FULL_SMS = `بانک آینده
+خرید:355,000
+موجودی:7,700,000`;
+
+const SHAHR_FULL_SMS = `بانک شهر
+برداشت:1,850,000
+مانده:22,000,000`;
+
+const KARAFARIN_FULL_SMS = `بانک کارآفرین
+برداشت:670,000
+مانده:5,500,000`;
+
+const EGHTESAD_NOVIN_FULL_SMS = `اقتصاد نوین
+خرید:410,000
+مانده:9,900,000`;
+
+// Truncated mid-word: the bank name never completes ("بانک تج" is not
+// "بانک تجارت"), simulating an SMS cut off in transit/storage. Must not
+// be mistaken for Tejarat just because it shares a prefix.
+const TRUNCATED_BANK_NAME_SMS = "بانک تج";
+
+// Truncated after the transaction keyword, before any amount ever arrives -
+// simulates a message cut off mid-transmission. Bank resolves; amount
+// extraction must fail cleanly (no digits at all follow the keyword).
+const TRUNCATED_BEFORE_AMOUNT_SMS = `بانک تجارت
+حساب:0145059220990
+برداشت`;
+
+// Garbled/corrupted bank name (a stray replacement character, U+FFFD,
+// spliced into the middle of "بانک تجارت" - a realistic artifact of a
+// mangled character encoding) - the exact-substring bank-name rule no
+// longer matches, and the two remaining generic Tejarat signals ("از
+// طریق"=15, "شتاب"=10) only total 25, below MIN_CONFIDENCE_SCORE (50), so
+// detection correctly falls back to unknown rather than still guessing
+// Tejarat from a corrupted name.
+const GARBLED_BANK_NAME_SMS = `بانک تج�ارت
+حساب:0145059220990
+برداشت:1,500,000 ریال
+از طریق: شتاب
+مانده:134,866 ریال`;
+
+// Garbled amount: the digits themselves are corrupted (letters spliced
+// into where the amount should be), not just missing - bank and type both
+// resolve, but no valid comma-grouped number exists anywhere in the text,
+// so amount extraction must fail cleanly rather than guess.
+const GARBLED_AMOUNT_SMS = `بانک تجارت
+حساب:0145059220990
+برداشت: مبلغ نامعلوم ریال
+از طریق: شتاب`;
+
+// Ordinary financial free text that happens to contain a comma-formatted
+// number and a recognized transaction keyword (خرید) - everything
+// extractBankAmount/extractBankType would need individually, but no bank
+// name or bank-specific phrase anywhere. Guards against a false positive
+// where amount+type resolving on their own could be mistaken for a parsed
+// bank SMS; detectBank must still gate the whole result to null.
+const NON_BANK_TEXT_WITH_AMOUNT_SMS = "دیروز 1,500,000 خرید کردم برای خونه";
+
 // Constructed (not reused): built from TEJARAT_SMS's established phrasing
 // specifically to isolate the type-ambiguous branch in parseBankSms —
 // amount must still resolve, so a null result here can only come from the
@@ -124,6 +238,78 @@ describe("parseBankSms", () => {
         type: "expense",
         date: TODAY_ISO,
       });
+    });
+  });
+
+  // Phase 7.1: one full-result fixture per currently-supported bank that
+  // didn't already have one above (Tejarat/Refah/Sepah/Blu). Synthetic,
+  // per each fixture's own provenance comment - these prove the complete
+  // deterministic pipeline (detectBank + extractBankAmount +
+  // extractBankType together) actually succeeds for every bank in the
+  // Bank union, not just the 4 banks with a real-SMS-derived sample.
+  describe("full result — one synthetic fixture per remaining supported bank", () => {
+    it.each([
+      ["melli", MELLI_FULL_SMS, 2340000],
+      ["saman", SAMAN_FULL_SMS, 750000],
+      ["parsian", PARSIAN_FULL_SMS, 430000],
+      ["pasargad", PASARGAD_FULL_SMS, 1200000],
+      ["post", POST_FULL_SMS, 600000],
+      ["keshavarzi", KESHAVARZI_FULL_SMS, 980000],
+      ["maskan", MASKAN_FULL_SMS, 2100000],
+      ["ayandeh", AYANDEH_FULL_SMS, 355000],
+      ["shahr", SHAHR_FULL_SMS, 1850000],
+      ["karafarin", KARAFARIN_FULL_SMS, 670000],
+      ["eghtesad-novin", EGHTESAD_NOVIN_FULL_SMS, 410000],
+    ] as const)("parses %s's synthetic SMS into a full expense result", (bank, sms, amount) => {
+      expect(parseBankSms(sms, NOW)).toEqual({
+        bank,
+        bankConfidence: 1,
+        amount,
+        type: "expense",
+        date: TODAY_ISO,
+      });
+    });
+  });
+
+  describe("income (credit) full result", () => {
+    it("parses a واریز (deposit) SMS into a full income result", () => {
+      expect(parseBankSms(TEJARAT_INCOME_SMS, NOW)).toEqual({
+        bank: "tejarat",
+        bankConfidence: 1,
+        amount: 200000,
+        type: "income",
+        date: TODAY_ISO,
+      });
+    });
+  });
+
+  describe("balance-only messages are not misparsed as a transaction", () => {
+    it("returns null for a message containing only a balance figure, no transaction keyword", () => {
+      expect(parseBankSms(SEPAH_BALANCE_ONLY_SMS, NOW)).toBeNull();
+    });
+  });
+
+  describe("malformed SMS (truncated / garbled)", () => {
+    it("returns null for a bank name truncated mid-word", () => {
+      expect(parseBankSms(TRUNCATED_BANK_NAME_SMS, NOW)).toBeNull();
+    });
+
+    it("returns null when the message is cut off before any amount arrives", () => {
+      expect(parseBankSms(TRUNCATED_BEFORE_AMOUNT_SMS, NOW)).toBeNull();
+    });
+
+    it("returns null when the bank name itself is corrupted (mojibake character spliced in)", () => {
+      expect(parseBankSms(GARBLED_BANK_NAME_SMS, NOW)).toBeNull();
+    });
+
+    it("returns null when the amount digits are replaced with garbled text", () => {
+      expect(parseBankSms(GARBLED_AMOUNT_SMS, NOW)).toBeNull();
+    });
+  });
+
+  describe("non-bank text with an incidental comma-amount and keyword", () => {
+    it("returns null despite a resolvable amount and type, since no bank matches", () => {
+      expect(parseBankSms(NON_BANK_TEXT_WITH_AMOUNT_SMS, NOW)).toBeNull();
     });
   });
 

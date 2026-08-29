@@ -1,5 +1,9 @@
-import { chatCompletion } from "@/lib/nvidia-ai";
+import { chatCompletion, AI_PROVIDER, type TokenUsage } from "@/lib/nvidia-ai";
 import { extractJson } from "@/lib/ai/parse-transaction";
+import { logger } from "@/lib/observability/logger";
+import { getRequestId } from "@/lib/observability/request-context";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
 
 // The chat assistant's only "tool-calling"-shaped decision point: does this
 // message describe a past, unlogged transaction the user wants recorded
@@ -31,28 +35,81 @@ function buildSystemPrompt(): string {
 // unexpected response - a missed detection just means this one message is
 // answered as normal chat (the existing, always-safe behavior), whereas a
 // false positive would risk surfacing a bogus transaction suggestion.
-export async function detectTransactionIntent(message: string): Promise<ChatIntent> {
+//
+// userId is only used for observability (Phase 12.4) - attaching it to the
+// AI-latency/failure log line and Sentry report below - not for any
+// behavioral decision in this function.
+export async function detectTransactionIntent(message: string, userId: number): Promise<ChatIntent> {
+  const aiCallStartedAt = Date.now();
   let content: string;
+  let usage: TokenUsage | undefined;
   try {
     content = await chatCompletion(
       [
         { role: "system", content: buildSystemPrompt() },
         { role: "user", content: message },
       ],
-      { json: true }
+      { json: true, onUsage: (u) => { usage = u; } }
     );
-  } catch {
+    logger.info(
+      {
+        requestId: getRequestId(),
+        route: "ai/detect-transaction-intent",
+        userId,
+        duration: Date.now() - aiCallStartedAt,
+        provider: AI_PROVIDER,
+        usage,
+      },
+      "AI call succeeded"
+    );
+  } catch (error) {
+    // Sanitized params only - `message` is the user's raw chat message,
+    // never logged/reported verbatim (Phase 12.4.1).
+    reportError({
+      errorType: ERROR_TYPES.AI_ERROR,
+      route: "ai/detect-transaction-intent",
+      userId,
+      duration: Date.now() - aiCallStartedAt,
+      message: error instanceof Error ? error.message : "AI call failed",
+      error,
+      context: { provider: AI_PROVIDER, messageLength: message.length },
+    });
+    // Existing fallback behavior preserved unchanged (Phase 12.4.2/12.4.3):
+    // this function already treats any failure here as "answer normally",
+    // not an error to surface - logging is purely additive.
     return { isPastUnloggedTransaction: false };
   }
 
   let parsed: unknown;
   try {
     parsed = extractJson(content);
-  } catch {
+  } catch (extractError) {
+    // Sanitized input only - `content` is the AI's own response text -
+    // logged as shape (length), not verbatim. No parser-version field:
+    // this codebase has no such concept anywhere (checked), so none is
+    // invented here per the Phase 12 spec. Existing fallback behavior
+    // (answer normally) preserved unchanged - logging is purely additive.
+    reportError({
+      errorType: ERROR_TYPES.PARSER_ERROR,
+      route: "ai/detect-transaction-intent",
+      userId,
+      message: extractError instanceof Error ? extractError.message : "Failed to extract JSON from AI response",
+      error: extractError,
+      context: { contentLength: content.length },
+    });
     return { isPastUnloggedTransaction: false };
   }
 
   if (typeof parsed !== "object" || parsed === null) {
+    const validationError = new Error("AI response was not a JSON object");
+    reportError({
+      errorType: ERROR_TYPES.PARSER_ERROR,
+      route: "ai/detect-transaction-intent",
+      userId,
+      message: validationError.message,
+      error: validationError,
+      context: { contentLength: content.length },
+    });
     return { isPastUnloggedTransaction: false };
   }
 

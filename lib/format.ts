@@ -25,6 +25,18 @@ export function formatNumber(amount: number): string {
   return numberFormatter.format(Math.round(amount));
 }
 
+// Unlike formatNumber (always rounds to a whole number - correct for Toman
+// amounts, which never have a fractional unit smaller than 1 in this app),
+// asset quantities routinely are fractional (grams of gold, a BTC holding
+// like 0.015) - Math.round would silently show "۰" for a real, non-zero
+// holding. `maxDecimals` defaults to 2 (a rough "equivalent value" blurb,
+// e.g. the dashboard's gold/dollar-equivalent line, reads better without 6
+// digits of noise); components/assets/assets-manager.tsx passes 6 for an
+// actual holding's own quantity, where a small BTC amount needs it.
+export function formatDecimal(amount: number, maxDecimals = 2): string {
+  return new Intl.NumberFormat("fa-IR", { maximumFractionDigits: maxDecimals }).format(amount);
+}
+
 export function formatJalaaliDate(date: Date | string): string {
   const d = typeof date === "string" ? new Date(date) : date;
   const { jy, jm, jd } = toJalaali(d);

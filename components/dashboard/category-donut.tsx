@@ -14,7 +14,7 @@ export function CategoryDonut({ segments, total }: { segments: Segment[]; total:
 
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
-      <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="#E2E8F0" strokeWidth={strokeWidth} />
+      <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="var(--border)" strokeWidth={strokeWidth} />
       {total > 0 &&
         segments.map((segment) => {
           const fraction = segment.total / total;

@@ -24,10 +24,7 @@ export function HomeIcon(props: IconProps) {
 export function ListIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
-      <path d="M8 6h12M8 12h12M8 18h12" />
-      <circle cx="4" cy="6" r="1.2" fill="currentColor" stroke="none" />
-      <circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none" />
-      <circle cx="4" cy="18" r="1.2" fill="currentColor" stroke="none" />
+      <path d="M4 7h16M4 12h16M4 17h10" />
     </svg>
   );
 }
@@ -160,6 +157,43 @@ export function SparklesIcon(props: IconProps) {
   );
 }
 
+// "ثبت سریع" (quick submit, see add-transaction-form.tsx) - a lightning
+// bolt reads as "instant" the same way it does everywhere else, distinct at
+// a glance from SparklesIcon's "AI-generated" meaning used on the live
+// preview above it.
+export function ZapIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M13 3 5 13.5h5.5L11 21l8-10.5h-5.5L13 3Z" strokeLinejoin="round" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function RefreshIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 12a8 8 0 0 1 14.5-4.6M20 12a8 8 0 0 1-14.5 4.6" />
+      <path d="M18.5 3v4.5H14M5.5 21v-4.5H10" />
+    </svg>
+  );
+}
+
+// "محاسبه‌گر سریع" (quick calculator, see components/assets/quick-price-calculator.tsx).
+export function CalculatorIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="6" y="3.5" width="12" height="17" rx="2" />
+      <path d="M8.5 7h7" />
+      <circle cx="8.7" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="15.3" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="8.7" cy="15.5" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="15.5" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="15.3" cy="15.5" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function ChartIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
@@ -265,6 +299,16 @@ export function PhoneIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
       <path d="M6.5 3.5h3l1.5 4-2 1.5a11 11 0 0 0 5.5 5.5l1.5-2 4 1.5v3a2 2 0 0 1-2.2 2A17.5 17.5 0 0 1 4.5 5.7a2 2 0 0 1 2-2.2Z" />
+    </svg>
+  );
+}
+
+export function LockIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="5" y="10.5" width="14" height="9" rx="2" />
+      <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+      <circle cx="12" cy="15" r="1.1" fill="currentColor" stroke="none" />
     </svg>
   );
 }

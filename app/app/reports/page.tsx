@@ -93,7 +93,7 @@ export default async function ReportsPage({ searchParams }: PageProps) {
               key={value}
               href={href}
               className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-medium ${
-                active ? "bg-primary-darker text-white" : "bg-background text-muted"
+                active ? "bg-primary text-on-primary" : "bg-background text-muted"
               }`}
             >
               {label}

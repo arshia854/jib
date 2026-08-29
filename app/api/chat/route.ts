@@ -1,14 +1,20 @@
 import { NextRequest } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/prisma";
-import { streamChatCompletion, type ChatMessageInput } from "@/lib/nvidia-ai";
+import { streamChatCompletion, AI_PROVIDER, type ChatMessageInput } from "@/lib/nvidia-ai";
 import { getFinancialContextSummary } from "@/lib/data/chat-context";
 import { checkRateLimit, rateLimitResponse, CHAT_USER_RULE, TRANSACTION_PARSE_USER_RULE } from "@/lib/rate-limit";
 import { detectTransactionIntent } from "@/lib/ai/detect-transaction-intent";
 import { parseTransactionWithAI, type ParsedTransaction } from "@/lib/ai/parse-transaction";
 import { listCategories } from "@/lib/data/categories";
 import type { CategoryType } from "@/lib/categories";
-import { formatJalaaliDate, formatNumber } from "@/lib/format";
+import { getAssetTypeOption } from "@/lib/assets";
+import { formatJalaaliDate, formatNumber, formatDecimal } from "@/lib/format";
+import { MAX_CHAT_MESSAGE_LENGTH } from "@/lib/limits";
+import { logger } from "@/lib/observability/logger";
+import { getRequestId } from "@/lib/observability/request-context";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
 
 // Bounds worst-case prompt size from a single very long historical message
 // (e.g. a wall of pasted text) without losing recent conversational flow -
@@ -36,8 +42,19 @@ const SUGGESTION_CLARIFYING_NOTE =
   "به‌نظر می‌رسد کاربر یک تراکنش (خرج یا دریافت) گذشته و ثبت‌نشده را توصیف کرده، اما مبلغ یا نوع خرید به‌اندازه‌ی کافی مشخص نیست. به‌جای پاسخ عمومی، یک سؤال کوتاه و دقیق بپرس تا این اطلاعات مشخص شود (مثلاً دقیق مبلغ چقدر بود، یا برای چه چیزی خرج شد).";
 
 // این خرید [تاریخ] به مبلغ [مبلغ] تومان برای [توضیح] ثبت نشده. می‌خواید ثبتش کنم؟
+// When parsed.assetSuggestion is set (lib/ai/parse-transaction.ts detected
+// this as buying a live-priced asset - gold/usd/bitcoin), an extra clause
+// tells the user confirming this will also add it to their Assets, so
+// "بله" isn't a surprise once it does (see handleConfirmSuggestion in
+// components/chat/chat-interface.tsx, which forwards assetSuggestion as
+// assetPurchase to POST /api/transactions).
 function buildConfirmationText(parsed: ParsedTransaction): string {
-  return `این خرید ${formatJalaaliDate(parsed.date)} به مبلغ ${formatNumber(parsed.amount)} تومان برای ${parsed.description} ثبت نشده. می‌خواید ثبتش کنم؟`;
+  const base = `این خرید ${formatJalaaliDate(parsed.date)} به مبلغ ${formatNumber(parsed.amount)} تومان برای ${parsed.description} ثبت نشده`;
+  if (!parsed.assetSuggestion) return `${base}. می‌خواید ثبتش کنم؟`;
+
+  const option = getAssetTypeOption(parsed.assetSuggestion.type);
+  const unit = option?.unitLabel ? ` ${option.unitLabel}` : "";
+  return `${base} - با ثبت آن، ${formatDecimal(parsed.assetSuggestion.quantity, 4)}${unit} ${option?.label ?? ""} هم به دارایی‌هات اضافه می‌شود. می‌خواید ثبتش کنم؟`;
 }
 
 type SuggestionAttempt =
@@ -80,7 +97,20 @@ async function trySuggestTransaction(userId: number, message: string): Promise<S
     return { ok: false, reason: "parse-failed" };
   }
 
-  if (parsed.type !== "expense" || parsed.needsConfirmation || parsed.suggestedCategory) {
+  // parsed.assetSuggestion is an explicit exception to the needsConfirmation
+  // gate: an asset purchase's amount/quantity comes from a deterministic
+  // live-price lookup (lib/ai/parse-transaction.ts's resolveAssetPurchase),
+  // not a guess, so mediocre *category* confidence (there's no perfect
+  // "buying an investment" category to match against - see that file's own
+  // buildSystemPrompt) shouldn't be enough to suppress the suggestion card
+  // entirely. suggestedCategory still bails out unconditionally - that flow
+  // needs its own "بساز" UI (AddTransactionForm), which this chat card
+  // doesn't reimplement, same as before this change.
+  if (
+    parsed.type !== "expense" ||
+    parsed.suggestedCategory ||
+    (parsed.needsConfirmation && !parsed.assetSuggestion)
+  ) {
     return { ok: false, reason: "low-confidence" };
   }
 
@@ -104,10 +134,13 @@ export async function POST(request: NextRequest) {
   if (!message) {
     return Response.json({ error: "پیام نمی‌تواند خالی باشد." }, { status: 400 });
   }
+  if (message.length > MAX_CHAT_MESSAGE_LENGTH) {
+    return Response.json({ error: "پیام بیش از حد طولانی است." }, { status: 400 });
+  }
 
   await prisma.chatMessage.create({ data: { userId: session.userId, role: "user", content: message } });
 
-  const intent = await detectTransactionIntent(message);
+  const intent = await detectTransactionIntent(message, session.userId);
 
   let suggestionClarifyingNote: string | undefined;
   if (intent.isPastUnloggedTransaction) {
@@ -161,10 +194,40 @@ export async function POST(request: NextRequest) {
   ];
 
   let upstream: ReadableStream<Uint8Array>;
+  const aiCallStartedAt = Date.now();
   try {
     upstream = await streamChatCompletion(messages);
+    // "Success" here, and the duration measured, cover the initial call
+    // only - i.e. NVIDIA NIM accepting the request and starting to stream
+    // a response - not the full response body, which streams
+    // asynchronously afterward through the ReadableStream below. Measuring
+    // full-stream duration would mean threading timing state through that
+    // stream's pull()/cancel() callbacks, a materially bigger change than
+    // this sub-task's "wrap the AI call" scope.
+    logger.info(
+      {
+        requestId: getRequestId(),
+        route: "api/chat",
+        userId: session.userId,
+        duration: Date.now() - aiCallStartedAt,
+        provider: AI_PROVIDER,
+      },
+      "AI call succeeded"
+    );
   } catch (error) {
     const text = error instanceof Error ? error.message : "خطا در ارتباط با هوش مصنوعی.";
+    // Sanitized params only - `messages` carries the user's financial
+    // context/chat history, never logged/reported verbatim (Phase 12.4.1).
+    reportError({
+      errorType: ERROR_TYPES.AI_ERROR,
+      route: "api/chat",
+      userId: session.userId,
+      duration: Date.now() - aiCallStartedAt,
+      message: text,
+      error,
+      context: { provider: AI_PROVIDER, messageCount: messages.length },
+    });
+    // Response unchanged - same 502 + same Persian error text as before.
     return Response.json({ error: text }, { status: 502 });
   }
 

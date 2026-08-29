@@ -12,6 +12,7 @@ describe("getMonthlyComparison", () => {
   const INSURANCE_NAME = "بیمه تست";
   const UNUSED_NAME = "دسته بدون تراکنش در بازه تست";
   const INCOME_NAME = "درآمد تست";
+  const TRANSFER_NAME = "انتقال تست";
 
   // Crosses a Jalaali year boundary: اسفند ۱۴۰۲ -> فروردین ۱۴۰۳.
   const PREVIOUS_MONTH = "1402-12";
@@ -28,7 +29,7 @@ describe("getMonthlyComparison", () => {
     });
     accountId = account.id;
 
-    const [food, transport, insurance, unused, income] = await Promise.all([
+    const [food, transport, insurance, unused, income, transfer] = await Promise.all([
       prisma.category.create({
         data: { userId, name: FOOD_NAME, icon: "🍔", color: "#000001", type: "expense" },
       }),
@@ -43,6 +44,9 @@ describe("getMonthlyComparison", () => {
       }),
       prisma.category.create({
         data: { userId, name: INCOME_NAME, icon: "💰", color: "#000005", type: "income" },
+      }),
+      prisma.category.create({
+        data: { userId, name: TRANSFER_NAME, icon: "🔄", color: "#000006", type: "expense", isTransfer: true },
       }),
     ]);
 
@@ -69,6 +73,13 @@ describe("getMonthlyComparison", () => {
       // Income in both months -> must not be treated as "spending"
       makeTxn(income.id, "income", 500000, jalaaliToDateObject(1402, 12, 1)),
       makeTxn(income.id, "income", 500000, jalaaliToDateObject(1403, 1, 1)),
+
+      // A transfer between the user's own accounts -> must not be treated
+      // as spending either, despite being type "expense" like food/transport
+      // above. Deliberately a large amount, so if the exclusion regresses,
+      // "sums totals..." below would fail loudly rather than by a
+      // hard-to-notice small drift.
+      makeTxn(transfer.id, "expense", 999999, jalaaliToDateObject(1403, 1, 12)),
     ]);
   });
 
@@ -121,6 +132,11 @@ describe("getMonthlyComparison", () => {
   it("excludes income transactions from the spending comparison", async () => {
     const result = await getMonthlyComparison(String(userId), CURRENT_MONTH, PREVIOUS_MONTH);
     expect(result.categories.find((c) => c.category === INCOME_NAME)).toBeUndefined();
+  });
+
+  it("excludes Category.isTransfer categories from the spending comparison", async () => {
+    const result = await getMonthlyComparison(String(userId), CURRENT_MONTH, PREVIOUS_MONTH);
+    expect(result.categories.find((c) => c.category === TRANSFER_NAME)).toBeUndefined();
   });
 
   it("sums totals across all categories and computes the overall percent change", async () => {
