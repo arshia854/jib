@@ -2,9 +2,9 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { chatCompletion, streamChatCompletion, NVIDIA_REQUEST_TIMEOUT_MS, type ChatMessageInput } from "@/lib/nvidia-ai";
 
 function stubEnv() {
-  vi.stubEnv("NVIDIA_API_KEY", "test-key");
-  vi.stubEnv("NVIDIA_BASE_URL", "https://example.test/v1");
-  vi.stubEnv("NVIDIA_MODEL", "test-model");
+  vi.stubEnv("OPENROUTER_API_KEY", "test-key");
+  vi.stubEnv("OPENROUTER_BASE_URL", "https://example.test/v1");
+  vi.stubEnv("OPENROUTER_MODEL", "test-model");
 }
 
 afterEach(() => {
@@ -31,7 +31,7 @@ describe("chatCompletion", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse(init.body as string);
-    expect(body.max_tokens).toBe(500);
+    expect(body.max_tokens).toBe(1500);
     // Confirms max_tokens is additive, not a replacement for the existing
     // json-mode request_format wiring.
     expect(body.response_format).toEqual({ type: "json_object" });
@@ -51,7 +51,7 @@ describe("chatCompletion", () => {
     await chatCompletion(MESSAGES);
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(JSON.parse(init.body as string).max_tokens).toBe(500);
+    expect(JSON.parse(init.body as string).max_tokens).toBe(1500);
   });
 });
 
@@ -73,7 +73,7 @@ describe("streamChatCompletion", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse(init.body as string);
-    expect(body.max_tokens).toBe(1000);
+    expect(body.max_tokens).toBe(2500);
     expect(body.max_tokens).toBeGreaterThan(500); // strictly larger than chatCompletion's JSON-extraction cap
     // Confirms max_tokens is additive, not a replacement for the existing
     // stream:true wiring.
@@ -89,7 +89,7 @@ describe("gateway timeout (Phase 9.1)", () => {
     vi.useRealTimers();
   });
 
-  it("aborts the request and surfaces a clear error if NVIDIA NIM never responds within the timeout", async () => {
+  it("aborts the request and surfaces a clear error if OpenRouter never responds within the timeout", async () => {
     stubEnv();
     vi.useFakeTimers();
     // Never resolves on its own - only reacts to the AbortController's
@@ -137,7 +137,7 @@ describe("gateway timeout (Phase 9.1)", () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(chatCompletion(MESSAGES)).rejects.toThrow(/ارتباط با NVIDIA NIM برقرار نشد/);
+    await expect(chatCompletion(MESSAGES)).rejects.toThrow(/ارتباط با OpenRouter برقرار نشد/);
     expect(fetchMock).toHaveBeenCalledTimes(2); // original attempt + exactly one retry
   });
 

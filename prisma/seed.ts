@@ -8,7 +8,16 @@ async function main() {
   for (const category of DEFAULT_CATEGORIES) {
     const parent = await prisma.defaultCategory.upsert({
       where: { name_type: { name: category.name, type: category.type } },
-      update: { icon: category.icon, color: category.color, isEssential: category.isEssential },
+      // parentId: null is required here, not just icon/color/isEssential -
+      // without it, a (name, type) that already exists in the table *as a
+      // child* (e.g. a stale row from an older seed snapshot baked into an
+      // early migration - see AGENTS.md) would silently stay a child
+      // forever instead of being promoted to top-level, even though every
+      // other field gets refreshed correctly. Confirmed to actually happen
+      // (not just theoretical) while seeding the Subtask 23-top-level
+      // category tree on 2026-09-04 - see docs/roadmap-status.md's entry
+      // that day for the exact affected rows.
+      update: { icon: category.icon, color: category.color, isEssential: category.isEssential, parentId: null },
       create: {
         name: category.name,
         icon: category.icon,

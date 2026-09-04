@@ -91,7 +91,23 @@ function findTokenOverlapMatch(
 // response is never trusted for this (sanitizeNewCategorySuggestion
 // already drops a hallucinated `icon` key before this is ever called).
 // Same style as CATEGORY_ALIASES: a small lookup table over known names,
-// with a generic fallback for anything not listed here.
+// with a generic fallback (DEFAULT_NEW_CATEGORY_ICON) for anything not
+// listed here.
+//
+// Covers concepts genuinely likely to still have no match among the
+// 23-top-level/59-subcategory default tree (see prisma/default-categories.ts)
+// even after findSimilarCategory's alias/token-overlap passes - not an
+// attempt to enumerate every possible category, which would just be a
+// second, worse copy of the real tree. The goal is to make
+// DEFAULT_NEW_CATEGORY_ICON's box rare, not to eliminate it - a genuine
+// long tail is still expected to fall through to it.
+//
+// Keys must be written in already-normalized form: resolveNewCategoryIcon
+// looks up normalizeText(name), and normalizeText (lib/normalize.ts)
+// replaces a ZWNJ/half-space (e.g. the one in "شرط‌بندی") with a plain
+// space - so a key containing a literal ZWNJ would never match. Every
+// multi-word key below is written with a plain space for this reason, even
+// where the "correct" Persian spelling conventionally uses a half-space.
 const NEW_CATEGORY_ICONS: Record<string, string> = {
   "دخانیات": "🚬",
   "لوازم حیوان خانگی": "🐾",
@@ -99,6 +115,49 @@ const NEW_CATEGORY_ICONS: Record<string, string> = {
   "بیمه": "🛡️",
   "خیریه": "❤️",
   "اشتراک": "🔄",
+
+  // Personal care / beauty - specific enough not to get caught by «خدمات
+  // شخصی و زیبایی»'s own subcategories (آرایشگاه و سالن زیبایی, لوازم
+  // آرایشی و بهداشتی, خشکشویی) via findSimilarCategory first.
+  "مانیکور": "💅",
+  "پدیکور": "💅",
+  "تتو": "🎨",
+  "جراحی زیبایی": "💉",
+  "لوازم آرایشی": "💄",
+
+  // Entertainment / lifestyle
+  "بازی ویدیویی": "🎮",
+  "کافه گردی": "☕",
+
+  // Finance / speculative - none of these fit «پس‌انداز و سرمایه‌گذاری»
+  // (a deliberate, held investment), so they're kept distinct rather than
+  // folded in there.
+  "کریپتو": "🪙",
+  "رمزارز": "🪙",
+  "قمار و شرط بندی": "🎰",
+  "بلیط بخت آزمایی": "🎟️",
+
+  // Religious / charitable - distinct from «هدیه و خیریه»'s own خیریه و
+  // صدقه subcategory, which is generic giving rather than a specific
+  // religious practice/obligation.
+  "مذهبی": "🙏",
+  "زکات": "🕌",
+
+  // Family / childcare
+  "شهریه مهدکودک": "🧸",
+  "لوازم بچه": "👶",
+  "کلاس موسیقی": "🎵",
+
+  // Transport / errands - none of «حمل‌ونقل»'s own subcategories (بنزین,
+  // تاکسی و اسنپ, تعمیر و سرویس خودرو, مترو و اتوبوس, پارکینگ و جریمه)
+  // cover "someone else delivering something to me" or "renting a car for
+  // a while".
+  "پیک موتوری": "🛵",
+  "اجاره خودرو": "🔑",
+
+  // Home services - distinct from «تعمیر و نگهداری منزل», which is
+  // repair/upkeep rather than routine cleaning.
+  "کارگر نظافت": "🧹",
 };
 
 const DEFAULT_NEW_CATEGORY_ICON = "📦";

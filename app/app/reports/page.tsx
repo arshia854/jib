@@ -6,23 +6,26 @@ import { getComparison } from "@/lib/reports/monthly-comparison";
 import { generateHighlights } from "@/lib/reports/generate-highlights";
 import { dateToPeriodKey, getPreviousPeriod, type ReportGranularity } from "@/lib/reports/period-range";
 import { getTodaySpending } from "@/lib/reports/today-spending";
+import { getActivityHeatmap } from "@/lib/data/activity-heatmap";
 import { MonthlyComparisonReport } from "@/components/reports/MonthlyComparisonReport";
 import { TodaySpendingReport } from "@/components/reports/TodaySpendingReport";
+import { ActivityHeatmap } from "@/components/reports/ActivityHeatmap";
 import { EmptyState } from "@/components/empty-state";
 import { ChartIcon } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 
-// The UI has one more tab ("day") than the week/month/year comparison granularity in
-// period-range.ts — day isn't a comparison, so it's handled by its own branch below
-// instead of going through getComparison/periodToGregorianRange.
-type ReportTab = "day" | ReportGranularity;
+// The UI has two more tabs ("day", "activity") than the week/month/year comparison
+// granularity in period-range.ts — neither is a comparison, so both are handled by
+// their own branch below instead of going through getComparison/periodToGregorianRange.
+type ReportTab = "day" | "activity" | ReportGranularity;
 
 const TABS: { value: ReportTab; label: string }[] = [
   { value: "day", label: "روزانه" },
   { value: "week", label: "هفتگی" },
   { value: "month", label: "ماهانه" },
   { value: "year", label: "سالانه" },
+  { value: "activity", label: "فعالیت" },
 ];
 
 // Text for generateHighlights' periodLabel — "نسبت به ماه قبل" is its own default, repeated
@@ -35,7 +38,7 @@ const PERIOD_LABELS: Record<ReportGranularity, string> = {
 };
 
 function parseTab(range: string | undefined): ReportTab {
-  return range === "day" || range === "week" || range === "year" ? range : "month";
+  return range === "day" || range === "week" || range === "year" || range === "activity" ? range : "month";
 }
 
 interface PageProps {
@@ -67,6 +70,12 @@ export default async function ReportsPage({ searchParams }: PageProps) {
       spending.categories.length === 0
         ? emptyState("با ثبت یک تراکنش امروز، خلاصه هزینه‌های امروز اینجا نمایش داده می‌شود.")
         : <TodaySpendingReport spending={spending} />;
+  } else if (tab === "activity") {
+    const heatmap = await getActivityHeatmap(session.userId);
+    content =
+      heatmap.activeDays === 0
+        ? emptyState("با ثبت اولین تراکنش، نقشه فعالیت روزانه شما اینجا نمایش داده می‌شود.")
+        : <ActivityHeatmap heatmap={heatmap} />;
   } else {
     const currentPeriod = dateToPeriodKey(new Date(), tab);
     const previousPeriod = getPreviousPeriod(currentPeriod, tab);

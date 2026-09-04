@@ -79,8 +79,14 @@ async function applyMigrations(client: Client) {
 async function seedDefaultCategories(client: Client) {
   for (const category of DEFAULT_CATEGORIES) {
     const parent = await client.execute({
+      // "parentId" = NULL on conflict mirrors prisma/seed.ts's own upsert
+      // fix (see its comment) - a (name, type) already present as a child
+      // row (stale legacy seed data) must be promoted back to top-level
+      // here too, not just have its other columns refreshed, or this test
+      // harness would silently diverge from what the real seed script now
+      // does.
       sql: `INSERT INTO "DefaultCategory" ("name", "icon", "color", "type", "isEssential") VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT("name", "type") DO UPDATE SET "icon" = excluded."icon", "color" = excluded."color", "isEssential" = excluded."isEssential"
+            ON CONFLICT("name", "type") DO UPDATE SET "icon" = excluded."icon", "color" = excluded."color", "isEssential" = excluded."isEssential", "parentId" = NULL
             RETURNING "id"`,
       args: [category.name, category.icon, category.color, category.type, category.isEssential ? 1 : 0],
     });

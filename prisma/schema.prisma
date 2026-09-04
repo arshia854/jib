@@ -49,6 +49,7 @@ model User {
   financeAccounts      FinanceAccount[]
   categories           Category[]
   transactions         Transaction[]
+  conversations        Conversation[]
   chatMessages         ChatMessage[]
   merchantMappings     MerchantMapping[]
   // OAuth provider links (Google, etc). Named/modeled to match what
@@ -224,16 +225,59 @@ model MerchantMapping {
   @@index([categoryId])
 }
 
+// One chat thread between a user and the financial assistant
+// («جیب‌یار» - see app/api/chat/route.ts). The assistant used to have a
+// single endless thread per user; conversations give each thread its own
+// bounded message history and its own AI context, so nothing bleeds
+// between them (the prompt history in app/api/chat/route.ts is scoped by
+// conversationId, never by userId alone).
+model Conversation {
+  id Int @id @default(autoincrement())
+
+  // Null until the first exchange auto-titles it from the user's opening
+  // message (see maybeAutoTitle in lib/data/conversations.ts). Never
+  // written by the user directly - there's no rename UI.
+  title         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  // Bumped after every successful assistant reply, and the sort key the
+  // history list is ordered by. Deliberately separate from `updatedAt`:
+  // @updatedAt moves on any column write (e.g. the auto-title), which
+  // isn't the same thing as "the thread had activity".
+  lastMessageAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  messages ChatMessage[]
+
+  @@index([userId, lastMessageAt])
+}
+
 model ChatMessage {
   id        Int      @id @default(autoincrement())
   role      String
   content   String
   timestamp DateTime @default(now())
 
+  // Kept alongside conversationId (which already implies the owner) on
+  // purpose - same denormalized-userId pattern every other per-user model
+  // in this schema uses, so a direct `where: { userId }` query/cleanup and
+  // the User -> ChatMessage cascade both still work without a join.
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  conversationId Int
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // Still used by the userId prefix alone: the User cascade delete, and
+  // per-user cleanup (`chatMessage.deleteMany({ where: { userId } })`).
+  // No query orders by [userId, timestamp] any more - the chat prompt's
+  // own history read is scoped by conversation now (see below).
   @@index([userId, timestamp])
+  // Serves listMessages() in lib/data/conversations.ts - the "most recent
+  // N messages of this conversation" read on every chat turn and page load.
+  @@index([conversationId, timestamp])
 }
 
 // Cache of a previous (already-closed) Jalali month's spending summary, used

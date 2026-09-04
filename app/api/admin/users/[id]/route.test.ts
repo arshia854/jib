@@ -215,8 +215,9 @@ describe("DELETE /api/admin/users/[id]", () => {
           rawInput: "تست کسکید",
         },
       });
+      const conversation = await prisma.conversation.create({ data: { userId: targetId } });
       const chatMessage = await prisma.chatMessage.create({
-        data: { userId: targetId, role: "user", content: "سلام" },
+        data: { userId: targetId, role: "user", content: "سلام", conversationId: conversation.id },
       });
       const merchantMapping = await prisma.merchantMapping.create({
         data: { userId: targetId, merchantKey: "فروشگاه تست کسکید", categoryId: category.id },
@@ -236,6 +237,7 @@ describe("DELETE /api/admin/users/[id]", () => {
       expect(await prisma.category.findUnique({ where: { id: category.id } })).toBeNull();
       expect(await prisma.transaction.findUnique({ where: { id: transaction.id } })).toBeNull();
       expect(await prisma.chatMessage.findUnique({ where: { id: chatMessage.id } })).toBeNull();
+      expect(await prisma.conversation.findUnique({ where: { id: conversation.id } })).toBeNull();
       expect(await prisma.merchantMapping.findUnique({ where: { id: merchantMapping.id } })).toBeNull();
       expect(await prisma.spendingSummaryCache.findUnique({ where: { id: summaryCache.id } })).toBeNull();
       expect(await prisma.userFact.findUnique({ where: { id: userFact.id } })).toBeNull();

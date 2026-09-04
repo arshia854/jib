@@ -3,6 +3,13 @@ import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/prisma";
 import { streamChatCompletion, AI_PROVIDER, type ChatMessageInput } from "@/lib/nvidia-ai";
 import { getFinancialContextSummary } from "@/lib/data/chat-context";
+import {
+  listMessages,
+  getConversation,
+  touchConversation,
+  maybeAutoTitle,
+  ConversationNotFoundError,
+} from "@/lib/data/conversations";
 import { checkRateLimit, rateLimitResponse, CHAT_USER_RULE, TRANSACTION_PARSE_USER_RULE } from "@/lib/rate-limit";
 import { detectTransactionIntent } from "@/lib/ai/detect-transaction-intent";
 import { parseTransactionWithAI, type ParsedTransaction } from "@/lib/ai/parse-transaction";
@@ -20,6 +27,11 @@ import { ERROR_TYPES } from "@/lib/observability/error-types";
 // (e.g. a wall of pasted text) without losing recent conversational flow -
 // the last 16 messages are still all sent, just capped in length.
 const HISTORY_MESSAGE_CHAR_CAP = 800;
+
+// How many of THIS conversation's messages ride along as prompt history.
+// Scoped per conversation since this change, so nothing from another
+// thread can bleed into this one's context.
+const HISTORY_MESSAGE_TAKE = 16;
 
 function truncateForPrompt(content: string): string {
   if (content.length <= HISTORY_MESSAGE_CHAR_CAP) return content;
@@ -117,6 +129,16 @@ async function trySuggestTransaction(userId: number, message: string): Promise<S
   return { ok: true, confirmationText: buildConfirmationText(parsed), parsed };
 }
 
+// Both reply paths (the suggest_transaction JSON response and the normal
+// streamed one) end the same way: bump the thread's position in the
+// history list, and - only for a still-untitled thread - name it after the
+// message that started it. maybeAutoTitle is a no-op on every later turn
+// (its own `title: null` WHERE guarantees that), so this is safe to call
+// unconditionally rather than reading the title back first.
+async function finalizeConversationTurn(conversationId: number, userMessage: string) {
+  await Promise.all([touchConversation(conversationId), maybeAutoTitle(conversationId, userMessage)]);
+}
+
 export async function POST(request: NextRequest) {
   const session = await getSession();
   if (!session) {
@@ -138,7 +160,32 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "پیام بیش از حد طولانی است." }, { status: 400 });
   }
 
-  await prisma.chatMessage.create({ data: { userId: session.userId, role: "user", content: message } });
+  // Every message now belongs to exactly one conversation - there is no
+  // "the user's thread" any more. Clients with no conversation yet (a
+  // brand-new user, or the "گفتگوی جدید" button) create one first via
+  // POST /api/chat/conversations and send its id here; this route never
+  // creates one implicitly, so a typo'd/absent id can't silently start a
+  // stray thread.
+  const conversationId = Number(body?.conversationId);
+  if (!Number.isInteger(conversationId)) {
+    return Response.json({ error: "شناسه گفتگو نامعتبر است." }, { status: 400 });
+  }
+
+  // Ownership checked before anything is written and before any AI call is
+  // made - a guessed id belonging to someone else costs nothing and
+  // reveals nothing beyond the same 404 a nonexistent id gets.
+  try {
+    await getConversation(session.userId, conversationId);
+  } catch (error) {
+    if (error instanceof ConversationNotFoundError) {
+      return Response.json({ error: error.message }, { status: 404 });
+    }
+    throw error;
+  }
+
+  await prisma.chatMessage.create({
+    data: { userId: session.userId, role: "user", content: message, conversationId },
+  });
 
   const intent = await detectTransactionIntent(message, session.userId);
 
@@ -155,8 +202,9 @@ export async function POST(request: NextRequest) {
       // suggestion actually lives - client-side state only, until the
       // user explicitly confirms).
       await prisma.chatMessage.create({
-        data: { userId: session.userId, role: "assistant", content: attempt.confirmationText },
+        data: { userId: session.userId, role: "assistant", content: attempt.confirmationText, conversationId },
       });
+      await finalizeConversationTurn(conversationId, message);
       return Response.json({
         type: "transaction_suggestion",
         message: attempt.confirmationText,
@@ -174,12 +222,13 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const [context, history] = await Promise.all([
+  const [context, orderedHistory] = await Promise.all([
     getFinancialContextSummary(session.userId),
-    prisma.chatMessage.findMany({ where: { userId: session.userId }, orderBy: { timestamp: "desc" }, take: 16 }),
+    // Already oldest-first, and already the most RECENT N (not the oldest
+    // N) - see listMessages' own comment on that ordering.
+    listMessages(session.userId, conversationId, HISTORY_MESSAGE_TAKE),
   ]);
 
-  const orderedHistory = history.reverse();
   const lastIndex = orderedHistory.length - 1;
   const messages: ChatMessageInput[] = [
     { role: "system", content: buildSystemPrompt(context, suggestionClarifyingNote) },
@@ -241,9 +290,14 @@ export async function POST(request: NextRequest) {
       if (done) {
         if (fullResponse.trim()) {
           await prisma.chatMessage.create({
-            data: { userId: session.userId, role: "assistant", content: fullResponse },
+            data: { userId: session.userId, role: "assistant", content: fullResponse, conversationId },
           });
         }
+        // Runs even when the model returned nothing worth persisting: the
+        // user's own message is already in this conversation, so its
+        // "last activity" and its title should reflect that turn either
+        // way.
+        await finalizeConversationTurn(conversationId, message);
         controller.close();
         return;
       }

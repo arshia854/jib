@@ -1151,3 +1151,581 @@ in the codebase was audited exhaustively - `getLivePrices()` was the one
 concrete instance found (a shared, externally-rate-limited resource behind
 a TTL cache with multiple call sites), not the result of a systematic sweep
 for the general category.
+
+
+## Multi-Conversation Chat History — 2026-09-04
+
+The assistant («دستیار مالی جیب») used to give every user exactly one
+endless chat thread — every message they ever sent, forever, in one
+`ChatMessage` list and one AI prompt history. This phase splits that into
+N conversations per user, each with its own bounded message history, its
+own AI context (nothing from one thread can bleed into another's prompt),
+its own title, and its own delete. No product-scope reduction — this is
+additive: existing chat history is preserved and reorganized, not
+discarded.
+
+### 1. Schema — `Conversation` model + staged migration
+
+`prisma/schema.prisma` gained a `Conversation` model (`id`, nullable
+`title`, `createdAt`, `updatedAt`, `lastMessageAt`, `userId` →
+`User.id` cascade) and `ChatMessage` gained a required `conversationId` →
+`Conversation.id` cascade FK alongside its existing `userId` (kept,
+deliberately denormalized, per this schema's existing per-user-model
+pattern — the `User` cascade delete and any userId-only cleanup still work
+without a join). A new `[conversationId, timestamp]` index serves
+`listMessages()`'s per-conversation read; the old `[userId, timestamp]`
+index stays since nothing else queries chat history by user alone anymore
+but the User cascade still benefits from it.
+
+The migration — `prisma/migrations/20260904102636_add_conversation` — is
+`prisma migrate diff` output per `AGENTS.md`'s offline-diff process, with
+one hand-added data migration the diff tool has no way to express: a
+backfill `INSERT INTO "Conversation"` (one row per distinct user who has
+any existing `ChatMessage`, titled from that user's earliest `role='user'`
+message — truncated to 40 codepoints the same way `truncateTitle()` in
+`lib/data/conversations.ts` does for new conversations, falling back to
+"مکالمه قبلی" for a user whose only messages are `role='assistant'`),
+run between the `CREATE TABLE "Conversation"` and the `RedefineTables`
+rebuild of `ChatMessage` so every pre-existing message resolves to a
+non-NULL `conversationId` before the `NOT NULL` constraint is enforced.
+The `RedefineTables` block does **not** touch `User`, so the hand-written
+`User_role_check` CHECK constraint (Phase 15) is untouched by this
+migration — the file's own header calls out why, referencing the Assets
+migration regression (Phase 20 §1) as the precedent this was written to
+avoid repeating. As of this entry, the migration was staged, reviewed, and
+approved but **not yet applied to the live Turso DB**; see this session's
+separate live-apply report for that step.
+
+### 2. Data layer — `lib/data/conversations.ts`
+
+New module: `listConversations`, `createConversation`, `getConversation`
+(throws `ConversationNotFoundError` for a missing-or-not-yours id — same
+"not yours looks like doesn't exist" convention as `AccountNotFoundError`/
+`AssetNotFoundError`), `listMessages`, `deleteConversation` (cascade does
+the message cleanup), `touchConversation` (bumps `lastMessageAt`, the
+history list's sort key — deliberately separate from Prisma's own
+`@updatedAt`, which also moves on a title write), and `maybeAutoTitle` (a
+single atomic `updateMany({ where: { title: null } })`, so a conversation
+is titled exactly once, safe under concurrent turns, with no read-then-
+write race).
+
+**The `asc`/`take` history-display bug, found and fixed here:** the old
+`app/app/chat/page.tsx` loaded chat history with
+`orderBy: { timestamp: "asc" }, take: 50` — for any thread past 50
+messages, that returns the **oldest** 50, not the most recent 50, so a
+long-running user's chat screen would load frozen in the past instead of
+showing where the conversation currently was. `listMessages()` replaces it
+with the pattern `app/api/chat/route.ts` already used correctly for AI
+prompt history (`desc` + `take`, then reversed in JS) — most-recent-N,
+oldest-first for display. Regression-covered by
+`lib/data/conversations.test.ts`'s "returns the most recent \`take\`
+messages, oldest-first (not the oldest N)" test.
+
+### 3. New endpoints — `app/api/chat/conversations/`
+
+`GET`/`POST /api/chat/conversations` (list the session user's
+conversations; create a new untitled one) and
+`GET`/`DELETE /api/chat/conversations/[id]` (this conversation's messages,
+oldest-first; delete it and its messages). All four session-gate first,
+then ownership-check via `getConversation`/`listMessages`/
+`deleteConversation` before reading or writing anything, returning the
+same 404 for a nonexistent id and one that belongs to someone else. None
+of the four sit behind `CHAT_USER_RULE` or a rule of their own — see
+"Found, not fixed" below.
+
+### 4. `app/api/chat/route.ts` — `conversationId` is now required
+
+`POST /api/chat` no longer creates or reads "the user's thread" — it takes
+a required `conversationId` in the body (400 if missing/non-numeric),
+ownership-checks it via `getConversation` before any write or AI call (a
+guessed id belonging to someone else costs nothing, reveals nothing beyond
+the same 404), writes both the user and assistant `ChatMessage` rows
+against it, and scopes the 16-message AI prompt-history read
+(`HISTORY_MESSAGE_TAKE`) to that conversation via `listMessages` instead
+of the old userId-wide `chatMessage.findMany`. A new
+`finalizeConversationTurn()` runs at the end of both reply paths (the
+`transaction_suggestion` JSON response and the normal streamed one):
+`touchConversation` + `maybeAutoTitle` in parallel, called unconditionally
+(auto-title is a no-op past the first turn, and the user's message is
+already persisted either way, so there's no case where skipping it would
+be more correct).
+
+### 5. UI — `conversation-list-drawer.tsx` + `page.tsx`/`chat-interface.tsx`
+
+New `ConversationListDrawer` (bottom-sheet list: title or "گفتگوی بدون
+عنوان" for a still-untitled thread, Jalali `lastMessageAt`, switch, delete
+with an inline confirm step). `app/app/chat/page.tsx` now resolves the
+active conversation from a `conversationId` search param (falling back to
+the most recently active one, or `null` for a brand-new user or `?new=1`),
+redirecting to the canonical URL if the requested id isn't in the user's
+own `listConversations()` result — membership in that list **is** the
+ownership check at this layer, and `listMessages()` re-checks
+independently regardless. `ChatInterface` gained header buttons for
+"گفتگوی جدید" (new) and history; a new conversation is created lazily on
+first send rather than on button click, so opening a new chat and walking
+away leaves no empty thread behind; the URL is updated via
+`history.replaceState` (not `router.refresh`) after a successful first
+send so a reload lands on the right thread without remounting the
+component and losing in-flight client state (a pending transaction
+suggestion, an error banner).
+
+### Found, not fixed — unbounded `POST /api/chat/conversations`
+
+Unlike `POST /api/chat` (behind `CHAT_USER_RULE`) or transaction parsing
+(`TRANSACTION_PARSE_USER_RULE`), `POST /api/chat/conversations` has no
+rate limit — a deliberate scope call at the time, reasoned as "it makes no
+AI call and costs nothing in third-party API terms," not an oversight.
+That reasoning covers cost but not abuse: a logged-in user (or a script
+using their session) can call it in a tight loop with no cap, growing
+their own `Conversation` table unboundedly. Nothing downstream is
+unbounded-query-broken by that — `listConversations()` has no `take`, so
+the history drawer would render an ever-growing, un-paginated list, and
+each spam row is cheap but not free (DB storage, one query response getting
+linearly slower per user). No fix applied this session — flagged here
+rather than guessed at, since the right bound (a rate limit like the other
+two rules, a hard per-user cap, pagination on `listConversations`, or some
+combination) is a product/cost judgment call this session didn't have
+grounds to make unilaterally.
+
+### Other fix: `admin-users` test needed a conversation
+
+`app/api/admin/users/[id]/route.test.ts`'s cascade-delete test created a
+`ChatMessage` directly with no `conversationId` — no longer valid once
+that column became `NOT NULL`. Fixed by creating a `Conversation` first
+and asserting it's gone too after `deleteUserAsAdmin()`, alongside the
+`ChatMessage` it owns (both cascade from `User`). No other pre-existing
+test file created `ChatMessage` rows directly; every other hit is one of
+this phase's own new test files.
+
+### Verification
+
+- `npm run test`: **71/71 files, 808/808 tests passing** (up from Phase
+  20's 68/68, 769/769 — +3 files, +39 tests, all new: `lib/data/
+  conversations.test.ts`, `app/api/chat/conversations/route.test.ts`,
+  `app/api/chat/conversations/[id]/route.test.ts`, plus the extended
+  existing `app/api/chat/route.test.ts` and `admin-users/[id]/
+  route.test.ts`), confirmed via a fresh full run.
+- `npx tsc --noEmit`: unchanged from Phase 20's baseline — same 8
+  pre-existing `TS2737` BigInt-literal errors in `app/api/assets/
+  route.test.ts` and `lib/prices/get-live-prices.test.ts`, neither file
+  touched this session.
+- `npm run lint`: clean — same 3 pre-existing warnings (`components/
+  logo.tsx`'s `<img>`, `lib/data/transactions.test.ts`'s unused
+  `categoryId`, and the workflow route's unused eslint-disable directive).
+
+### Do Not Claim
+
+This does not claim the live Turso database reflects any of this schema
+yet — the migration is staged and reviewed but its live application is
+tracked as a separate step with its own explicit approval gate, per
+`AGENTS.md`; nothing in this entry's verification touched Turso. It does
+not claim the unbounded-`POST /api/chat/conversations` gap is anything
+more than a known, written-up risk — no rate limit, cap, or pagination was
+added, and the right one wasn't this session's call to make alone (see
+"Found, not fixed"). It does not claim every chat-history read in the
+codebase is now conversation-scoped from a from-scratch audit — the two
+call sites that mattered (`app/api/chat/route.ts`'s AI prompt history,
+`app/app/chat/page.tsx`'s display history) were both found and fixed
+because they were the two places `ChatMessage` was ever queried outside
+`lib/data/conversations.ts` itself, not because every query in the
+codebase was re-swept for a userId-only chat read. It does not claim the
+backfill migration's per-user title choice (earliest `role='user'`
+message) was validated against real user data — the live DB has never
+been queried to see what those titles will actually look like once
+applied.
+
+## Default Category Tree Expansion + AI Disambiguation Examples — 2026-09-04
+
+The default category tree only had 9 expense top-levels (~15
+subcategories) and 5 flat income categories — too sparse for
+`lib/ai/parse-transaction.ts`'s free-text categorization to have a real
+match for common expenses (insurance, pets, personal care, gifts, savings,
+sports, travel), so the model was falling back to «سایر هزینه‌ها» more
+than it should. This session replaces the tree and adds prompt examples
+for the categories most likely to be confused with each other. All
+current users are internal testers explicitly told not to use the app
+until this ships — **no backward-compatibility, migration, or backfill
+logic was added, deliberately**; existing `Category` rows for those
+testers were explicitly out of scope for this session.
+
+- **`prisma/default-categories.ts`:** `DEFAULT_CATEGORIES` replaced
+  wholesale — **23 top-level categories / 59 subcategories** (up from
+  9/15), covering the gaps called out above (بیمه, حیوان خانگی, خدمات
+  شخصی و زیبایی, هدیه و خیریه, اقساط و بدهی, پس‌انداز و سرمایه‌گذاری as
+  its own expense bucket, سفر and ورزش و تناسب‌اندام promoted to
+  top-level, income split into 6 top-levels with سرمایه‌گذاری gaining 2
+  subcategories). `DefaultCategorySeed`'s interface and `isEssential`
+  semantics (non-discretionary; see `lib/analytics/spending-summary.ts`'s
+  `discretionaryExpense`) are unchanged — every new leaf was assigned
+  `isEssential` by the same judgment already applied to the existing ones
+  (e.g. لوازم آرایشی و بهداشتی: `true`, but آرایشگاه و سالن
+  زیبایی/خشکشویی: `false`; کمک مالی به خانواده: `true`, but هدیه تولد و
+  مناسبت/خیریه و صدقه: `false`).
+
+- **Re-seeding `DefaultCategory` — real bug found, not fixed (outside
+  this session's approved file list):** This project has no separate
+  "dev" database — `lib/prisma.ts` reads `TURSO_DATABASE_URL`/
+  `TURSO_AUTH_TOKEN` directly with no override, and only `npm test` (via
+  `vitest.config.ts` + `test/setup/global-setup.ts`) redirects to a local
+  SQLite file; running `npx tsx prisma/seed.ts` as-is would hit the
+  **live** Turso DB, which this task explicitly forbade touching. So
+  verification ran the real, unmodified `prisma/seed.ts` against a
+  scratch local SQLite file instead — schema built by applying every
+  `prisma/migrations/*/migration.sql` in order, the same way
+  `global-setup.ts` does, with `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` set
+  to the scratch file *before* `dotenv/config` runs (which only fills
+  already-unset vars, so `.env`'s live credentials are never loaded) —
+  never against `.vitest-test.db` and never against live Turso. Printed
+  result: **`Seeded default categories. Total rows: 109`** (82 = 23+59
+  from the new tree, +27 pre-existing rows from the legacy
+  Postgres-derived seed snapshot baked into
+  `20260802175335_..._default_categories`'s `migration.sql`, per
+  `AGENTS.md`'s own documented history — upserting by design leaves
+  unused old-named rows in place, e.g. `خانه و زندگی`/`سلامت و
+  درمان`/`انتقال بین حساب‌ها`×2/`سایر`×2/`درآمد`, matching the exact
+  behavior `global-setup.ts`'s own comment already describes).
+
+  Diffing the seeded table against the new `DEFAULT_CATEGORIES` surfaced a
+  real bug in `prisma/seed.ts`: the top-level upsert's `update:` clause
+  sets `icon`/`color`/`isEssential` but never reset `parentId`, so a
+  `(name, type)` that already existed **as a child** in that legacy
+  snapshot stayed a child instead of being promoted to top-level. Four of
+  this session's new top-level names collided with legacy children:
+  `حقوق`/`هدیه`/`سرمایه‌گذاری` (income) were already children of the
+  legacy `درآمد`, and `بیمه` (expense) was already a child of `قبوض و
+  اشتراک` — all four got their `icon`/`color`/`isEssential` correctly
+  refreshed but **stayed nested under their stale legacy parent** instead
+  of becoming real top-level rows. Since `lib/data/onboarding.ts`'s
+  `seedDefaultCategoriesForUser()` builds a new user's category list from
+  `where: { parentId: null }`, a real signup would have gotten `درآمد`
+  (not in the new tree at all) as a top-level income category with
+  `حقوق`/`هدیه`/`سرمایه‌گذاری` nested under it, and `بیمه` nested under
+  `قبوض و اشتراک`, instead of four independent top-levels — plus all 7
+  other legacy top-level rows copied into every new user's list too,
+  since that query has no filter beyond `parentId: null`. The child-side
+  upsert didn't have this bug (its own `update:` clause already set
+  `parentId: parent.id`).
+
+  This was outside this session's originally-approved file list
+  (`prisma/seed.ts`, `test/setup/global-setup.ts`), so it was surfaced to
+  the user rather than silently patched — asked via `AskUserQuestion`
+  once the bug and its blast radius were fully understood, and the user
+  chose to have it fixed now. **Fixed:** both upserts now add `parentId:
+  null` to their `update:`/`ON CONFLICT ... DO UPDATE SET` clause —
+  `prisma/seed.ts`'s Prisma-Client upsert and `test/setup/global-setup.ts`'s
+  raw-SQL mirror (kept in sync deliberately, since the latter is what
+  every `npm run test` run actually seeds with). Re-verified against a
+  fresh scratch local SQLite file (same build process as above, not
+  `.vitest-test.db`, not live Turso): all 4 previously-misplaced names now
+  read `parentId: null` (`SELECT ... WHERE name IN (...)`), top-level count
+  moved from 26→30 (23 new + 7 harmless legacy leftovers, as intended) and
+  child count from 83→79, and a full sweep confirmed every name in the new
+  `DEFAULT_CATEGORIES` now has `parentId: null` with zero exceptions. **Not
+  applied to live Turso** — this fix only changed the two source files;
+  actually re-seeding the live DB with the corrected script remains a
+  separate, explicitly-gated step per `AGENTS.md`, not taken this session.
+
+- **`lib/ai/parse-transaction.ts` (`buildSystemPrompt`, additive only):**
+  6 new lines in the existing "نمونه برای دسته‌های مشابه" example block —
+  بیمه خودرو (vs. حمل‌ونقل), غذای حیوان خانگی (vs. سوپرمارکت), قسط وام
+  شخصی vs. قسط وام مسکن (only مسکن on an explicit خانه/مسکن mention),
+  خرید طلا و ارز for an explicitly-for-savings gold purchase (checked it
+  doesn't conflict with the existing `assetPurchase` rule — "برای
+  پس‌انداز" already matches that rule's own "سرمایه‌گذاری/پس‌انداز"
+  wording, so `assetPurchase` still fires independently of `category`),
+  آرایشگاه و سالن زیبایی (vs. تفریح و سرگرمی), and کمک مالی به خانواده
+  (vs. هدیه تولد و مناسبت, unless a specific occasion is named). No other
+  prompt structure changed — confirmed via `lib/ai/parse-transaction.test.ts`'s
+  existing `.toContain()` assertions on the older 6 example lines, all
+  still passing unmodified.
+
+- **`lib/category-aliases.ts`: checked, no changes needed.** Its 3 keys
+  were audited against the new tree: `سوپرمارکت` and `دارو` are
+  unchanged (still the exact same subcategory strings, under the same
+  parents). `دخانیات` was never a seeded `DefaultCategory` name in either
+  the old or new tree — it's a `resolveNewCategoryIcon`-recognized name
+  for a category the AI is instructed to *suggest* (`newCategorySuggestion`)
+  that a user may have created for themselves, which the alias comment's
+  own "existing seeded **or user-created** category name" rule already
+  covers; nothing to fix.
+
+- **Verification (re-run after the `prisma/seed.ts`/`global-setup.ts`
+  fix above):** `npm run test`: **72/72 files, 820/820 tests passing**
+  (unchanged file/test count — this session added no new tests; every
+  prompt-block assertion touched is additive/`.toContain()`-based, and no
+  existing test happened to assert on the specific top-level/child
+  placement the seed bug affected, so the fix shows up as "still green,"
+  not as new passing assertions). `npx tsc --noEmit`: same 8 pre-existing
+  `TS2737` BigInt-literal errors in `app/api/assets/route.test.ts`/
+  `lib/prices/get-live-prices.test.ts`, neither file touched this
+  session. `npm run lint`: same 3 pre-existing warnings (`components/
+  logo.tsx`'s `<img>`, `lib/data/transactions.test.ts`'s unused
+  `categoryId`, the workflow route's unused eslint-disable directive). No
+  live-database reads or writes at any point this session.
+
+## Default Category Tree — Applied to Live Turso — 2026-09-04
+
+Follow-up to "Default Category Tree Expansion + AI Disambiguation Examples"
+above, same day. That entry staged the 23-top-level/59-subcategory
+`DEFAULT_CATEGORIES` tree and the `prisma/seed.ts` `parentId: null` upsert
+fix, but verified both only against a scratch local SQLite file — applying
+either to live Turso was explicitly left as a separate, gated step. This
+session ran the same, unmodified `prisma/seed.ts` for real against live
+Turso, per explicit user approval.
+
+**Pre-flight found live's baseline didn't match the scratch test's, in a
+good way.** Live `DefaultCategory` had 26 rows going in, but not the same
+26/27-ish legacy-Postgres-snapshot content the prior entry's scratch DB had
+— that scratch baseline came from replaying every `prisma/migrations/*/
+migration.sql` from scratch, which includes the legacy seed rows baked into
+`20260802175335_..._default_categories` (`خانه و زندگی`, `سلامت و درمان`,
+etc., per `AGENTS.md`'s note that this migration's SQL was never actually
+run as-is against Turso). Live's real 26 rows never had that legacy
+content at all — they were the *old* real tree (9 expense top-levels, 12
+subcategories, 5 flat income top-levels), evidently from an actual past
+run of the old `prisma/seed.ts` against live. Consequence: the 4 names the
+prior entry named (`حقوق`/`هدیه`/`سرمایه‌گذاری`/`بیمه`) did not reproduce
+the bug on live — `حقوق`/`سرمایه‌گذاری`/`هدیه` were already top-level, and
+`بیمه` didn't exist yet. So all 23 new top-level names were cross-checked
+against live's actual rows instead of stopping at those 4, and one real
+live instance of the same bug turned up: `سفر`, a child of `تفریح و
+سرگرمی` in the old tree, promoted to top-level in the new one — exactly
+the kind of stale-`parentId` collision the fix targets. Every other new
+top-level name was either already correctly top-level live or didn't
+exist yet (plain create, bug not reachable there).
+
+**Run:** `npx tsx prisma/seed.ts` → printed **`Seeded default categories.
+Total rows: 82`** (23 top-level + 59 subcategories, matching the prior
+entry's tree exactly).
+
+**Verified against live Turso directly (not a scratch file):**
+
+- `حقوق`/`سرمایه‌گذاری`/`هدیه`/`بیمه`: all `parentId = NULL`.
+- All 23 `DEFAULT_CATEGORIES` top-level names present with `parentId =
+  NULL` and the correct `type` — checked exhaustively, not just spot-check
+  names, and `حیوان خانگی`/`بیمه`/`سفر`/`ورزش و تناسب‌اندام`/`خدمات شخصی
+  و زیبایی`/`هدیه و خیریه`/`اقساط و بدهی`/`پس‌انداز و سرمایه‌گذاری` also
+  individually confirmed with matching `icon`/`color`/`isEssential`.
+- `lib/data/onboarding.ts`'s `seedDefaultCategoriesForUser()` (`where: {
+  parentId: null }`, not modified) would now return **exactly the 23 new
+  top-levels — zero legacy leftovers**, cleaner than the prior entry's
+  scratch-test outcome of "23 + 7 harmless leftovers": live never had
+  those 7 rows to begin with, and every one of its 26 pre-existing rows
+  matched a name in the new tree (9 expense top-levels + `سفر` + 5 income
+  top-levels + 11 retained subcategories = 26), so nothing was left
+  stranded.
+
+**Scope held:** only `DefaultCategory` was written. No existing user's
+`Category` rows were read or touched this session — that backfill remains
+explicitly out of scope, per the prior entry's own decision.
+
+## Per-User Category Backfill + New-Category Icon Table + Personal-Care Disambiguation — 2026-09-04
+
+Follow-up to the two entries above, same day. Those left every user's own
+`Category` rows on the old 9/15 tree deliberately — this session is that
+backfill, plus two related bugs reported by the user: the AI finding no
+match for things like "ترمیم ناخن" (nail repair) against a user's stale
+category list and proposing a duplicate new category instead of the
+now-existing «خدمات شخصی و زیبایی» / «آرایشگاه و سالن زیبایی», and
+`resolveNewCategoryIcon` (`lib/categories.ts`) falling back to a generic
+📦 for almost every AI-suggested new category since `NEW_CATEGORY_ICONS`
+only had 6 entries. All current `User` rows are internal test accounts
+with disposable data, confirmed explicitly by the user for this session.
+
+### 1. Investigation — `Category`/`Transaction` FK, before touching data
+
+`Transaction.categoryId → Category` and `MerchantMapping.categoryId →
+Category` are both `onDelete: Restrict` (`prisma/schema.prisma`), not
+Cascade or SetNull — confirmed DB-enforced on the live connection
+(`PRAGMA foreign_keys` returned `1`), not just a schema-level annotation.
+`Category.parentId`'s own self-relation is `Restrict` too, so a parent row
+can't be deleted while a child still points to it either.
+
+A read-only count against live Turso (74 users, 466 total `Category` rows)
+found **29 `Transaction` rows + 3 `MerchantMapping` rows across 7 users**
+(`1, 2, 623, 626, 683, 685, 700`) still referencing their own old
+`Category` rows — count > 0, so per the task's own instruction this
+stopped short of any write and was reported back rather than decided
+unilaterally. Digging into *which* old names those 29+3 rows pointed at:
+23/29 transactions + 2/3 mappings matched a new-tree name verbatim (e.g.
+`رستوران و کافه`, `سایر هزینه‌ها`, `دارو`, `حقوق`); the remaining 6
+transactions + 1 mapping referenced names with no new-tree equivalent at
+all — `دسته مالکیت الف` / `دسته تست منبع` (literal leftover fixture
+categories from automated E2E test runs on users 623/626) and `دخانیات` /
+`استارتاپ` (custom categories on user 1, apparently created via the AI's
+own `newCategorySuggestion` flow rather than seeded from
+`DefaultCategory`).
+
+Presented two options via `AskUserQuestion` per the task's instructions
+(remap the 29+3 rows to new-tree categories by name before deleting vs.
+wipe `Transaction`+`MerchantMapping`+`Category` entirely and reseed
+clean) — user responded "هرکدوم بهتره" ("whichever is better"), delegating
+the choice. Went with **wipe + reseed clean**: simpler and less
+error-prone than fuzzy name-matching + a permanent carve-out for the 7
+unmatched rows, matches this project's own already-stated precedent for
+this exact tree change ("no backward-compatibility, migration, or
+backfill logic was added, deliberately" — prior entry above), and the
+data is already confirmed disposable (2 of the 7 affected users are
+literal automated-test leftovers, not real usage).
+
+### 2. Live refresh — wipe + reseed, `prisma/refresh-user-categories.ts` (kept)
+
+New script, following the existing `prisma/backfill-categories.ts` /
+`prisma/backfill-category-essentiality.ts` convention (dry run by default,
+`--execute` to write) — kept rather than deleted after use, same as its
+siblings, in case a future cohort of test users needs the same operation.
+Also wipes `SpendingSummaryCache` (13 rows, across the same 7 users plus 3
+more whose cache already referenced no live transactions before this
+session even started): no FK to `Category`, but a cached
+previous-month-by-category breakdown for transactions that no longer
+exist would otherwise silently show wrong numbers on reports/chat rather
+than recomputing live.
+
+Before any write, dumps every current `Category`/`Transaction`/
+`MerchantMapping`/`SpendingSummaryCache` row to a local timestamped JSON
+snapshot (`/home/abt/jib-db-backups/pre-category-refresh-*.json`) as a
+restorable safety net — `scripts/backup-live-db.ts` (the repo's general
+export tool) currently self-aborts on this schema (its `EXPECTED_TABLES`
+list predates the `Conversation`/`Asset`/`LivePriceCache` tables added
+since it was written), so this script takes its own narrow snapshot
+instead of relying on it; fixing that script was out of this session's
+approved file list.
+
+**Two infrastructure snags along the way, both fixed without touching
+`lib/prisma.ts` or `lib/data/onboarding.ts`** (neither in scope, and the
+task asked to reuse `seedDefaultCategoriesForUser()` unmodified):
+
+- `seedDefaultCategoriesForUser()`'s own `$transaction()` (~40 sequential
+  create/createMany round trips per user against remote Turso) exceeded
+  Prisma's default 5000ms interactive-transaction timeout — the first
+  attempt failed at 5354ms, rolling back cleanly (verified: all 74 users
+  sat at exactly 0 categories afterward, never a partial count). Fixed via
+  a new `prisma/_long-timeout-prisma-setup.ts` (kept, required by the
+  refresh script), which constructs a `PrismaClient` with a longer
+  `transactionOptions.timeout` and assigns it to `globalThis.prisma`
+  *before* anything imports `@/lib/prisma` — exploiting that file's own
+  existing global-singleton reuse hook
+  (`globalForPrisma.prisma ?? new PrismaClient(...)`, originally there for
+  Next.js dev-mode HMR dedup) rather than editing it.
+- Running the script at all required `npx tsx --conditions=react-server`:
+  `lib/data/onboarding.ts` starts with `import "server-only"`, which only
+  no-ops under Next's own webpack/Turbopack build and otherwise
+  unconditionally throws — the exact issue `vitest.config.ts` already
+  documents and aliases around for test runs, not previously hit by any
+  plain-`tsx` script in this repo since none of them imported
+  `lib/data/onboarding.ts` before now. Node's own `--conditions` CLI flag
+  satisfies the same export condition directly; documented in the
+  script's own usage comment for reuse.
+- Even with the longer client-side timeout, one run hit a second,
+  *server-side* failure: `SQLITE_BUSY: ... interactive transaction was
+  rolled back because the stream was idle for too long` (a libsql/Turso
+  idle-stream limit, unrelated to and not fixed by Prisma's own timeout
+  setting) — intermittent, not tied to a specific user, confirmed safe to
+  retry (every failure, on both snags, left the affected user at exactly
+  0 categories). Fixed with a 5-attempt retry-with-backoff wrapper around
+  each user's seed call.
+- Along the way, also found and fixed a real gap in the script's own
+  resumability: the delete phase ran unconditionally on every
+  `--execute`, so a partially-succeeded run's already-correctly-reseeded
+  users got deleted and recreated all over again on the next retry
+  instead of being left alone (not a correctness bug — reseeding is
+  deterministic, so the end state was still right — but wasteful, and it
+  needlessly re-exposed already-done users to the same intermittent
+  failure above). Fixed by excluding any user already sitting at exactly
+  `EXPECTED_TREE_SIZE` categories (computed from `DEFAULT_CATEGORIES`
+  itself, not hardcoded) from the delete phase.
+
+**Result, verified independently against live Turso after completion:**
+all 74 users sit at exactly 82 categories each (23 top-level + 59
+subcategories, matching `DEFAULT_CATEGORIES` with zero missing/unexpected
+entries — spot-checked exhaustively for user 1); total `Category` rows
+466 → 6068 (74 × 82, exact); `Transaction`/`MerchantMapping`/
+`SpendingSummaryCache` all at 0; zero `Category` rows with a `parentId`
+not resolving to a real row. User 1 (the account matching this project's
+own owner) now has both «خدمات شخصی و زیبایی» (parent) and «آرایشگاه و
+سالن زیبایی» (child) present — the exact pair this session's reported bug
+was about.
+
+### 3. `lib/categories.ts` — `NEW_CATEGORY_ICONS` expanded (icon table only)
+
+6 → 29 entries. Kept the existing 6 unchanged; added 23 more grouped by
+theme (personal care/beauty, entertainment/lifestyle, finance/
+speculative, religious/charitable, family/childcare, transport/errands,
+home services) — mostly the concepts named in this session's task
+(`مانیکور`, `پدیکور`, `تتو`, `جراحی زیبایی`, `لوازم آرایشی`, `بازی
+ویدیویی`, `کریپتو`, `رمزارز`, `قمار و شرط‌بندی`, `بلیط بخت‌آزمایی`,
+`مذهبی`, `زکات`, `شهریه مهدکودک`, `کلاس موسیقی`, `لوازم بچه`, `کافه‌گردی`,
+`پیک موتوری`), plus two judged additions (`اجاره خودرو`, `کارگر نظافت`) —
+each chosen for having no reasonable fit among the 23/59 tree's own
+subcategories. `DEFAULT_NEW_CATEGORY_ICON` (📦) unchanged as the
+fallback for the genuine long tail, deliberately not eliminated.
+
+Found and documented (didn't change the matching logic, out of scope for
+this file's icon-table-only mandate): `resolveNewCategoryIcon` does a
+plain `normalizeText(name)` dictionary lookup, and `normalizeText`
+(`lib/normalize.ts`) replaces a ZWNJ/half-space with a plain space — so a
+key written with a literal ZWNJ (the "correct" Persian spelling for
+compounds like `شرط‌بندی`/`بخت‌آزمایی`/`کافه‌گردی`) would never match.
+Every multi-word key added is written with a plain space instead, and the
+gotcha is now called out directly above the table for whoever adds the
+next entry.
+
+### 4. `lib/ai/parse-transaction.ts` — one disambiguation example (additive only)
+
+Added to `buildSystemPrompt`'s existing "نمونه برای دسته‌های مشابه" block,
+directly after the existing «رفتم آرایشگاه» example: "«ترمیم ناخن کردم» /
+«مانیکور کردم» → category: «خدمات شخصی و زیبایی»، subcategory: «آرایشگاه
+و سالن زیبایی» (نه «لوازم آرایشی و بهداشتی»، چون این یک خدمت است نه خرید
+لوازم آرایشی)" — same format as every existing line, clarifying that a
+nail service is a *service* (`آرایشگاه و سالن زیبایی`), not a product
+purchase (`لوازم آرایشی و بهداشتی`), the two subcategories under the same
+parent an LLM could plausibly conflate here.
+
+### Verification
+
+- `npm run test`: **72/72 files, 820/820 tests passing** — unchanged from
+  the prior entry's baseline (no test asserted the old 6-entry
+  `NEW_CATEGORY_ICONS` size or a specific prompt-block line count; every
+  assertion touched by this session's changes was already
+  `resolveNewCategoryIcon(...)`-relative or `.toContain()`-based).
+- `npx tsc --noEmit`: unchanged — same 8 pre-existing `TS2737`
+  BigInt-literal errors in `app/api/assets/route.test.ts`/
+  `lib/prices/get-live-prices.test.ts`, neither file touched this
+  session.
+- `npm run lint`: unchanged — same 3 pre-existing warnings
+  (`components/logo.tsx`'s `<img>`, `lib/data/transactions.test.ts`'s
+  unused `categoryId`, the workflow route's unused eslint-disable
+  directive).
+- Live-Turso state independently re-verified after the refresh completed
+  (see "Result" under §2 above) — not inferred from the script's own
+  printed output alone.
+
+### Scope held
+
+Touched: `prisma/refresh-user-categories.ts` (new, kept) +
+`prisma/_long-timeout-prisma-setup.ts` (new, kept, required by the
+former) for the live refresh; `lib/categories.ts` (icon table only);
+`lib/ai/parse-transaction.ts` (one prompt example, additive only). No
+schema migration. No admin-UI changes. `lib/prisma.ts` and
+`lib/data/onboarding.ts` were read but never edited, per the task's own
+instructions — the transaction-timeout fix works around both from the
+outside instead (§2 above). `scripts/backup-live-db.ts`'s
+`EXPECTED_TABLES` gap was found and reported, not fixed — outside this
+session's approved file list.
+
+### Do Not Claim
+
+This does not claim the 6 unmatched old-category rows (`دسته مالکیت الف`
+/ `دسته تست منبع` / `دخانیات` / `استارتاپ`) had any value worth
+preserving beyond what the backup JSON snapshot now holds — the "wipe"
+option was chosen specifically because they didn't. It does not claim
+`scripts/backup-live-db.ts` is fixed or usable as-is; it still self-aborts
+on this schema. It does not claim every realistic `newCategorySuggestion`
+concept now has a dedicated icon — `NEW_CATEGORY_ICONS` covers 29 named
+concepts judged likely, not an exhaustive set, and `DEFAULT_NEW_CATEGORY_ICON`
+is still expected to fire for genuine long-tail suggestions. It does not
+claim the two live-only failures in §2 (the client-side transaction
+timeout and the server-side idle-stream error) are fully understood at
+the libsql/Turso infrastructure level — both were worked around
+(longer timeout, retry-with-backoff) and confirmed safe (clean rollback,
+no partial state) rather than root-caused further.

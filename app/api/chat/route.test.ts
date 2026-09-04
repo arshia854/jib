@@ -21,11 +21,15 @@ const mockedGetSession = vi.mocked(getSession);
 const mockedChatCompletion = vi.mocked(chatCompletion);
 const mockedStreamChatCompletion = vi.mocked(streamChatCompletion);
 
-function makeRequest(message: string): NextRequest {
+// Every send is scoped to a conversation now - the id is a required body
+// field, so it's threaded through this helper rather than left to each
+// test. `conversationId: undefined` is dropped by JSON.stringify, which is
+// exactly the "missing param" case the validation tests want.
+function makeRequest(message: string, conversationId?: number | string | null): NextRequest {
   return new NextRequest("http://localhost/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, conversationId }),
   });
 }
 
@@ -51,9 +55,14 @@ async function createTestUser(label: string) {
 describe("POST /api/chat - suggest_transaction flow", () => {
   let userId: number;
   let parentCategoryId: number;
+  let conversationId: number;
 
   beforeAll(async () => {
     userId = await createTestUser("main");
+    // Pre-titled so these tests exercise the ordinary "existing thread"
+    // path - auto-titling gets its own block below.
+    const conversation = await prisma.conversation.create({ data: { userId, title: "گفتگوی آزمایشی" } });
+    conversationId = conversation.id;
 
     // Matches lib/merchants.ts's "اسنپ" DEFAULT_MERCHANTS entry exactly
     // (defaultCategory: "حمل‌ونقل", defaultSubcategory: "تاکسی و اسنپ") - so
@@ -72,11 +81,11 @@ describe("POST /api/chat - suggest_transaction flow", () => {
 
   afterAll(async () => {
     await prisma.chatMessage.deleteMany({ where: { userId } });
+    await prisma.conversation.deleteMany({ where: { userId } });
     await prisma.transaction.deleteMany({ where: { userId } });
     await prisma.category.deleteMany({ where: { userId, parentId: { not: null } } });
     await prisma.category.deleteMany({ where: { userId } });
     await prisma.user.delete({ where: { id: userId } });
-    await prisma.$disconnect();
   });
 
   beforeEach(() => {
@@ -89,7 +98,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": true}');
 
     const countBefore = await prisma.transaction.count({ where: { userId } });
-    const res = await POST(makeRequest("دیروز ۸۰ تومن اسنپ گرفتم یادم رفت ثبت کنم"));
+    const res = await POST(makeRequest("دیروز ۸۰ تومن اسنپ گرفتم یادم رفت ثبت کنم", conversationId));
     const countAfter = await prisma.transaction.count({ where: { userId } });
 
     expect(res.status).toBe(200);
@@ -122,7 +131,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": false}');
     mockedStreamChatCompletion.mockResolvedValueOnce(textStream("سلام! چطور می‌تونم کمکتون کنم؟"));
 
-    const res = await POST(makeRequest("این ماه بیشتر کجا خرج کردم؟"));
+    const res = await POST(makeRequest("این ماه بیشتر کجا خرج کردم؟", conversationId));
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("text/plain");
@@ -139,7 +148,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     mockedStreamChatCompletion.mockResolvedValueOnce(textStream("دقیقاً چقدر بود و برای چی؟"));
 
     const countBefore = await prisma.transaction.count({ where: { userId } });
-    const res = await POST(makeRequest("یه چیزی خریدم یادم نیست چقدر بود"));
+    const res = await POST(makeRequest("یه چیزی خریدم یادم نیست چقدر بود", conversationId));
     const countAfter = await prisma.transaction.count({ where: { userId } });
 
     expect(res.headers.get("Content-Type")).toContain("text/plain");
@@ -153,7 +162,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
 
   it("returns 401 when there is no session", async () => {
     mockedGetSession.mockResolvedValue(null);
-    const res = await POST(makeRequest("سلام"));
+    const res = await POST(makeRequest("سلام", conversationId));
     expect(res.status).toBe(401);
   });
 
@@ -161,7 +170,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     const tooLong = "ا".repeat(MAX_CHAT_MESSAGE_LENGTH + 1);
 
     const countBefore = await prisma.chatMessage.count({ where: { userId } });
-    const res = await POST(makeRequest(tooLong));
+    const res = await POST(makeRequest(tooLong, conversationId));
     const countAfter = await prisma.chatMessage.count({ where: { userId } });
 
     expect(res.status).toBe(400);
@@ -177,7 +186,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": false}');
     mockedStreamChatCompletion.mockResolvedValueOnce(textStream("چطور می‌تونم کمکتون کنم؟"));
 
-    const res = await POST(makeRequest(atLimit));
+    const res = await POST(makeRequest(atLimit, conversationId));
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("text/plain");
@@ -204,10 +213,184 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": false}');
     mockedStreamChatCompletion.mockRejectedValueOnce(new Error("NVIDIA NIM: connection refused"));
 
-    const res = await POST(makeRequest("این ماه چقدر خرج کردم؟"));
+    const res = await POST(makeRequest("این ماه چقدر خرج کردم؟", conversationId));
 
     expect(res.status).toBe(502);
     const data = await res.json();
     expect(typeof data.error).toBe("string");
+  });
+});
+
+describe("POST /api/chat - conversationId validation and ownership", () => {
+  let userId: number;
+  let otherUserId: number;
+  let conversationId: number;
+  let foreignConversationId: number;
+
+  beforeAll(async () => {
+    userId = await createTestUser("scoping");
+    otherUserId = await createTestUser("scoping-other");
+
+    conversationId = (await prisma.conversation.create({ data: { userId, title: "مال من" } })).id;
+    foreignConversationId = (await prisma.conversation.create({ data: { userId: otherUserId, title: "مال دیگری" } })).id;
+  });
+
+  afterAll(async () => {
+    await prisma.chatMessage.deleteMany({ where: { userId: { in: [userId, otherUserId] } } });
+    await prisma.conversation.deleteMany({ where: { userId: { in: [userId, otherUserId] } } });
+    await prisma.user.deleteMany({ where: { id: { in: [userId, otherUserId] } } });
+  });
+
+  beforeEach(() => {
+    mockedGetSession.mockResolvedValue({ userId, onboarded: true, role: "user" });
+    mockedChatCompletion.mockReset();
+    mockedStreamChatCompletion.mockReset();
+  });
+
+  it("rejects a missing conversationId with 400, before persisting the message or calling the AI", async () => {
+    const countBefore = await prisma.chatMessage.count({ where: { userId } });
+    const res = await POST(makeRequest("سلام"));
+    const countAfter = await prisma.chatMessage.count({ where: { userId } });
+
+    expect(res.status).toBe(400);
+    expect(typeof (await res.json()).error).toBe("string");
+    expect(countAfter).toBe(countBefore);
+    expect(mockedChatCompletion).not.toHaveBeenCalled();
+    expect(mockedStreamChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-numeric conversationId with 400", async () => {
+    const res = await POST(makeRequest("سلام", "abc"));
+    expect(res.status).toBe(400);
+    expect(mockedStreamChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-integer numeric conversationId with 400", async () => {
+    const res = await POST(makeRequest("سلام", 1.5));
+    expect(res.status).toBe(400);
+    expect(mockedStreamChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for another user's conversation, writing nothing into it and never calling the AI", async () => {
+    const res = await POST(makeRequest("پیام نفوذی", foreignConversationId));
+
+    expect(res.status).toBe(404);
+    expect(await prisma.chatMessage.count({ where: { conversationId: foreignConversationId } })).toBe(0);
+    expect(mockedChatCompletion).not.toHaveBeenCalled();
+    expect(mockedStreamChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a conversation id that doesn't exist", async () => {
+    const res = await POST(makeRequest("سلام", 999_999_999));
+    expect(res.status).toBe(404);
+    expect(mockedStreamChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("sends only this conversation's history to the model, never the user's other threads", async () => {
+    const otherThread = await prisma.conversation.create({ data: { userId, title: "گفتگوی دیگر" } });
+    await prisma.chatMessage.create({
+      data: { userId, conversationId: otherThread.id, role: "user", content: "راز گفتگوی دیگر" },
+    });
+    await prisma.chatMessage.create({
+      data: { userId, conversationId, role: "user", content: "پیام قبلی همین گفتگو" },
+    });
+
+    mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": false}');
+    mockedStreamChatCompletion.mockResolvedValueOnce(textStream("باشه"));
+
+    const res = await POST(makeRequest("پیام تازه", conversationId));
+    await res.text();
+
+    const messagesSent = mockedStreamChatCompletion.mock.calls[0][0];
+    const historyContents = messagesSent.filter((m) => m.role !== "system").map((m) => m.content);
+    expect(historyContents).toContain("پیام قبلی همین گفتگو");
+    expect(historyContents).toContain("پیام تازه");
+    expect(historyContents).not.toContain("راز گفتگوی دیگر");
+  });
+});
+
+describe("POST /api/chat - auto-titling and last-activity", () => {
+  let userId: number;
+
+  beforeAll(async () => {
+    userId = await createTestUser("titling");
+  });
+
+  afterAll(async () => {
+    await prisma.chatMessage.deleteMany({ where: { userId } });
+    await prisma.conversation.deleteMany({ where: { userId } });
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.category.deleteMany({ where: { userId, parentId: { not: null } } });
+    await prisma.category.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$disconnect();
+  });
+
+  beforeEach(() => {
+    mockedGetSession.mockResolvedValue({ userId, onboarded: true, role: "user" });
+    mockedChatCompletion.mockReset();
+    mockedStreamChatCompletion.mockReset();
+  });
+
+  it("titles an untitled conversation from the first message, and leaves it alone on the next one", async () => {
+    const conversation = await prisma.conversation.create({ data: { userId } });
+    expect(conversation.title).toBeNull();
+
+    mockedChatCompletion.mockResolvedValue('{"isPastUnloggedTransaction": false}');
+    mockedStreamChatCompletion
+      .mockResolvedValueOnce(textStream("پاسخ اول"))
+      .mockResolvedValueOnce(textStream("پاسخ دوم"));
+
+    // The title/lastMessageAt write happens when the response stream
+    // finishes (see the `done` branch in app/api/chat/route.ts), so the
+    // body has to actually be consumed here.
+    await (await POST(makeRequest("موجودی حسابم چقدره؟", conversation.id))).text();
+    const afterFirst = await prisma.conversation.findUnique({ where: { id: conversation.id } });
+    expect(afterFirst?.title).toBe("موجودی حسابم چقدره؟");
+
+    await (await POST(makeRequest("و این ماه چقدر خرج کردم؟", conversation.id))).text();
+    const afterSecond = await prisma.conversation.findUnique({ where: { id: conversation.id } });
+    expect(afterSecond?.title).toBe("موجودی حسابم چقدره؟");
+  });
+
+  it("bumps lastMessageAt after a reply", async () => {
+    const conversation = await prisma.conversation.create({
+      data: { userId, title: "از قبل نام‌گذاری‌شده", lastMessageAt: new Date("2026-01-01T00:00:00Z") },
+    });
+
+    mockedChatCompletion.mockResolvedValue('{"isPastUnloggedTransaction": false}');
+    mockedStreamChatCompletion.mockResolvedValueOnce(textStream("باشه"));
+
+    await (await POST(makeRequest("سلام", conversation.id))).text();
+
+    const updated = await prisma.conversation.findUnique({ where: { id: conversation.id } });
+    expect(updated!.lastMessageAt.getTime()).toBeGreaterThan(new Date("2026-01-01T00:00:00Z").getTime());
+    // The pre-existing title is never overwritten by a later message.
+    expect(updated!.title).toBe("از قبل نام‌گذاری‌شده");
+  });
+
+  it("titles a conversation from the first message on the suggest_transaction path too", async () => {
+    const parent = await prisma.category.create({
+      data: { userId, name: "حمل‌ونقل", icon: "🚕", color: "#123456", type: "expense" },
+    });
+    await prisma.category.create({
+      data: { userId, name: "تاکسی و اسنپ", icon: "🚕", color: "#123456", type: "expense", parentId: parent.id },
+    });
+    const conversation = await prisma.conversation.create({ data: { userId } });
+
+    mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": true}');
+
+    // Deliberately under the 40-character title cap, so this asserts the
+    // suggest_transaction path titles at all - truncation itself is
+    // covered by lib/data/conversations.test.ts.
+    const message = "دیروز ۸۰ تومن اسنپ گرفتم";
+
+    // This path returns JSON rather than a stream, so there's no body to
+    // drain - the finalize step runs before the response is returned.
+    const res = await POST(makeRequest(message, conversation.id));
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+
+    const updated = await prisma.conversation.findUnique({ where: { id: conversation.id } });
+    expect(updated?.title).toBe(message);
   });
 });

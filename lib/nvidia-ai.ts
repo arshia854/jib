@@ -3,33 +3,33 @@
 // here rather than each call site hardcoding its own copy, so it can't
 // drift if this ever needs to change (e.g. .env.example already keeps
 // OpenRouter/ArvanCloud around "in case we switch back").
-export const AI_PROVIDER = "nvidia-nim";
+export const AI_PROVIDER = "openrouter";
 
 function getApiKey(): string {
-  const key = process.env.NVIDIA_API_KEY;
+  const key = process.env.OPENROUTER_API_KEY;
   if (!key) {
-    throw new Error("NVIDIA_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("OPENROUTER_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return key;
 }
 
 function getBaseUrl(): string {
-  const url = process.env.NVIDIA_BASE_URL;
+  const url = process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
   if (!url) {
-    throw new Error("NVIDIA_BASE_URL تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("OPENROUTER_BASE_URL تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return url.replace(/\/+$/, "");
 }
 
 function getModel(): string {
-  const model = process.env.NVIDIA_MODEL;
+  const model = process.env.OPENROUTER_MODEL;
   if (!model) {
-    throw new Error("NVIDIA_MODEL تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("OPENROUTER_MODEL تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return model;
 }
 
-// Output-side cost/abuse cap (SEC-6) - NVIDIA NIM's chat/completions
+// Output-side cost/abuse cap (SEC-6) - OpenRouter's chat/completions
 // endpoint is OpenAI-compatible and, per NIM's own quickstart/model-card
 // curl examples (build on vLLM's OpenAI-compatible server), takes this as
 // `max_tokens`; `max_completion_tokens` is an OpenAI-specific alias for
@@ -54,8 +54,8 @@ function getModel(): string {
 //   1000 leaves comfortable room for a multi-sentence answer (including a
 //   short spending breakdown) without leaving the cap so high it stops
 //   meaningfully bounding a single reply's cost.
-const JSON_EXTRACTION_MAX_TOKENS = 500;
-const CHAT_REPLY_MAX_TOKENS = 1000;
+const JSON_EXTRACTION_MAX_TOKENS = 1500;
+const CHAT_REPLY_MAX_TOKENS = 2500;
 
 // Phase 9.1/9.3 gateway timeout - callNvidiaAI() previously had no
 // AbortController/signal at all, so a stalled provider connection (network
@@ -96,7 +96,7 @@ export interface ChatMessageInput {
   content: string;
 }
 
-// NVIDIA NIM's OpenAI-compatible chat/completions response includes a
+// OpenRouter's OpenAI-compatible chat/completions response includes a
 // standard `usage` object (prompt_tokens/completion_tokens/total_tokens) on
 // every non-streaming response - part of the OpenAI schema itself, not
 // something specific to this model. Re-cased to camelCase for consistency
@@ -114,10 +114,10 @@ function isConnectionLevelFailure(error: unknown): boolean {
 function wrapFetchError(error: unknown): Error {
   if (error instanceof Error && error.name === "AbortError") {
     return new Error(
-      `درخواست به NVIDIA NIM به دلیل کندی پاسخ لغو شد (بیش از ${NVIDIA_REQUEST_TIMEOUT_MS / 1000} ثانیه).`
+      `درخواست به OpenRouter به دلیل کندی پاسخ لغو شد (بیش از ${NVIDIA_REQUEST_TIMEOUT_MS / 1000} ثانیه).`
     );
   }
-  return new Error(`ارتباط با NVIDIA NIM برقرار نشد: ${error instanceof Error ? error.message : String(error)}`);
+  return new Error(`ارتباط با OpenRouter برقرار نشد: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
@@ -157,7 +157,7 @@ async function callNvidiaAI(body: Record<string, unknown>): Promise<Response> {
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
-    throw new Error(`درخواست به NVIDIA NIM ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
+    throw new Error(`درخواست به OpenRouter ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
   }
 
   return response;
@@ -170,13 +170,14 @@ export async function chatCompletion(
   const response = await callNvidiaAI({
     messages,
     max_tokens: JSON_EXTRACTION_MAX_TOKENS,
+    reasoning: { exclude: true },
     ...(options?.json ? { response_format: { type: "json_object" } } : {}),
   });
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string") {
-    throw new Error("پاسخ نامعتبر از NVIDIA NIM دریافت شد.");
+    throw new Error("پاسخ نامعتبر از OpenRouter دریافت شد.");
   }
 
   // Phase 9.4 - previously parsed and immediately discarded. Passed back
@@ -206,9 +207,9 @@ export async function chatCompletion(
 export async function streamChatCompletion(
   messages: ChatMessageInput[]
 ): Promise<ReadableStream<Uint8Array>> {
-  const response = await callNvidiaAI({ messages, stream: true, max_tokens: CHAT_REPLY_MAX_TOKENS });
+  const response = await callNvidiaAI({ messages, stream: true, max_tokens: CHAT_REPLY_MAX_TOKENS, reasoning: { exclude: true } });
   if (!response.body) {
-    throw new Error("پاسخ جریانی از NVIDIA NIM دریافت نشد.");
+    throw new Error("پاسخ جریانی از OpenRouter دریافت نشد.");
   }
 
   const reader = response.body.getReader();

@@ -56,6 +56,7 @@ const MIGRATION_NAMES = [
   "20260819081756_add_transaction_idempotency_key",
   "20260824095212_add_transaction_enrichment_status",
   "20260825171540_add_assets",
+  "20260904102636_add_conversation",
 ];
 
 // The two migrations whose migration.sql was rewritten from its original

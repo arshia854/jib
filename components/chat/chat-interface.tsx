@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { SendIcon, SparklesIcon, SpinnerIcon, CheckIcon, XIcon } from "@/components/icons";
+import { SendIcon, SparklesIcon, SpinnerIcon, CheckIcon, XIcon, PlusIcon, ListIcon } from "@/components/icons";
 import type { ParsedTransaction } from "@/lib/ai/parse-transaction";
+import { ConversationListDrawer, type ConversationSummary } from "./conversation-list-drawer";
 
 interface PendingSuggestion {
   transaction: ParsedTransaction;
@@ -65,15 +66,28 @@ function ThinkingIndicator() {
 export function ChatInterface({
   initialMessages,
   defaultAccountId,
+  conversationId,
+  conversations,
 }: {
   initialMessages: Message[];
   defaultAccountId: number;
+  // Null for a brand-new user, or right after "گفتگوی جدید" - the thread
+  // is created lazily by the first send (see handleSend), never by merely
+  // opening the screen.
+  conversationId: number | null;
+  conversations: ConversationSummary[];
 }) {
   const router = useRouter();
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<number | null>(conversationId);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // Seeded from the server render, then re-read whenever the drawer opens
+  // or a delete lands - see refreshConversations() below for why it isn't
+  // just router.refresh().
+  const [conversationList, setConversationList] = useState(conversations);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -91,11 +105,28 @@ export function ChatInterface({
     setSending(true);
     setError(null);
 
+    // Tracked in local variables, not read back off state: a setState
+    // isn't visible to the rest of this same function run, and both the
+    // POST below and the finally block need the id we just created rather
+    // than the pre-update null.
+    let targetConversationId = activeConversationId;
+    let createdConversation = false;
+    let delivered = false;
+
     try {
+      if (targetConversationId === null) {
+        const created = await fetch("/api/chat/conversations", { method: "POST" });
+        const createdData = await created.json().catch(() => ({}));
+        if (!created.ok) throw new Error(createdData.error || "خطا در ساخت گفتگو.");
+        targetConversationId = createdData.conversation.id as number;
+        setActiveConversationId(targetConversationId);
+        createdConversation = true;
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, conversationId: targetConversationId }),
       });
 
       if (!res.ok || !res.body) {
@@ -124,6 +155,7 @@ export function ChatInterface({
               : m
           )
         );
+        delivered = true;
         return;
       }
 
@@ -136,12 +168,61 @@ export function ChatInterface({
         const chunk = decoder.decode(value, { stream: true });
         setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: m.content + chunk } : m)));
       }
+      delivered = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
       setMessages((prev) => prev.filter((m) => m.id !== assistantId));
     } finally {
       setSending(false);
+
+      // Point the URL at the thread this send just created, so a manual
+      // reload lands back on it instead of the blank "new chat" screen.
+      // history.replaceState, never router.replace/refresh: a real
+      // navigation would re-run the server page and - via the `key` in
+      // app/app/chat/page.tsx - remount this component, dropping a pending
+      // transaction suggestion (client-side state only) or the error
+      // message from a failed send. The history drawer picks the new
+      // thread up by re-fetching the list when it opens instead.
+      //
+      // Only once a reply actually landed: after a failed first send the
+      // created (still empty, still untitled) conversation stays off the
+      // URL, and `activeConversationId` already holds it so a retry reuses
+      // it rather than creating another.
+      if (createdConversation && delivered && targetConversationId !== null) {
+        window.history.replaceState(null, "", `/app/chat?conversationId=${targetConversationId}`);
+      }
     }
+  }
+
+  // Re-reads the history list from the server. Used instead of
+  // router.refresh() because refreshing re-runs the server page and, via
+  // the `key` in app/app/chat/page.tsx, remounts this component - which
+  // would discard a pending transaction suggestion (client-side state
+  // only). It also picks up a conversation this session created lazily,
+  // which the server render predates.
+  async function refreshConversations() {
+    try {
+      const res = await fetch("/api/chat/conversations");
+      if (!res.ok) return;
+      const data = await res.json();
+      setConversationList(data.conversations);
+    } catch {
+      // Keep whatever list is already on screen - a failed refresh isn't
+      // worth an error banner over a list the user can still use.
+    }
+  }
+
+  function handleOpenHistory() {
+    setHistoryOpen(true);
+    refreshConversations();
+  }
+
+  // Doesn't create anything - just clears the screen and drops back to the
+  // lazy-create path above, so opening a new chat and never typing leaves
+  // no empty thread behind.
+  function handleNewConversation() {
+    setHistoryOpen(false);
+    router.push("/app/chat?new=1");
   }
 
   // "بله" - calls the exact same creation endpoint (and so the exact same
@@ -231,12 +312,38 @@ export function ChatInterface({
 
   return (
     <div className="flex h-full flex-col">
-      <header className="border-b border-border px-4 py-4">
+      <header className="flex items-center justify-between border-b border-border px-4 py-4">
         <h1 className="flex items-center gap-2 text-lg font-bold text-foreground">
           <SparklesIcon className="h-5 w-5 text-accent" />
           دستیار مالی جیب
         </h1>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={handleNewConversation}
+            disabled={sending}
+            aria-label="گفتگوی جدید"
+            className="rounded-full p-2 text-muted transition-colors hover:bg-surface hover:text-accent disabled:opacity-50"
+          >
+            <PlusIcon className="h-5 w-5" />
+          </button>
+          <button
+            onClick={handleOpenHistory}
+            aria-label="گفتگوهای قبلی"
+            className="rounded-full p-2 text-muted transition-colors hover:bg-surface hover:text-accent"
+          >
+            <ListIcon className="h-5 w-5" />
+          </button>
+        </div>
       </header>
+
+      {historyOpen && (
+        <ConversationListDrawer
+          conversations={conversationList}
+          activeConversationId={activeConversationId}
+          onClose={() => setHistoryOpen(false)}
+          onConversationsChanged={refreshConversations}
+        />
+      )}
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
