@@ -30,14 +30,16 @@ describe("getMonthlyComparison", () => {
     accountId = account.id;
 
     const [food, transport, insurance, unused, income, transfer] = await Promise.all([
+      // Discretionary (isEssential: false), set explicitly rather than relying on the schema default.
       prisma.category.create({
-        data: { userId, name: FOOD_NAME, icon: "🍔", color: "#000001", type: "expense" },
+        data: { userId, name: FOOD_NAME, icon: "🍔", color: "#000001", type: "expense", isEssential: false },
       }),
       prisma.category.create({
         data: { userId, name: TRANSPORT_NAME, icon: "🚌", color: "#000002", type: "expense" },
       }),
+      // Essential (isEssential: true), set explicitly rather than relying on the schema default.
       prisma.category.create({
-        data: { userId, name: INSURANCE_NAME, icon: "🛡️", color: "#000003", type: "expense" },
+        data: { userId, name: INSURANCE_NAME, icon: "🛡️", color: "#000003", type: "expense", isEssential: true },
       }),
       prisma.category.create({
         data: { userId, name: UNUSED_NAME, icon: "❓", color: "#000004", type: "expense" },
@@ -100,6 +102,7 @@ describe("getMonthlyComparison", () => {
     expect(food?.currentAmount).toBe(150000);
     expect(food?.percentChange).toBe(50);
     expect(food?.isIncrease).toBe(true);
+    expect(food?.isEssential).toBe(false);
   });
 
   it("caps percentChange at 100 when previousAmount is 0 and currentAmount > 0", async () => {
@@ -122,6 +125,7 @@ describe("getMonthlyComparison", () => {
     expect(insurance?.currentAmount).toBe(0);
     expect(insurance?.percentChange).toBe(-100);
     expect(insurance?.isIncrease).toBe(false);
+    expect(insurance?.isEssential).toBe(true);
   });
 
   it("excludes a category entirely when both previousAmount and currentAmount are 0", async () => {

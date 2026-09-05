@@ -56,7 +56,7 @@ export default async function DashboardPage() {
       <div>
         <div className="mb-2 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-foreground">تراکنش‌های اخیر</h2>
-          <Link href="/app/transactions" className="text-xs font-medium text-accent">
+          <Link href="/app/dashboard?tab=transactions" className="text-xs font-medium text-accent">
             مشاهده همه
           </Link>
         </div>

@@ -3,24 +3,28 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckIcon, XIcon, SpinnerIcon, ChatIcon, ZapIcon } from "@/components/icons";
-import { formatToman, formatNumber, formatDecimal, formatJalaaliDate } from "@/lib/format";
+import { formatToman, formatNumber, formatJalaaliDate } from "@/lib/format";
 import { toLatinDigits } from "@/lib/normalize";
-import type { ParsedTransaction, SuggestedCategoryWithIcon, AssetPurchaseSuggestion } from "@/lib/ai/parse-transaction";
+import type { ParsedTransaction, SuggestedCategoryWithIcon } from "@/lib/ai/parse-transaction";
 import { getBankLabel } from "@/lib/bank/labels";
-import { getAssetTypeOption } from "@/lib/assets";
-import { getAccountTypeIcon, findMatchingAccount, type AccountOption } from "@/lib/accounts";
+import { getAccountTypeIcon, type AccountOption } from "@/lib/accounts";
 import { FALLBACK_EXPENSE_CATEGORY, type CategoryType } from "@/lib/categories";
 import { extractAmount } from "@/lib/extract-amount";
 import { extractDate } from "@/lib/extract-date";
-import { enqueueTransaction, deleteQueuedTransaction } from "@/lib/offline/transaction-queue";
+import {
+  type CategoryOption,
+  type CreateTransactionPayload,
+  PARSE_RATE_LIMIT_MESSAGE,
+  getMissingBankAccountLabel,
+  getConfirmationHintText,
+  AssetPurchaseNotice,
+  submitCreateBankAccount,
+  submitCreateCategory,
+  submitCreateTransaction,
+} from "@/components/transactions/transaction-form-shared";
+import { BatchAddTransactionForm } from "@/components/transactions/batch-add-transaction-form";
 
-interface CategoryOption {
-  id: number;
-  name: string;
-  icon: string;
-  color: string;
-  type: string;
-}
+export type { CategoryOption };
 
 interface EditTransaction extends Pick<ParsedTransaction, "amount" | "type" | "category" | "description" | "date"> {
   id: number;
@@ -28,72 +32,6 @@ interface EditTransaction extends Pick<ParsedTransaction, "amount" | "type" | "c
 }
 
 type Stage = "input" | "preview" | "saving";
-
-const PARSE_RATE_LIMIT_MESSAGE =
-  "پیش‌نمایش خودکار به‌دلیل تعداد زیاد درخواست موقتاً متوقف شد؛ کمی صبر کن، خودش دوباره فعال می‌شود.";
-
-// Shared by both the inline live-preview card and the full preview stage -
-// bank-sms transactions can be submitted directly from either one, so both
-// need the same "no matching account" nudge, not just the full-preview copy.
-function getMissingBankAccountLabel(
-  transaction: Pick<ParsedTransaction, "source" | "bank"> | null,
-  accounts: AccountOption[]
-): string | null {
-  if (!transaction || transaction.source !== "bank-sms" || !transaction.bank || transaction.bank === "unknown") {
-    return null;
-  }
-  const label = getBankLabel(transaction.bank);
-  return findMatchingAccount(accounts, label) ? null : label;
-}
-
-// Phase 8 (docs/roadmap-status.md): wires the new named confidence levels
-// into the existing needsConfirmation warning as a supplementary hint, not
-// a replacement for it - needsConfirmation itself still gates whether this
-// warning shows at all, unchanged (see lib/ai/confidence.ts's top-of-file
-// note on why retrofitting that gate from confidenceLevel was deliberately
-// rejected). categorizationConfidence: "low" (bank-SMS with no merchant
-// match, or an AI guess below the 0.50 floor) gets a stronger nudge to
-// pick the category deliberately; "medium" (an AI guess in the 0.50-0.79
-// band, or a findSimilarCategory name-match override) keeps the softer,
-// already-shipped "please double check" wording.
-function getConfirmationHintText(parsed: ParsedTransaction): string {
-  if (parsed.source === "bank-sms") return "چی خریدی؟ کمکم کن درست دسته‌بندی‌ش کنم 🙂";
-  if (parsed.categorizationConfidence === "low") return "دسته‌بندی را مطمئن نیستم، لطفاً خودت انتخاب کن";
-  return "دسته‌بندی پیشنهادی است، لطفاً بررسی کنید";
-}
-
-// Shown whenever lib/ai/parse-transaction.ts detected the text as buying a
-// live-priced asset (gold/usd/bitcoin) - in both the inline live-preview
-// card and the full preview stage, since either can be the one the user
-// actually submits from (see saveTransaction's own comment on why the
-// inline card is the primary path). Checked by default - unchecking it
-// keeps the expense transaction but skips creating the matching Asset row,
-// for when the AI got this wrong.
-function AssetPurchaseNotice({
-  assetSuggestion,
-  included,
-  onToggle,
-}: {
-  assetSuggestion: AssetPurchaseSuggestion;
-  included: boolean;
-  onToggle: (value: boolean) => void;
-}) {
-  const option = getAssetTypeOption(assetSuggestion.type);
-  return (
-    <label className="mt-3 flex items-start gap-2 rounded-xl bg-accent/10 px-3 py-2 text-xs text-accent">
-      <input
-        type="checkbox"
-        checked={included}
-        onChange={(e) => onToggle(e.target.checked)}
-        className="mt-0.5 shrink-0"
-      />
-      <span>
-        {option?.icon} {formatDecimal(assetSuggestion.quantity, 4)}
-        {option?.unitLabel ? ` ${option.unitLabel}` : ""} {option?.label ?? ""} هم به دارایی‌هات اضافه شود
-      </span>
-    </label>
-  );
-}
 
 export function AddTransactionForm({
   categories: initialCategories,
@@ -143,6 +81,14 @@ export function AddTransactionForm({
   // resets below, on a fresh parse / on dismissing the current attempt), so
   // this only ever needs to be un-checked, not turned on by hand.
   const [includeAssetPurchase, setIncludeAssetPurchase] = useState(true);
+  // Batch mode (up to 5 lines at once) - only offered on the fresh "add"
+  // flow (see the toggle's own render condition below), never in edit mode
+  // or the from-suggestion handoff, both of which already have a single,
+  // specific transaction to work with. categories/accounts/accountId state
+  // above stays shared between single and batch mode (one account picker,
+  // one growing category list) rather than each owning a duplicate copy -
+  // switching modes never loses a category/account created moments ago.
+  const [mode, setMode] = useState<"single" | "batch">("single");
 
   const parseAbortControllerRef = useRef<AbortController | null>(null);
   // SEC-10 (docs/roadmap-status.md): idempotency key for the create request
@@ -228,123 +174,89 @@ export function AddTransactionForm({
   async function saveTransaction(transaction: ParsedTransaction, { quick = false }: { quick?: boolean } = {}) {
     setStage("saving");
     setError(null);
-    // Not applicable to the PATCH/edit path - SEC-10 only covers creation
-    // (see lib/data/transactions.ts's createTransaction()); generated
-    // lazily so an edit never allocates one it doesn't use.
-    if (!isEdit && !idempotencyKeyRef.current) {
+
+    // Edits never go through the offline queue (no idempotency key to
+    // safely retry with - see lib/offline/transaction-queue.ts's own
+    // comment) and use PATCH, not submitCreateTransaction's POST - kept
+    // fully separate from the create path below.
+    if (isEdit) {
+      try {
+        const res = await fetch(`/api/transactions/${editTransaction!.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            amount: transaction.amount,
+            type: transaction.type,
+            category: transaction.category,
+            description: transaction.description,
+            date: transaction.date,
+            accountId,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "خطا در ذخیره تغییرات.");
+        router.push("/app/transactions");
+        router.refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+        setStage("preview");
+      }
+      return;
+    }
+
+    // SEC-10: generated lazily, once per submit *attempt* - not per render,
+    // and not regenerated on a retry of that same attempt (see this ref's
+    // own top-of-file comment).
+    if (!idempotencyKeyRef.current) {
       idempotencyKeyRef.current = crypto.randomUUID();
     }
 
-    // Offline queue (creation only - out of scope for edits, which have no
-    // idempotency key to safely retry with; see lib/offline/
-    // transaction-queue.ts's own comment). Built and written to IndexedDB
-    // *before* the network attempt below, on every submit regardless of
-    // actual connectivity - same code path online or offline, per this
-    // task's own brief - so a tab closed right after this line still has
-    // the item recorded when it reopens.
     // Explicit fields (not `...transaction`) - matches exactly what
-    // POST /api/transactions actually reads (see its own body parsing),
-    // so the stored queue payload and the request body are identical and
+    // POST /api/transactions actually reads (see its own body parsing), so
+    // the stored queue payload and the request body are identical and
     // neither carries ParsedTransaction-only fields (`suggestedCategory`,
     // `confidence`, `bank`, ...) that the server would just ignore anyway.
-    const createPayload = !isEdit
-      ? {
-          amount: transaction.amount,
-          type: transaction.type,
-          category: transaction.category,
-          description: transaction.description,
-          date: transaction.date,
-          rawInput: text.trim(),
-          accountId,
-          idempotencyKey: idempotencyKeyRef.current!,
-          ...(isFromSuggestion ? { source: "assistant-suggestion" as const } : {}),
-          ...(quick ? { quick: true as const } : {}),
-          ...(transaction.assetSuggestion && includeAssetPurchase
-            ? {
-                assetPurchase: {
-                  type: transaction.assetSuggestion.type,
-                  quantity: transaction.assetSuggestion.quantity,
-                  purchasePricePerUnit: transaction.assetSuggestion.purchasePricePerUnit,
-                },
-              }
-            : {}),
-        }
-      : null;
-    if (createPayload) {
-      try {
-        await enqueueTransaction(createPayload);
-      } catch {
-        // IndexedDB unavailable (SSR/old browser/storage disabled) -
-        // offline queuing is a progressive enhancement, same precedent as
-        // ServiceWorkerRegister's own catch-and-ignore; the fetch below
-        // still runs normally either way.
-      }
+    const createPayload: CreateTransactionPayload = {
+      amount: transaction.amount,
+      type: transaction.type,
+      category: transaction.category,
+      description: transaction.description,
+      date: transaction.date,
+      rawInput: text.trim(),
+      accountId,
+      idempotencyKey: idempotencyKeyRef.current!,
+      ...(isFromSuggestion ? { source: "assistant-suggestion" as const } : {}),
+      ...(quick ? { quick: true as const } : {}),
+      ...(transaction.assetSuggestion && includeAssetPurchase
+        ? {
+            assetPurchase: {
+              type: transaction.assetSuggestion.type,
+              quantity: transaction.assetSuggestion.quantity,
+              purchasePricePerUnit: transaction.assetSuggestion.purchasePricePerUnit,
+            },
+          }
+        : {}),
+    };
+
+    const result = await submitCreateTransaction(createPayload);
+    if (result.status === "queued") {
+      // From the user's point of view this submit succeeded (optimistically) -
+      // navigate to the transactions list, where the queued item is already
+      // visible as pending, instead of showing an error.
+      router.push("/app/transactions");
+      return;
     }
-
-    try {
-      let res: Response;
-      try {
-        res = isEdit
-          ? await fetch(`/api/transactions/${editTransaction!.id}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                amount: transaction.amount,
-                type: transaction.type,
-                category: transaction.category,
-                description: transaction.description,
-                date: transaction.date,
-                accountId,
-              }),
-            })
-          : await fetch("/api/transactions", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(createPayload),
-            });
-      } catch (networkErr) {
-        // No queued fallback for edits - same error handling as before.
-        if (!createPayload) throw networkErr;
-        // No connectivity: the "pending" row written above stays queued;
-        // OfflineSyncRegister's `online` listener (via
-        // lib/offline/sync-transactions.ts) retries it automatically once
-        // the browser reconnects, reusing this same idempotencyKey. From
-        // the user's point of view this submit succeeded (optimistically) -
-        // navigate to the transactions list, where the queued item is
-        // already visible as pending, instead of showing an error.
-        router.push("/app/transactions");
-        return;
-      }
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || (isEdit ? "خطا در ذخیره تغییرات." : "خطا در ذخیره تراکنش."));
-
-      if (createPayload) {
-        // Server-confirmed create - the queued row's job is done. Best-
-        // effort: a failed cleanup here isn't user-visible (the pending
-        // list only shows non-"synced" rows) and would just be a harmless
-        // no-op the next time anything touches this key.
-        deleteQueuedTransaction(createPayload.idempotencyKey).catch(() => {});
-      }
-
-      router.push(isEdit ? "/app/transactions" : "/app");
-      router.refresh();
-    } catch (err) {
-      if (createPayload) {
-        // A real server-side rejection (validation/auth), not a
-        // connectivity failure - that's handled above, before this catch
-        // is reached. The inline error below already tells the user what's
-        // wrong on this exact screen, so there's nothing left for the
-        // offline queue to retry - remove the row instead of leaving a
-        // ghost "failed" entry for something already being corrected here.
-        deleteQueuedTransaction(createPayload.idempotencyKey).catch(() => {});
-      }
-      setError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+    if (result.status === "error") {
+      setError(result.message);
       setStage("preview");
       // idempotencyKeyRef deliberately NOT cleared here - see its own
       // comment. A retry of this exact attempt (clicking "تأیید و ذخیره"
       // again) must reuse the same key.
+      return;
     }
+
+    router.push("/app");
+    router.refresh();
   }
 
   function handleConfirm() {
@@ -413,21 +325,14 @@ export function AddTransactionForm({
   async function handleCreateBankAccount(name: string) {
     setIsCreatingBankAccount(true);
     setCreateAccountError(null);
-    try {
-      const res = await fetch("/api/accounts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, type: "bank", initialBalance: 0 }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "خطا در ساخت حساب.");
-      setAccounts((prev) => [...prev, data.account]);
-      setAccountId(data.account.id);
-    } catch (err) {
-      setCreateAccountError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
-    } finally {
-      setIsCreatingBankAccount(false);
+    const result = await submitCreateBankAccount(name);
+    if ("error" in result) {
+      setCreateAccountError(result.error);
+    } else {
+      setAccounts((prev) => [...prev, result.account]);
+      setAccountId(result.account.id);
     }
+    setIsCreatingBankAccount(false);
   }
 
   // `target` picks which piece of state the resolved category gets written back
@@ -440,39 +345,26 @@ export function AddTransactionForm({
   ) {
     setIsCreatingCategory(true);
     setCreateCategoryError(null);
-    try {
-      const res = await fetch("/api/categories", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: suggestion.name,
-          parentName: suggestion.parentName,
-          icon: suggestion.icon,
-          type,
-          source: "ai-suggestion",
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "خطا در ساخت دسته‌بندی.");
+    const result = await submitCreateCategory(suggestion, type);
+    if ("error" in result) {
+      setCreateCategoryError(result.error);
+    } else {
       // 200 (resolvedExisting) can return a category already in local state - dedupe on id
       // so the <select> below never renders two <option>s with the same key/value.
-      setCategories((prev) => (prev.some((c) => c.id === data.category.id) ? prev : [...prev, data.category]));
+      setCategories((prev) => (prev.some((c) => c.id === result.category.id) ? prev : [...prev, result.category]));
       // Functional update (unlike the direct-closure `setParsed({ ...parsed, ... })` calls
       // elsewhere in this file) because this fires after an await - `parsed`/`livePreview`
       // may have moved on (e.g. the user edited amount/description while the request was
       // in flight).
       const applyResolvedCategory = (prev: ParsedTransaction | null) =>
-        prev ? { ...prev, category: data.category.name, suggestedCategory: undefined } : prev;
+        prev ? { ...prev, category: result.category.name, suggestedCategory: undefined } : prev;
       if (target === "livePreview") {
         setLivePreview(applyResolvedCategory);
       } else {
         setParsed(applyResolvedCategory);
       }
-    } catch (err) {
-      setCreateCategoryError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
-    } finally {
-      setIsCreatingCategory(false);
     }
+    setIsCreatingCategory(false);
   }
 
   const availableCategories = categories.filter((c) => c.type === parsed?.type);
@@ -492,7 +384,33 @@ export function AddTransactionForm({
           : "تراکنش را به زبان طبیعی بنویس، هوش مصنوعی جزئیات را استخراج می‌کند."}
       </p>
 
-      {stage === "input" ? (
+      {/* Batch mode toggle - only on the fresh "add" flow (see this
+          component's own `mode` state comment), and only before anything's
+          been parsed yet - switching back to single mode mid-parse isn't a
+          state this toggle needs to handle since it's hidden once stage
+          leaves "input". */}
+      {stage === "input" && !isEdit && !isFromSuggestion && (
+        <div className="mt-4 flex justify-end">
+          <button
+            type="button"
+            onClick={() => setMode(mode === "batch" ? "single" : "batch")}
+            className="text-xs font-medium text-accent hover:underline"
+          >
+            {mode === "batch" ? "بازگشت به افزودن تکی" : "افزودن چند تراکنش با هم"}
+          </button>
+        </div>
+      )}
+
+      {stage === "input" && mode === "batch" && !isEdit && !isFromSuggestion ? (
+        <BatchAddTransactionForm
+          categories={categories}
+          accounts={accounts}
+          accountId={accountId}
+          onAccountIdChange={setAccountId}
+          onCategoriesChange={setCategories}
+          onAccountsChange={setAccounts}
+        />
+      ) : stage === "input" ? (
         <div className="mt-6 flex flex-col gap-3">
           <textarea
             value={text}

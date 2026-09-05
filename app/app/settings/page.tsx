@@ -3,15 +3,16 @@ import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/session";
 import { LogoutButton } from "@/components/layout/logout-button";
 import { AssetDisplayToggle } from "@/components/settings/asset-display-toggle";
-import { TagIcon, WalletIcon, ShieldIcon, BackIcon, UserIcon, ChartIcon } from "@/components/icons";
+import { TagIcon, WalletIcon, ShieldIcon, BackIcon, UserIcon } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 
+// "دارایی‌ها" moved to the داشبورد tab (app/app/dashboard/page.tsx?tab=assets)
+// in Phase 3 - no longer reachable from here.
 const ROWS = [
   { href: "/app/settings/profile", label: "اطلاعات شخصی", Icon: UserIcon },
   { href: "/app/settings/categories", label: "دسته‌بندی‌ها", Icon: TagIcon },
   { href: "/app/settings/accounts", label: "حساب‌ها", Icon: WalletIcon },
-  { href: "/app/settings/assets", label: "دارایی‌ها", Icon: ChartIcon },
 ] as const;
 
 export default async function SettingsPage() {

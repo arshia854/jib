@@ -76,6 +76,38 @@ export function jalaaliMonthKeyToLabel(monthKey: string): string {
   return PERSIAN_MONTHS[jm - 1] ?? monthKey;
 }
 
+// Phase 1 (trend-insights) - lib/reports/trend-insights.ts's multi-period
+// trend can span a year boundary, where jalaaliMonthKeyToLabel's bare month
+// name (used for CategoryComparisonBar's tight single-comparison labels,
+// which never cross a year) would be ambiguous between e.g. اسفند ۱۴۰۲ and
+// اسفند ۱۴۰۳.
+const WEEK_KEY_FORMAT = /^(\d{4})-W(\d{2})$/;
+
+/** "مرداد ۱۴۰۴" for a Jalaali month key like "1404-05" - like jalaaliMonthKeyToLabel but with the year included, for contexts (a multi-period trend) where the bare month name alone could be ambiguous. */
+export function jalaaliMonthKeyToFullLabel(monthKey: string): string {
+  const match = MONTH_KEY_FORMAT.exec(monthKey);
+  if (!match) return monthKey;
+  const jy = Number(match[1]);
+  const jm = Number(match[2]);
+  const monthName = PERSIAN_MONTHS[jm - 1];
+  return monthName ? `${monthName} ${numberFormatter.format(jy)}` : monthKey;
+}
+
+/** "هفته ۵ - ۱۴۰۴" for a Jalaali week key like "1404-W05" (see lib/reports/period-range.ts for this app's week-of-year convention). */
+export function jalaaliWeekKeyToLabel(weekKey: string): string {
+  const match = WEEK_KEY_FORMAT.exec(weekKey);
+  if (!match) return weekKey;
+  const jy = Number(match[1]);
+  const weekNumber = Number(match[2]);
+  return `هفته ${numberFormatter.format(weekNumber)} - ${numberFormatter.format(jy)}`;
+}
+
+/** "۱۴۰۴" for a Jalaali year key like "1404". */
+export function jalaaliYearKeyToLabel(yearKey: string): string {
+  const jy = Number(yearKey);
+  return Number.isFinite(jy) ? numberFormatter.format(jy) : yearKey;
+}
+
 /** Gregorian [start, end) bounds of the Jalaali month containing `date`. */
 export function getJalaaliMonthRange(date: Date = new Date()): {
   start: Date;

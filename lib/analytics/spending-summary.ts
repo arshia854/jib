@@ -156,7 +156,15 @@ const UNUSUAL_TRANSACTION_MULTIPLIER = 3;
 // across separate billing cycles (subscriptions, rent, a recurring bill) -
 // not just a merchant visited twice in one busy week, which topMerchants
 // already surfaces on its own.
-const RECURRING_EXPENSE_LOOKBACK_MONTHS = 3;
+// Exported so lib/reports/trend-insights.ts's month-granularity recurring-
+// expense lookback stays in lockstep with this one (both must mean the same
+// "3 months" for computeRecurringExpenses' behavior to actually match
+// between the chat assistant and the Reports page) rather than duplicating
+// the literal 3 and risking the two silently drifting apart later.
+// RECURRING_EXPENSE_MIN_MONTHS stays private - computeRecurringExpenses
+// applies it internally regardless of what a "period" is (see its own doc
+// comment), so no caller outside this file needs to read or override it.
+export const RECURRING_EXPENSE_LOOKBACK_MONTHS = 3;
 const RECURRING_EXPENSE_MIN_MONTHS = 2;
 
 // Current month + 3 prior - long enough to show a real multi-month trend
@@ -187,7 +195,11 @@ function monthKeyFor(date: Date): string {
   return `${jy}-${String(jm).padStart(2, "0")}`;
 }
 
-function summarizeMonth(transactions: MonthTransaction[], label: string): MonthSummary {
+// Exported (Phase 1 Goals) so lib/goals/feasibility.ts's getActualMonthlyAverage
+// can reuse the exact same isTransfer-exclusion + income/expense aggregation
+// rules instead of duplicating them - visibility change only, behavior and
+// every existing caller/export here are unchanged.
+export function summarizeMonth(transactions: MonthTransaction[], label: string): MonthSummary {
   let income = 0;
   let expense = 0;
   let discretionaryExpense = 0;

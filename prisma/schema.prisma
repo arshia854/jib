@@ -59,6 +59,7 @@ model User {
   spendingSummaryCache SpendingSummaryCache[]
   facts                UserFact[]
   assets               Asset[]
+  goals                Goal[]
 }
 
 // NextAuth/Auth.js OAuth provider link table (required shape + field names
@@ -436,6 +437,60 @@ model Asset {
   currentPricePerUnit BigInt?
 
   note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// A user-defined savings goal (e.g. "MacBook, 60,000,000 Toman, in 6
+// months") - Phase 1 (docs/roadmap-status.md): this model plus the
+// deterministic feasibility engine (lib/goals/feasibility.ts) and a minimal
+// CRUD API (lib/data/goals.ts, app/api/goals/) is the whole of this phase.
+// No AI-generated strategy text and no dedicated tracking-dashboard UI yet -
+// both are later phases.
+model Goal {
+  id Int @id @default(autoincrement())
+
+  // Capped at MAX_NAME_LENGTH (lib/limits.ts) - same ceiling as
+  // FinanceAccount.name/Category.name, no goal-specific reason for a
+  // different one.
+  name String
+
+  // Plain string enum - "device" | "travel" | "car" | "emergency_fund" |
+  // "home_down_payment" | "other". Same convention as every other
+  // type-like field in this schema (User.role, FinanceAccount.type,
+  // Category.type, Asset.type) - enforced at the application level only
+  // (lib/data/goals.ts), not by a DB-level constraint (see User.role's own
+  // comment on why: this installed Prisma version has no
+  // `@check`/`@@check` attribute at all).
+  category String
+
+  // Toman - same Int precedent as Transaction.amount/FinanceAccount.
+  // initialBalance. Bounded by MAX_GOAL_TARGET_AMOUNT (lib/limits.ts),
+  // Int32's own range, same reasoning as MAX_TRANSACTION_AMOUNT.
+  targetAmount Int
+
+  // Optional starting balance the user already had saved toward this goal
+  // before creating it in Jib (e.g. "I already have 10,000,000 Toman set
+  // aside"). Distinct from lib/goals/feasibility.ts's own "alreadySaved"
+  // input, which layers whatever progress this phase can attribute to the
+  // user's tracked net cash flow *since* the goal was created on top of
+  // this starting number - see that file's doc comment.
+  initialAmount Int @default(0)
+
+  deadline DateTime
+
+  // "active" | "achieved" | "abandoned" - same plain-string-enum
+  // convention as `category` above. Defaults to "active" since every goal
+  // starts out that way; this phase never transitions it automatically -
+  // "achieved"/"abandoned" are only ever set by an explicit user edit
+  // (PATCH /api/goals/[id]).
+  status String @default("active")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

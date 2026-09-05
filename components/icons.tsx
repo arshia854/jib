@@ -194,6 +194,19 @@ export function CalculatorIcon(props: IconProps) {
   );
 }
 
+// Goals tab (see app/app/dashboard/page.tsx) - a concentric-circles
+// target/bullseye reads as "aim/goal" at a glance, distinct from WalletIcon
+// (assets) and ListIcon (transactions) used alongside it in the same grid.
+export function TargetIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="5" />
+      <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function ChartIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

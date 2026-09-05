@@ -12,7 +12,8 @@ import {
 import { getUserFacts, formatFactsForPrompt } from "@/lib/facts/user-facts";
 import { listAssetsWithValue, type AssetWithValue } from "@/lib/data/assets";
 import { getAssetTypeLabel, getAssetTypeOption } from "@/lib/assets";
-import { formatDecimal } from "@/lib/format";
+import { listGoalsWithFeasibility, type GoalWithFeasibility } from "@/lib/data/goals";
+import { formatDecimal, formatJalaaliDate } from "@/lib/format";
 
 const fa = (n: number) => Math.round(n).toLocaleString("fa-IR");
 
@@ -34,6 +35,21 @@ const MAX_RECURRING_EXPENSE_LINES = 5;
 // other line-cap in this file. Most users hold only a handful of lots
 // (gold/usd/bitcoin/custom), so this rarely actually truncates anything.
 const MAX_ASSET_LINES = 8;
+// Goals integration - same discipline. Only active goals are worth the
+// assistant's attention turn-to-turn (see formatGoalLines below), and a
+// user rarely tracks more than a handful of those at once.
+const MAX_GOAL_LINES = 5;
+
+// Same three-state vocabulary/labels as components/goals/goals-manager.tsx's
+// FEASIBILITY_TONE - that map also carries badge/icon styling this
+// plain-text prompt line has no use for, so it isn't imported directly
+// (it's a client component anyway - see lib/goals/feasibility.ts's own
+// "server-only" pragma for why a shared module isn't straightforward here).
+const FEASIBILITY_STATUS_LABEL: Record<GoalWithFeasibility["feasibility"]["feasibilityStatus"], string> = {
+  on_track: "در مسیر",
+  needs_adjustment: "نیاز به تعدیل",
+  unrealistic: "غیرواقعی",
+};
 
 function formatCategoryLines(categories: CategoryTotal[]): string {
   if (categories.length === 0) return "بدون هزینه ثبت‌شده";
@@ -135,6 +151,38 @@ function formatAssetLines(assets: AssetWithValue[]): string {
   return lines.join("\n");
 }
 
+// Goals were previously invisible to the chat assistant, same gap assets
+// had before formatAssetLines above closed it: a question like «برای سفرم
+// چقدر کم دارم؟» or advice like «باید کجا کمتر خرج کنم تا به هدفم برسم؟»
+// had nothing to draw on except general cash-flow data, even though
+// lib/goals/feasibility.ts already computes exactly this per goal. Only
+// "active" goals are surfaced - an achieved/abandoned goal has no ongoing
+// feasibility to report on and would just be noise in every future turn.
+function formatGoalLines(goals: GoalWithFeasibility[]): string {
+  const active = goals.filter((g) => g.status === "active");
+  if (active.length === 0) return "هدف مالی فعالی تعریف نشده";
+
+  const top = active.slice(0, MAX_GOAL_LINES);
+  const lines = top.map((g) => {
+    const saved = g.initialAmount;
+    const remaining = Math.max(0, g.targetAmount - saved);
+    const completion =
+      g.feasibility.projectedCompletionMonths !== null
+        ? `تخمین رسیدن با روند فعلی: ${fa(g.feasibility.projectedCompletionMonths)} ماه`
+        : "با روند فعلی قابل دستیابی نیست";
+    return `- ${g.name}: هدف ${fa(g.targetAmount)} تومان، ${fa(saved)} تومان جمع‌شده (${fa(
+      remaining
+    )} تومان باقی‌مانده)، مهلت ${formatJalaaliDate(g.deadline)}، وضعیت: ${
+      FEASIBILITY_STATUS_LABEL[g.feasibility.feasibilityStatus]
+    } (${completion})`;
+  });
+
+  const rest = active.length - top.length;
+  if (rest > 0) lines.push(`و ${fa(rest)} هدف دیگر`);
+
+  return lines.join("\n");
+}
+
 function formatRecentLines(recent: RecentTransactionSummary[]): string {
   if (recent.length === 0) return "بدون تراکنش";
 
@@ -163,10 +211,11 @@ export async function getFinancialContextSummary(userId: number): Promise<string
   // Facts are only ever read here - never inferred synchronously (see
   // lib/facts/infer-facts.ts's inferFactsForUser doc comment) so this stays
   // a plain, predictable-latency Prisma read like the summary above.
-  const [summary, facts, assets] = await Promise.all([
+  const [summary, facts, assets, goals] = await Promise.all([
     getSpendingSummary(userId),
     getUserFacts(userId),
     listAssetsWithValue(userId),
+    listGoalsWithFeasibility(userId),
   ]);
 
   // Phase 10 - savingsRate omission (no income this month) gets its own
@@ -185,6 +234,9 @@ ${savingsRateLine}
 دارایی‌های ثبت‌شده (طلا/دلار/بیت‌کوین/دستی - جدا از موجودی حساب‌های بالا):
 ${formatAssetLines(assets.assets)}
 ارزش کل دارایی‌ها: ${fa(assets.totalValue)} تومان${assets.priceUnavailable ? " (قیمت لحظه‌ای برخی دارایی‌ها الان در دسترس نیست، این عدد ممکن است دقیق نباشد)" : ""}${assets.priceStale ? " (قیمت‌های استفاده‌شده ممکن است کمی قدیمی باشند)" : ""}
+
+اهداف مالی کاربر:
+${formatGoalLines(goals)}
 
 هزینه‌ها به تفکیک دسته (این ماه):
 ${formatCategoryLines(summary.currentMonth.categories)}

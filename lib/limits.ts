@@ -146,3 +146,16 @@ export const MAX_ASSET_QUANTITY = 1_000_000_000;
 // (including a per-BTC price, the whole reason these two fields are BigInt
 // in the first place).
 export const MAX_ASSET_PRICE_PER_UNIT = 1_000_000_000_000_000;
+
+// Goal.targetAmount (Int, Toman - see prisma/schema.prisma's Goal model,
+// app/api/goals/route.ts's POST and app/api/goals/[id]/route.ts's PATCH).
+// Same underlying constraint as MAX_TRANSACTION_AMOUNT above - both fields
+// are declared `Int` in schema.prisma, so both are actually bounded by
+// Int32's max (2^31 - 1) regardless of what SQLite itself tolerates. Kept
+// as its own named constant rather than reusing MAX_TRANSACTION_AMOUNT
+// directly since a goal target and a single transaction amount are
+// different business concepts that happen to share a numeric ceiling for
+// now - a future change to one's range (e.g. if transactions ever moved to
+// BigInt like Asset's Toman-price fields) shouldn't silently also change
+// the other's.
+export const MAX_GOAL_TARGET_AMOUNT = 2_147_483_647;

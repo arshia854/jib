@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { HomeIcon, ListIcon, ChartIcon, SparklesIcon, SettingsIcon } from "@/components/icons";
+import { HomeIcon, WalletIcon, ChartIcon, SparklesIcon, SettingsIcon } from "@/components/icons";
 
 const NAV_ITEMS = [
   { href: "/app", label: "خانه", Icon: HomeIcon },
-  { href: "/app/transactions", label: "تراکنش‌ها", Icon: ListIcon },
+  { href: "/app/dashboard", label: "داشبورد", Icon: WalletIcon },
   { href: "/app/reports", label: "گزارش‌ها", Icon: ChartIcon },
   { href: "/app/chat", label: "دستیار", Icon: SparklesIcon },
   { href: "/app/settings", label: "تنظیمات", Icon: SettingsIcon },

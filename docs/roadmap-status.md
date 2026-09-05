@@ -1729,3 +1729,626 @@ timeout and the server-side idle-stream error) are fully understood at
 the libsql/Turso infrastructure level — both were worked around
 (longer timeout, retry-with-backoff) and confirmed safe (clean rollback,
 no partial state) rather than root-caused further.
+
+## Reports: Essential/Discretionary Awareness + Comparable Bar Charts — 2026-09-05
+
+The week/month/year comparison tabs on the Reports page (`app/app/reports/page.tsx`)
+already had `Category.isEssential` sitting unused right next to them —
+`lib/analytics/spending-summary.ts` (the chat assistant's data) already reads it,
+but `lib/reports/monthly-comparison.ts` didn't even select the column, and
+`lib/reports/generate-highlights.ts` judged every category by `percentChange` alone,
+with no notion of "can the user actually cut this" or of absolute toman amounts. Separately,
+`CategoryComparisonBar` scaled each bar against its own local `max(previous, current)`, so a
+50,000 toman category and a 5,000,000 toman category could render with similarly-sized bars.
+
+### 1. `lib/reports/monthly-comparison.ts` — select and surface `isEssential`
+
+Added `isEssential: boolean` to `CategoryComparison`. `getComparison()`'s category query now
+selects `isEssential` alongside `id`/`name`, and each built `CategoryComparison` carries the
+matching category's value (defaulting to `true` — same as `Category.isEssential`'s own schema
+default — in the defensive case a record isn't found, which shouldn't happen since `categoryIds`
+is derived from these same rows). `lib/reports/monthly-comparison.test.ts`: the food/insurance
+test categories are now created with explicit `isEssential: false`/`true` (previously relying on
+the schema default for both), with assertions added to the existing "normal case" and "drops to
+zero" tests rather than new ones.
+
+### 2. `lib/reports/generate-highlights.ts` — essential-aware, amount-aware, re-ranked
+
+- **Essential vs. discretionary tone.** The old single `categoryWarningCandidate` (any category,
+  percent-only) is now two candidates: `discretionaryWarningCandidate` (isEssential: false only,
+  unchanged actionable "کمی مراقب باشید" wording) and `essentialIncreaseCandidate` (isEssential:
+  true only, neutral wording — "هزینه ضروری «X» ... افزایش یافته است." with no "be careful"
+  framing). This needed a third `HighlightType`, `"info"`, since the existing `"warning"` type's
+  red/amber `HighlightCard` styling would have contradicted the neutral tone the task asked for
+  no matter what the message text said — `HighlightCard.tsx` now maps each of the three types to
+  its own tone (`positive`/`warning` unchanged, `info` new: muted/gray, `ShieldIcon`, matching the
+  neutral-badge pattern `CategoryComparisonBar` already used for a flat 0% change).
+- **Amount-aware warning trigger.** `discretionaryWarningCandidate` now also qualifies a category
+  whose absolute increase (`currentAmount - previousAmount`) exceeds `WARNING_ABSOLUTE_INCREASE_SHARE`
+  (15%, picked as this session's default) of `totalCurrent` (falling back to `totalPrevious` if
+  `totalCurrent` is 0) — independent of `WARNING_INCREASE_THRESHOLD` (50%), so a big-money
+  discretionary category growing only 20% still surfaces. Ranked by whichever of the two signals
+  (percent or share) is larger.
+- **New `discretionaryTotalCandidate`.** Reports the current period's total discretionary spending
+  as a concrete, real figure — `"{formatToman(discretionaryTotal)} از هزینه‌های این دوره غیرضروری
+  بوده و قابل کاهش است."` — independent of whether any single category increased. `Highlight`
+  gained an optional `amount?: number` field carrying the raw figure alongside the formatted
+  message, matching the existing `category?` pattern rather than restructuring the interface.
+- **Re-tuned ranking.** `Candidate.isOverall: boolean` became `Candidate.priority: 0 | 1 | 2`
+  (0 = the overall-savings headline, 1 = discretionary/actionable candidates + the new
+  discretionary-total figure, 2 = essential-cost "noise"), sorted by priority first and magnitude
+  only as a tiebreak within a tier. Without this, a huge essential-cost increase (e.g. rent
+  jumping 200%) would out-rank real discretionary/actionable candidates under plain
+  magnitude-only sorting — a new regression test constructs exactly that scenario (a 200%
+  essential increase alongside three qualifying discretionary/actionable candidates) and asserts
+  the essential one is the one dropped by the `MAX_HIGHLIGHTS` cap, not one of the other three.
+- **Tests:** `lib/reports/generate-highlights.test.ts` — the `category()` helper now defaults
+  `isEssential: false` (most of the file's existing categories are discretionary-flavored anyway,
+  e.g. خوراک/سرگرمی/پوشاک/سفر). Every existing test was re-checked against the new
+  `discretionaryTotalCandidate` firing implicitly whenever there's discretionary spending: two
+  tests needed their expected output updated (a highlight the old code couldn't produce now
+  legitimately also qualifies), two others were verified to still resolve to the same 3-highlight
+  output because the new candidate's magnitude loses the tiebreak (comment added explaining why),
+  and one was given explicit `isEssential: true` categories so it still asserts "no highlights at
+  all" cleanly. Five new tests cover: the absolute-share trigger firing under the 50% percent
+  threshold, the essential-increase `"info"` highlight (asserting it does *not* contain "مراقب
+  باشید"), an essential category's large decrease still producing a `"positive"` savings
+  highlight, and the anti-drowning ranking regression described above.
+
+### 3. Chart scaling + essential/discretionary visuals
+
+- `CategoryComparisonBar.tsx`: replaced the per-bar local `Math.max(previousAmount,
+  currentAmount, 1)` with a `sharedMax: number` prop. `MonthlyComparisonReport.tsx` computes it
+  once — `Math.max(...categories.flatMap(c => [c.previousAmount, c.currentAmount]), 1)` — and
+  passes it to every bar, so bar widths are now comparable across the whole category list, not
+  just within one category's own previous/current pair.
+- Each bar now also shows an essential/discretionary indicator next to the category name —
+  `ShieldIcon` (essential) or `TagIcon` (discretionary), both already existing in
+  `components/icons.tsx`; no new icon needed.
+- New `components/reports/DiscretionarySplitCard.tsx`: a dependency-free CSS stacked bar (two
+  `<div>`s sized by percentage, no SVG needed) showing the current period's essential vs.
+  discretionary split, with a legend giving both totals via `formatToman` and the discretionary
+  share as a percentage via `formatNumber`. Same `rounded-2xl border border-border bg-surface p-4`
+  card style as its siblings. Rendered in `MonthlyComparisonReport.tsx` above the per-category
+  bars. `TodaySpendingReport.tsx` and `ActivityHeatmap.tsx` were left untouched, per the task's
+  own scope note (neither tab has a previous-period comparison to build this off of).
+
+### Verification
+
+- `npm run test`: **73/73 files, 829/829 tests passing** (baseline: 72/72 files, 820/820 — the
+  extra file/5 of the 9 extra tests are `components/transactions/batch-add-transaction-form.test.tsx`,
+  pre-existing uncommitted work from before this session, not touched here; this session's own
+  net addition is +4 tests, all in `lib/reports/generate-highlights.test.ts`).
+- `npx tsc --noEmit`: unchanged — same 8 pre-existing `TS2737` BigInt-literal errors in
+  `app/api/assets/route.test.ts`/`lib/prices/get-live-prices.test.ts`, neither file touched this
+  session.
+- `npm run lint`: unchanged — same 3 pre-existing warnings (`components/logo.tsx`'s `<img>`,
+  `lib/data/transactions.test.ts`'s unused `categoryId`, the workflow route's unused
+  eslint-disable directive).
+
+### Scope held
+
+Touched: `lib/reports/monthly-comparison.ts` + its test, `lib/reports/generate-highlights.ts` +
+its test, `components/reports/MonthlyComparisonReport.tsx`, `components/reports/
+CategoryComparisonBar.tsx`, `components/reports/HighlightCard.tsx` (render-side change required
+by the new `"info"` type), `components/reports/DiscretionarySplitCard.tsx` (new). No changes to
+`app/app/reports/page.tsx` — it already passed `comparison` straight through, and `comparison.
+categories` carries `isEssential` once Goal 1 landed, so no new prop threading was needed. No
+schema migration. No new npm dependency — the split card is plain CSS, matching
+`ActivityHeatmap.tsx`'s existing hand-rolled-visual precedent. No icon files added — `ShieldIcon`/
+`TagIcon` already existed and fit.
+
+### Do Not Claim
+
+`WARNING_ABSOLUTE_INCREASE_SHARE` (15%) and the exact Persian wording for the new/changed
+highlight messages were confirmed with the project owner before implementation, not derived from
+the codebase — there was no existing precedent for either in this repo. This does not claim the
+15% figure is empirically tuned against real user data; it's a reasonable starting default the
+project owner explicitly approved, adjustable later if it fires too often or too rarely in
+practice.
+
+## Reports: Granularity-Agnostic Trend/Insight Data Layer (Phase 1) — 2026-09-05
+
+Data-layer-only phase: new `lib/reports/trend-insights.ts` builds week/month/year cash-flow
+trend, recurring-expense, and unusual-transaction primitives for the Reports page, reusing
+`lib/reports/period-range.ts`'s existing generic period arithmetic and
+`lib/analytics/spending-summary.ts`'s existing pure `computeRecurringExpenses`/
+`computeUnusualTransactions`/`computeSavingsRate` functions rather than duplicating their logic.
+No UI changes — `components/reports/` was not touched.
+
+### 1. `lib/reports/trend-insights.ts` (new)
+
+- **`getPeriodTrend(userId, currentPeriod, granularity, periodsBack)`** — `periodsBack + 1`
+  periods (current + N prior), oldest first, each `{ periodKey, label, income, expense, net }`.
+  Walks backward via `getPreviousPeriod`, then batches all periods' `prisma.transaction.groupBy`
+  reads with one `Promise.all` (not sequential awaits). Same computational idea as
+  `spending-summary.ts`'s `computeCashFlowTrend` (net = income - expense per period) but built
+  fresh against `period-range.ts`'s generic arithmetic instead of that function's Jalali-month +
+  `SpendingSummaryCache`-specific wiring, per the task's explicit instruction not to reuse it
+  directly.
+- **`getRecurringExpenses(userId, currentPeriod, granularity)`** — buckets expense transactions
+  per period and delegates to the existing `computeRecurringExpenses`. The lookback *count* (how
+  many periods to bucket) needed per-granularity judgement since `computeRecurringExpenses`'s own
+  "present in >= 2 buckets" threshold is already granularity-agnostic:
+  - `month` reuses `RECURRING_EXPENSE_LOOKBACK_MONTHS` (3) unchanged — exported from
+    `spending-summary.ts` (was private) specifically so this module's month behavior can't drift
+    from the chat assistant's.
+  - `week` also uses 3 — the same "present in >= 2 of the last 3" reasoning holds for a
+    weekly-cadence expense as it does for a monthly one.
+  - `year` uses **2**, not 3 — reasoned through per the task's own prompt: a 3-year lookback would
+    require 3 full years of history from every user before ever firing once, an unreasonably high
+    bar; "present in both of the last 2 years" is still a real recurring signal (an annual
+    renewal) at a much more reachable one. Documented as a code comment on
+    `RECURRING_EXPENSE_LOOKBACK_PERIODS` in the new file, and covered by a test that deliberately
+    plants a description 2 years back (present in year N and N-2 but not N-1) to prove the
+    2-period lookback doesn't reach that far.
+- **`getUnusualTransactions(userId, currentPeriod, granularity)`** — fetches the current period's
+  expense transactions with `category: { name, isEssential }` and calls the existing
+  `computeUnusualTransactions` directly; already granularity-agnostic, no new decision needed.
+- **`getPeriodSavingsRate(income, expense)`** — thin wrapper over the existing
+  `computeSavingsRate`, not a reimplementation.
+- `computeUnusualTransactions`/`computeRecurringExpenses`/`computeSavingsRate` and the
+  `RecurringExpense`/`UnusualTransaction` types were already exported from `spending-summary.ts`
+  before this phase (checked first, per the task's scope note) — a no-op there. The private
+  `UnusualTransactionCandidate`/`DescriptionTransaction` input-shape types were left private and
+  un-exported; this file's own Prisma `select`s structurally match them, which TypeScript accepts
+  without a nominal import.
+- `lib/format.ts` gained three label helpers, since only a bare-month-name one
+  (`jalaaliMonthKeyToLabel`) existed and none of the three fit a multi-period trend that can cross
+  a year boundary: `jalaaliMonthKeyToFullLabel` (month + year, e.g. "مرداد ۱۴۰۴"),
+  `jalaaliWeekKeyToLabel` ("هفته ۵ - ۱۴۰۴"), `jalaaliYearKeyToLabel` ("۱۴۰۴").
+
+### 2. `isEssential` gap in `lib/reports/monthly-comparison.ts`
+
+Already fixed by uncommitted work already present in the working tree at the start of this phase
+(see the "Essential/Discretionary Awareness" entry above, dated the same day) — `CategoryComparison`
+already carries `isEssential`, `getComparison()`'s category query already selects it, and
+`monthly-comparison.test.ts` already asserts it on explicit `isEssential: true`/`false` test
+categories. Verified, not re-done.
+
+### 3. Integration into `app/app/reports/page.tsx`
+
+Went with "wire it in now, unused" rather than stopping short: the week/month/year branch's
+`getComparison` call now runs alongside `getPeriodTrend`/`getRecurringExpenses`/
+`getUnusualTransactions` in one `Promise.all`, with the three new results explicitly `void`-ed
+(with a comment pointing at this entry) rather than rendered — Phase 2 wires them into the UI.
+`TREND_PERIODS_BACK = 5` (current + 5 prior) is a new page-level constant, same "enough for a real
+trend, not just current-vs-previous" reasoning as `spending-summary.ts`'s `CASH_FLOW_TREND_MONTHS`,
+shared across all three granularities since the not-yet-built chart is expected to have the same
+shape regardless of tab. No `components/reports/` file was touched.
+
+### Testing
+
+New `lib/reports/trend-insights.test.ts`, mirroring `monthly-comparison.test.ts`/
+`today-spending.test.ts`'s conventions (real Prisma test-DB writes in `beforeAll`, cleanup in
+`afterAll`, one `describe` per exported function, named test constants). Covers: period bucketing
+across a Jalaali year boundary for both week granularity (`getPeriodTrend`) and month granularity
+(`getPeriodTrend` with `periodsBack: 2`, and `getRecurringExpenses`'s 3-month lookback), `isTransfer`
+exclusion (asserted directly in all three DB-backed describes, including a transfer-categorized
+transaction large enough to obviously skew results if it leaked through), income/expense
+separation, recurring detection (both the general 2-of-3 case and the year-specific 2-period-lookback
+edge case above), and unusual-transaction detection against a deliberately crafted 3-transaction
+category (one outlier at 5x the other two's average).
+
+- `npm run test`: **74/74 files, 836/836 tests passing** (this session's own starting point, after
+  the already-present uncommitted "Essential/Discretionary" work above, was 73/73 files, 829/829 —
+  this phase's net addition is +1 file / +7 tests, all in the new `trend-insights.test.ts`; original
+  task baseline was 72/72, 820/820 before either phase).
+- `npx tsc --noEmit`: unchanged — same 8 pre-existing `TS2737` BigInt-literal errors in
+  `app/api/assets/route.test.ts`/`lib/prices/get-live-prices.test.ts`, neither file touched.
+- `npm run lint`: unchanged — same 3 pre-existing warnings (`components/logo.tsx`'s `<img>`,
+  `lib/data/transactions.test.ts`'s unused `categoryId`, the workflow route's unused
+  eslint-disable directive).
+
+### Scope held
+
+Touched: `lib/reports/trend-insights.ts` (new), `lib/reports/trend-insights.test.ts` (new),
+`lib/analytics/spending-summary.ts` (only to export `RECURRING_EXPENSE_LOOKBACK_MONTHS` — the
+other three functions/types needed no change, already exported), `lib/format.ts` (three new label
+helpers), `app/app/reports/page.tsx` (data fetching only, per Integration above). No changes under
+`components/reports/`. No schema migration. `lib/reports/monthly-comparison.ts`/its test were
+inspected but not modified — the `isEssential` fix this phase asked for already existed.
+
+### Do Not Claim
+
+The year-granularity recurring-expense lookback of 2 (vs. week/month's 3) is a reasoned default
+following the task's own explicit prompt to reconsider it, not a number confirmed with the project
+owner — flagged here the same way `WARNING_ABSOLUTE_INCREASE_SHARE` was flagged in the entry above,
+in case it turns out to need tuning once real usage data exists.
+
+## Reports UI — Trend Chart + Recurring/Unusual Cards (Phase 2) — 2026-09-05
+
+Consumes Phase 1's data layer (`lib/reports/trend-insights.ts`) on the Reports page, which fetched
+`trend`/`recurringExpenses`/`unusualTransactions` but `void`-ed all three unrendered. Goals 1
+(shared-max bar scaling), 3 (`DiscretionarySplitCard`), and 5 (amount-/essential-aware highlights)
+from this phase's task were checked first and found already done by uncommitted work already
+present in the working tree at the start of this session (see the "Essential/Discretionary
+Awareness" entry above, same day) — verified against the task's own acceptance criteria
+line-by-line, not re-done. This entry covers what was actually still open: the trend chart and the
+two secondary insight cards, plus wiring all three Phase 1 values into the render tree.
+
+### 1. `components/reports/PeriodTrendChart.tsx` (new)
+
+Raw SVG bar chart of `TrendPeriod.net` per period (oldest-first) — no chart library is installed
+(re-confirmed against `package.json`). Chose a single net bar per period over paired income/expense
+bars: net directly answers "did I save or overspend this period", the same question
+`generateHighlights`' savings/warning candidates are already built around, without asking the
+reader to mentally subtract two bars against each other — and it reuses the success/warning color
+semantics `CategoryComparisonBar`'s percent badges and `HighlightCard` already use, rather than
+introducing a third color for "income". Bars share one `maxAbsNet` scale across the whole series.
+A horizontal zero-baseline is always drawn (`var(--border)`); when every period is non-negative it
+sits at the chart floor (an ordinary bar chart), and moves to the vertical middle the moment any
+period goes negative, so bars can extend both directions off it. Colors come from CSS custom
+properties (`var(--success)`/`var(--warning)`/`var(--muted)`/`var(--border)`, checked against
+`app/globals.css`'s actual token names) applied via the `style` prop rather than the `fill`/`stroke`
+attributes directly, matching how `CategoryComparisonBar` already threads a `var(--...)` string
+through `style` rather than a presentation attribute. Each period's label
+(`jalaaliWeekKeyToLabel`/`jalaaliMonthKeyToFullLabel`/`jalaaliYearKeyToLabel`, all Phase 1) is drawn
+under its bar; week/month labels are long enough ("هفته ۵ - ۱۴۰۴", "مرداد ۱۴۰۴") to overlap their
+neighbors at 6-wide unrotated, so they're rotated -40° and truncated past 11 characters, while
+year's short "۱۴۰۴" labels stay flat and centered — this reads more naturally for year's "fewer,
+wider bars" case the task called out, even though `TREND_PERIODS_BACK` (Phase 1) is currently the
+same 5-prior-periods constant for all three granularities, so bar *count* doesn't actually differ
+today; only label length does. A native SVG `<title>` per bar gives the exact `formatToman(net)`
+figure on hover instead of drawing numeric labels that would overflow Persian-formatted toman
+figures at this bar width. Rendered in `MonthlyComparisonReport.tsx` above `DiscretionarySplitCard`,
+per the task's placement instruction.
+
+### 2. `components/reports/RecurringExpensesCard.tsx` + `UnusualTransactionsCard.tsx` (new)
+
+Both list their respective Phase 1 arrays (`RecurringExpense[]`/`UnusualTransaction[]`) and render
+`null` outright when empty — checked how the page's own `emptyState()` helper works first: it's a
+full-page `EmptyState` swap used when `comparison.categories`/`heatmap.activeDays` is empty, which
+would be wrong for these two since they're secondary cards alongside real primary content, not the
+whole page's content. `RecurringExpensesCard` is deliberately framed as "review these" — "این‌ها را
+مرور کنید — شاید اشتراک یا قبضی باشد که یادتان رفته" — not a warning tone, using the existing
+`RefreshIcon` (no new icon needed); a recurring expense isn't inherently a problem.
+`UnusualTransactionsCard` uses the existing `AlertIcon`/`text-warning` tone already established by
+`HighlightCard`'s own `warning` type, showing each transaction's category, amount, and its multiple
+of the category average. Both match the `rounded-2xl border-border bg-surface p-4` card shell every
+other `components/reports/` file uses.
+
+### 3. Wiring — `MonthlyComparisonReport.tsx` + `app/app/reports/page.tsx`
+
+`MonthlyComparisonReportProps` gained `trend`, `granularity` (`ReportGranularity` — the chart needs
+it for label rotation/truncation, `MonthlyComparisonResult` itself carries no granularity),
+`recurringExpenses`, and `unusualTransactions`. Render order: `PeriodTrendChart` →
+`DiscretionarySplitCard` → per-category bars → `RecurringExpensesCard` →
+`UnusualTransactionsCard` → highlights (kept last, as the report's closing takeaways). The file's
+trailing "usage example" comment block was deleted rather than updated — it was already stale
+(`page.tsx` had wired real usage in Phase 1) and would only have kept rotting as more props were
+added. `app/app/reports/page.tsx`'s week/month/year branch: removed the three `void trend` /
+`void recurringExpenses` / `void unusualTransactions` lines and passes all three straight through
+to `MonthlyComparisonReport`, along with `granularity={tab}`. No change to the branch's existing
+`comparison.categories.length === 0` empty-state check — out of this phase's scope, and Phase 1's
+data-fetching shape didn't call for revisiting it.
+
+### Verification
+
+- `npm run test`: **74/74 files, 836/836 tests passing** — unchanged from this session's own
+  starting baseline (the Phase 1 entry above). No new test files: this phase's scope was UI
+  components with no test-file instruction (only `generate-highlights.test.ts` was named, and its
+  changes were already done — see above), consistent with this codebase's own precedent of not
+  unit-testing presentational `components/reports/` files (`ActivityHeatmap.tsx`,
+  `DiscretionarySplitCard.tsx`, etc. have none either).
+- `npx tsc --noEmit`: unchanged — same 8 pre-existing `TS2737` BigInt-literal errors in
+  `app/api/assets/route.test.ts`/`lib/prices/get-live-prices.test.ts`, neither file touched.
+- `npm run lint`: unchanged — same 3 pre-existing warnings (`components/logo.tsx`'s `<img>`,
+  `lib/data/transactions.test.ts`'s unused `categoryId`, the workflow route's unused
+  eslint-disable directive).
+
+### Scope held
+
+Touched: `components/reports/PeriodTrendChart.tsx` (new), `components/reports/
+RecurringExpensesCard.tsx` (new), `components/reports/UnusualTransactionsCard.tsx` (new),
+`components/reports/MonthlyComparisonReport.tsx`, `app/app/reports/page.tsx` (prop wiring only).
+No changes to `components/reports/CategoryComparisonBar.tsx`, `lib/reports/generate-highlights.ts`,
+or its test — already done by prior uncommitted work, verified not re-done. No changes to
+`components/icons.tsx` — `RefreshIcon`/`AlertIcon` already existed and fit. No new npm dependency —
+the trend chart is raw SVG, matching `ActivityHeatmap.tsx`'s hand-rolled-visual precedent. No
+schema migration.
+
+### Do Not Claim
+
+The single-net-bar-vs-paired-income/expense-bars chart shape was this session's own judgment call,
+made under the task's explicit instruction to pick and justify one rather than ask — not confirmed
+with the project owner. Same for the exact rotation angle (-40°) and truncation length (11
+characters) for week/month labels — reasonable defaults, not pixel-tested against real narrow
+mobile viewports in a running browser.
+
+## Reports: Deterministic Narrative Report Card (Phase 3) — 2026-09-05
+
+Verified Phase 1/2 were both actually complete (checked their code, not just their roadmap
+entries, before starting) before building on top of them: `lib/reports/trend-insights.ts`'s data
+layer and `MonthlyComparisonReport.tsx`'s trend chart/recurring/unusual cards both matched their
+entries above. New `lib/reports/narrative-report.ts` is a pure, deterministic (no LLM) function
+that turns the week/month/year branch's already-computed `comparison`/`trend`/
+`unusualTransactions` into one cohesive narrative — status, headline income/expense, top
+category, overall trend, one key insight, an end-of-period projection, a suggested cap, and a
+savings opportunity — rendered as a single card at the top of `MonthlyComparisonReport`.
+
+### 1. `lib/reports/narrative-report.ts` (new)
+
+`generateNarrativeReport({ granularity, currentPeriod, comparison, trend, unusualTransactions, now? })`
+→ `NarrativeReport`. Every sub-field follows the task's confirmed rules exactly:
+
+- **Status**: `getPeriodSavingsRate(income, expense)` (trend-insights.ts) → `"unknown"` when
+  undefined (no income yet — deliberately not "bad"), `"good"` at ≥20%, `"medium"` at 0–19%,
+  `"bad"` below 0%. `income`/`expense` themselves come from `trend`'s entry matching
+  `currentPeriod` (found by `periodKey`, not assumed to be `trend[trend.length - 1]`) — `getComparison`'s
+  own totals are expense-only, so trend is the only source for income here. Throws if no matching
+  entry exists (same "fail loud on a caller invariant violation" precedent as
+  `spending-summary.ts`'s recurring-expense lookback check) rather than silently reporting `income: 0`.
+- **topCategory**: `comparison.categories[0]` — re-verified `getComparison`'s sort (descending by
+  `currentAmount`) still holds by reading it, not assumed.
+- **Insight** (rule 3): the highest-`multiple` unusual transaction if any exist (defensively
+  picked via `Math.max`-style reduce rather than trusting `unusualTransactions[0]`'s documented
+  sort order blindly), else the category with the largest *absolute* toman increase
+  (`currentAmount - previousAmount > 0`), else omitted. generate-highlights.ts's own
+  amount-over-percent constant (`WARNING_ABSOLUTE_INCREASE_SHARE`) is private and this phase's
+  scope forbids modifying that file to export it — judged, and documented in code, that it
+  wouldn't quite fit here anyway (it exists to gate "is this warning-worthy", not to pick a single
+  top observation), so the fallback's only bar is "increase > 0", no imported or duplicated
+  threshold.
+- **Projection** (rule 4): elapsed-time-based linear extrapolation
+  (`projectedTotal = currentAmountSoFar / elapsedFraction`, via `periodToGregorianRange` +
+  injectable `now`), targeting the insight's category if one exists, else `topCategory`, else the
+  period's total expense (`TOTAL_EXPENSE_LABEL`) — one `resolveTarget` helper shared with the
+  suggestion below so both always talk about the same thing. Omitted below
+  `MIN_ELAPSED_FRACTION_FOR_PROJECTION` (10%, named/documented — a projection off less than that
+  explodes to a meaningless number), when the target has no previous-period baseline to call
+  "usual" (`previousAmount <= 0`), or when the projection doesn't actually exceed that baseline —
+  simply omitted rather than reframed as good news, a documented judgment call per the task's own
+  "your call, but be consistent" allowance.
+- **Suggestion** (rule 5): cap = the same target's previous-period `currentAmount`, independent of
+  whether the projection itself was gated out by the elapsed-fraction floor (a suggested cap is
+  still useful at the very start of a period) — omitted only when that baseline is `<= 0`.
+- **Opportunity** (rule 6): `OPPORTUNITY_REDUCTION_PERCENT` (10, named/documented the same way
+  `UNUSUAL_TRANSACTION_MULTIPLIER` is in spending-summary.ts) of current-period discretionary
+  (`isEssential: false`) spend, omitted when that total is 0.
+
+Every message field is a fully-formed Persian string (matching `Highlight.message`'s own
+convention), with the raw numbers alongside it so `NarrativeReportCard` never re-parses text.
+
+### 2. `components/reports/NarrativeReportCard.tsx` (new)
+
+One card, `rounded-2xl border-border bg-surface p-4`-adjacent, reusing `HighlightCard`'s
+tone-color mapping approach (`TONE`/`STATUS_TONE`) rather than inventing a new one — `"unknown"`
+gets its own neutral (`border-border bg-border/10`, muted text) entry, distinct from `"good"`/
+`"medium"`/`"bad"`'s success/warning tones, so a no-income period reads as "not enough data", never
+as a red judgment. Each present field (`topCategory`, `insight`, `projection`, `suggestion`,
+`opportunity`) renders as its own block; an omitted field renders nothing, never a placeholder.
+
+### 3. Wiring
+
+`MonthlyComparisonReportProps` gained `narrative: NarrativeReport`; `NarrativeReportCard` renders
+first, above `PeriodTrendChart`, per the task's placement instruction. `app/app/reports/page.tsx`'s
+week/month/year branch calls `generateNarrativeReport` right after `generateHighlights`, passing
+the same `comparison`/`trend`/`unusualTransactions` already fetched in that branch's `Promise.all`,
+plus `granularity`/`currentPeriod`, and threads the result through unchanged.
+
+### Testing
+
+New `lib/reports/narrative-report.test.ts`, mirroring `generate-highlights.test.ts`'s
+pure-function/no-DB convention (`category()`/`result()` builders, plus new `trendPeriod()`/
+`unusual()` ones) — confirmed no DB fixture is needed, since every input is hand-built. Covers
+every status tier (including the exact 0% boundary), income/expense sourced from the matching
+trend entry (not comparison's expense-only totals), the trend-mismatch throw, `topCategory`
+present/absent, the unusual-transaction-vs-absolute-increase insight priority (including
+"amount over percent" winning against a much larger percent-change category), the insight omission
+cases (no increase / no categories), the elapsed-fraction floor (both too-early and normal cases,
+via an injected `now` computed from `periodToGregorianRange`), projection omission when it doesn't
+exceed baseline and when there's no baseline, the total-expense projection fallback, the
+suggestion's independence from the projection's elapsed-fraction gate, and both opportunity cases
+(present and zero-discretionary omission). 26 tests, all passing.
+
+- `npm run test`: **75/75 files, 862/862 tests passing** — this session's own starting point
+  (Phase 2's end state, verified by re-running before touching anything) was 74/74, 836/836; this
+  phase's net addition is +1 file / +26 tests, all in the new `narrative-report.test.ts`.
+- `npx tsc --noEmit`: unchanged — same 8 pre-existing `TS2737` BigInt-literal errors in
+  `app/api/assets/route.test.ts`/`lib/prices/get-live-prices.test.ts`, neither file touched.
+- `npm run lint`: unchanged — same 3 pre-existing warnings (`components/logo.tsx`'s `<img>`,
+  `lib/data/transactions.test.ts`'s unused `categoryId`, the workflow route's unused
+  eslint-disable directive).
+
+### Scope held
+
+Touched: `lib/reports/narrative-report.ts` (new), `lib/reports/narrative-report.test.ts` (new),
+`components/reports/NarrativeReportCard.tsx` (new), `components/reports/MonthlyComparisonReport.tsx`
+(prop + render wiring only), `app/app/reports/page.tsx` (calls the new function, passes its result
+down). No changes to `lib/reports/trend-insights.ts`, `lib/reports/monthly-comparison.ts`,
+`lib/analytics/spending-summary.ts`, or `lib/reports/generate-highlights.ts` — each was read for
+context/reuse (per the task's own pointers) but not modified. No new npm dependency. No schema
+migration. No AI/LLM call anywhere in this feature.
+
+### Do Not Claim
+
+Two judgment calls were made under the task's own "if ambiguous, your call — but document it"
+allowance, not confirmed with the project owner: (1) not reusing `generate-highlights.ts`'s private
+`WARNING_ABSOLUTE_INCREASE_SHARE` for the rule-3b insight fallback's qualifying bar (reasoned
+through above — the semantics didn't quite fit, and the file couldn't be modified to export it
+either way); (2) omitting the projection outright (rather than phrasing it positively) when it
+doesn't exceed the previous-period baseline. Both are internally consistent and documented in code,
+but neither was put to the project owner directly the way the status-tier/insight-priority/
+projection-target/suggestion-baseline/opportunity-percent rules already were.
+
+## Financial Goals — Goals UI (Phase 3) — 2026-09-05 (retroactive entry)
+
+**Retroactive documentation only** — this entry records a phase that was already fully built and
+live in the working tree (`components/goals/goals-manager.tsx`, `app/app/dashboard/page.tsx`'s
+"هدف‌ها" tab) before this session started; no code in this phase was written or changed as part of
+adding this entry. It's added now because the roadmap had no record of it at all despite Phase 1
+(the CRUD API + deterministic feasibility engine, `lib/data/goals.ts`/`lib/goals/feasibility.ts`)
+and this UI both being fully implemented, so the roadmap was silently out of sync with the
+codebase — verified by actually reading the component and page code (not assumed from the task
+description) before writing this summary.
+
+### What's live
+
+`GoalsManager` (`components/goals/goals-manager.tsx`), rendered from `/app/dashboard?tab=goals`
+(one of three tabs alongside transactions/assets on the consolidated dashboard page) - consumes
+Phase 1's already-live `GET/POST/PATCH/DELETE /api/goals` (`lib/data/goals.ts`) unmodified:
+
+- **List**: each goal as a card - name, target amount, days remaining, a progress bar
+  (`initialAmount / targetAmount`), and its computed `GoalFeasibility` rendered as a status badge
+  (`FEASIBILITY_TONE`: "در مسیر" / "نیاز به تعدیل" / "غیرواقعی", reusing this app's existing
+  success/warning tone colors - no third real color exists, so the latter two share a tone and are
+  told apart by icon/label only, same precedent as `NarrativeReportCard`'s "medium"/"bad" pair),
+  estimated months to completion, and monthly shortfall (`gap`) when positive.
+- **Create/edit**: a bottom-sheet modal (same shape as `AssetsManager`'s own) with a name field, two
+  Toman `MoneyInput`s (target amount, optional current saved amount), and a `JalaliDatePicker` for
+  the deadline (min: tomorrow, matching the API's own "past/today rejected" rule enforced
+  client-side too). The category picker that originally sat in this form was later removed once the
+  product decision landed that the goal's free-text name is enough on its own - new goals still send
+  `category: "other"` to satisfy the API's existing required field, edits omit it entirely since
+  `PATCH` never reads it.
+- **Status/delete**: "محقق شد"/"رها شد" buttons (active goals only) PATCH `status`; delete uses an
+  inline confirm/cancel toggle (modeled on `transaction-list-item.tsx`'s own per-row pattern, not
+  `AssetsManager`/`AccountsManager`'s immediate-delete-no-confirmation, since this task wanted a
+  confirmation step).
+
+### Verification
+
+No new tests were added or needed for this entry (documentation only) - the existing suite already
+covers Phase 1's API layer (`app/api/goals/route.test.ts`, `app/api/goals/[id]/route.test.ts`:
+validation, ownership scoping, feasibility attachment) and `GoalsManager` itself has no test file,
+consistent with this codebase's established "no tests for presentational components" precedent
+(`AssetsManager`, `MonthlyComparisonReport`, etc. have none either).
+
+### Do Not Claim
+
+This entry does not claim any new functional work happened in this phase - it is a documentation
+correction only, describing code that already existed. The exact wording/order of the retired
+category-picker removal (mentioned above) was reconstructed from the component's own code comments,
+not from a separate change log entry, since none existed.
+
+## Financial Goals — AI-Generated Strategy (Phase 2) — 2026-09-05
+
+Adds the one piece Phase 1 (feasibility engine + CRUD, live) and Phase 3 (Goals UI, see the
+retroactive entry above) didn't cover: for a given goal, a real NVIDIA NIM call (via
+`lib/nvidia-ai.ts`'s existing `chatCompletion`, no new AI client) that generates 3-5 concrete,
+actionable Persian suggestions grounded in the user's real spending data.
+
+### 1. Grounding data
+
+`lib/goals/strategy.ts`'s `generateGoalStrategy(goal, feasibility, userId)` takes the goal's own
+fields and an already-computed `GoalFeasibility` (`lib/goals/feasibility.ts`'s
+`computeGoalFeasibility` - reused, not recomputed; the caller, the new API route, computes it the
+same way `listGoalsWithFeasibility` does) as parameters, then itself calls `getSpendingSummary`
+(`lib/analytics/spending-summary.ts`) once for `topDiscretionaryCategories` and `recurringExpenses`
+- the *only* categories/merchants the prompt allows the model to name in a `reduce_expense` action.
+`getSpendingSummary` computes considerably more than these two fields (total balance, recent
+transactions, cash-flow trend, ...), but it's reused as-is rather than hand-rolling a narrower
+query: this runs once per button press (not per chat message, its other caller's hot path), so the
+extra cost is negligible, and reuse keeps this feature's numbers in lockstep with that file's own
+isTransfer-exclusion/discretionary rules instead of risking a second, drifting copy of them. All of
+this - goal, feasibility, discretionary categories, recurring expenses - is rendered into a
+clean, labeled Persian text block (Toman amounts pre-formatted via `formatToman`,
+the deadline via `formatJalaaliDate`, feasibility status via the same Persian labels
+`goals-manager.tsx`'s own `FEASIBILITY_TONE` already shows the user) inside a
+`buildSystemPrompt`, following `lib/ai/parse-transaction.ts`'s own prompt-construction pattern -
+never as raw pasted JSON.
+
+### 2. `lib/goals/strategy.ts` (new)
+
+`chatCompletion([...], { json: true })`, same call shape as `parseTransactionWithAI`. The raw JSON
+response is validated with the same rigor as that file's `isRawParsedTransaction`:
+`isRawGoalStrategy` only gates on `actions` being an array (so a completely wrong-shaped response is
+rejected up front); each element is then independently validated/sanitized by
+`sanitizeGoalStrategyAction` - `type` must be one of the three allowed values, `title`/`description`
+must be non-empty strings, or the *entire* action is dropped. `relatedAmount`, being additive and
+non-essential, is handled differently: an invalid value (not a positive finite number) is dropped
+on its own, keeping the rest of an otherwise-valid action - a deliberate, documented asymmetry
+between "fields nothing downstream can safely default" (type/title/description) and "a UI nicety a
+caller can render around" (relatedAmount). If fewer than `MIN_STRATEGY_ACTIONS` (3) survive, the
+whole call throws rather than returning a degraded/thin strategy - same "fail loud" precedent as
+`spending-summary.ts`'s own recurring-expense lookback-mismatch throw. Every surviving action's
+`priority` is reassigned sequentially (1..n, by array order) rather than trusting a number the model
+separately supplies - the model's own array order already is its priority signal, and this
+guarantees a clean, gap-free sequence regardless of what a possibly-hallucinated numeric field
+said. `summary` is treated more leniently (a missing/empty one falls back to a generic Persian
+sentence rather than discarding 3-5 otherwise-good actions over it) - a documented asymmetry from
+the "throw below the minimum" rule, which only ever governs `actions`.
+
+Every failure path (`chatCompletion` itself, JSON-extraction, shape validation) goes through
+`reportError`/`ERROR_TYPES` exactly like `parseTransactionWithAI` (`AI_ERROR` for the call itself,
+`PARSER_ERROR` for extraction/shape failures, an `AI-call succeeded` `logger.info` line with
+latency+usage on success) and re-throws one single user-facing Persian message
+("در تولید استراتژی خطایی رخ داد. دوباره تلاش کنید.") for every branch - a deliberate deviation from
+`parseTransactionWithAI`'s own per-branch message wording (it re-throws the raw error unchanged for
+an AI-call failure specifically), per this task's own explicit instruction to use one canonical
+message here. No caching/persistence - generates fresh on every call, per this phase's own scope.
+
+### 3. `app/api/goals/[id]/strategy/route.ts` (new)
+
+`POST` only. Auth via `getSession`, then `checkRateLimit` against a new `GOAL_STRATEGY_USER_RULE`
+(`lib/rate-limit.ts`: 10 per 10 minutes - modeled closer to `CHAT_USER_RULE`'s "deliberate user
+action" cadence than the debounced `TRANSACTION_PARSE_USER_RULE`, sized to comfortably cover
+regenerating a strategy across a few goals in one sitting while still bounding a runaway client to a
+small number of NVIDIA NIM calls) before the ownership lookup, so a rate-limited client doesn't even
+spend a DB round-trip. Ownership check via a new `getGoal(userId, id)` in `lib/data/goals.ts` - no
+single-goal fetch existed before this (`listGoalsWithFeasibility` only ever returns the whole list);
+added minimally, same `{ id, userId }` `findFirst` + `GoalNotFoundError`-on-miss contract as
+`updateGoal`/`deleteGoal` right above it in that file. Feasibility is computed in the route (not
+inside `generateGoalStrategy`) via `getActualMonthlyAverage` + `computeGoalFeasibility`, the same two
+calls `listGoalsWithFeasibility` makes, just scoped to one goal. Returns `{ strategy }` on success;
+404 for `GoalNotFoundError`, 429 via `rateLimitResponse` when rate-limited, 500 with
+`generateGoalStrategy`'s own thrown Persian message on an AI/parsing failure (that function already
+calls `reportError` internally for its own failures, so the route doesn't re-report the same event
+under a second errorType).
+
+### 4. UI — `components/goals/goals-manager.tsx`
+
+A "دریافت استراتژی" button added to every active goal's card (relabeled "دریافت مجدد استراتژی" once
+a strategy has already been fetched, so regenerating without a page refresh is one more click, not a
+dead end) - `SpinnerIcon` while loading, same pattern as this file's existing save/delete buttons.
+On success, the returned `GoalStrategy` renders inline: `summary` as a short intro line, then each
+action as a small list item (an `ArrowDownIcon`/`ArrowUpIcon`/`PlusIcon` per `type`, `title`,
+`description`, and `relatedAmount` via `formatToman` only when present), in `priority` order (the
+array order the API already returns, since `priority` is assigned sequentially server-side). On
+error, the Persian message renders with this file's existing warning-tone text pattern
+(`deleteError`'s own styling). Local `GoalStrategy`/`GoalStrategyAction` types mirror
+`lib/goals/strategy.ts`'s exported ones rather than importing them directly - that module is
+`"server-only"` (it calls `chatCompletion`/`getSpendingSummary`), same reason this file's existing
+`GoalFeasibility` is already a local copy, not an import from `lib/goals/feasibility.ts`.
+
+### Testing
+
+New `lib/goals/strategy.test.ts`, mirroring `lib/ai/parse-transaction.test.ts`'s `chatCompletion`
+mocking convention exactly (`vi.mock("@/lib/nvidia-ai", ...)`), plus a same-shaped mock of
+`getSpendingSummary` (`lib/analytics/spending-summary.ts`) so this stays a pure unit test with no DB
+fixture. 9 tests: a fully valid response (priority reassignment, `relatedAmount` present/absent);
+capping at 5 actions when the model returns more; one malformed action dropped with ≥3 surviving
+(accepted); too few valid actions surviving (throws the Persian message); an invalid `relatedAmount`
+on one action being dropped while the rest of that action survives; a missing `summary` falling back
+to the default sentence; a non-JSON response; a well-formed-but-wrong-shaped response (`actions`
+missing entirely); and the `chatCompletion` call itself rejecting.
+
+- `npm run test`: **83/83 files, 920/920 tests passing** - this session's own starting point
+  (already 82/911 in the working tree before this phase, from prior uncommitted Goals/Dashboard/
+  Reports work) plus this phase's net addition of +1 file / +9 tests, all in the new
+  `strategy.test.ts`. No existing test file needed a change.
+- `npx tsc --noEmit`: unchanged - the same 8 pre-existing `TS2737` BigInt-literal errors in
+  `app/api/assets/route.test.ts`/`lib/prices/get-live-prices.test.ts`, neither file touched.
+- `npm run lint`: unchanged - the same 3 pre-existing warnings (`components/logo.tsx`'s `<img>`,
+  `lib/data/transactions.test.ts`'s unused `categoryId`, the workflow route's unused
+  eslint-disable directive).
+
+### Scope held
+
+Touched: `lib/goals/strategy.ts` (new), `lib/goals/strategy.test.ts` (new),
+`app/api/goals/[id]/strategy/route.ts` (new), `lib/rate-limit.ts` (one new named rule, additive),
+`lib/data/goals.ts` (one new `getGoal` export, additive), `components/goals/goals-manager.tsx` (new
+button + inline strategy render only). No changes to `lib/goals/feasibility.ts`,
+`lib/analytics/spending-summary.ts`, `prisma/schema.prisma`, or any other `app/api/goals/*` route's
+existing behavior - each was read for reuse but not modified. No new npm dependency. No schema
+migration.
+
+### Do Not Claim
+
+The exact rate-limit figure (10 per 10 minutes) and the UI's exact grouping/regenerate-button
+wording were this session's own judgment calls under the task's explicit "stop and ask if it feels
+like a product call, otherwise use your judgment" allowance for the rate-limit number specifically -
+not confirmed with the project owner. The choice to always show the strategy button (relabeled
+"دریافت مجدد استراتژی" post-fetch) rather than hiding it once a strategy exists was also this
+session's own call, reasoned through above but not put to the project owner directly.

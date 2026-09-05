@@ -160,6 +160,17 @@ export const OTP_VERIFY_PHONE_RULE: RateLimitRule = { limit: 8, windowSeconds: 1
 export const TRANSACTION_PARSE_USER_RULE: RateLimitRule = { limit: 60, windowSeconds: 5 * 60 };
 export const CHAT_USER_RULE: RateLimitRule = { limit: 15, windowSeconds: 5 * 60 };
 
+// GOAL_STRATEGY_USER_RULE covers POST /api/goals/[id]/strategy - one
+// explicit "دریافت استراتژی" button press per call, not a debounced/
+// typing-triggered flow like TRANSACTION_PARSE_USER_RULE. Modeled closer to
+// CHAT_USER_RULE's cadence (a deliberate, occasional user action) than
+// reused outright, since a legitimate session could reasonably regenerate a
+// strategy a few times across several goals in one sitting (comparing
+// goals, retrying after a transient AI hiccup) - 10 per 10 minutes covers
+// that comfortably while still bounding a runaway/compromised client to a
+// small, cheap number of NVIDIA NIM calls.
+export const GOAL_STRATEGY_USER_RULE: RateLimitRule = { limit: 10, windowSeconds: 10 * 60 };
+
 // Generous coarse backstop applied per-IP across all API routes.
 export const GENERAL_API_IP_RULE: RateLimitRule = { limit: 200, windowSeconds: 5 * 60 };
 

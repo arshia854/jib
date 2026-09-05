@@ -15,6 +15,7 @@ import { getSession } from "@/lib/auth/session";
 import { chatCompletion } from "@/lib/nvidia-ai";
 import { POST } from "@/app/api/transactions/parse/route";
 import { MAX_TRANSACTION_TEXT_LENGTH } from "@/lib/limits";
+import { TRANSACTION_PARSE_USER_RULE } from "@/lib/rate-limit";
 
 const mockedGetSession = vi.mocked(getSession);
 const mockedChatCompletion = vi.mocked(chatCompletion);
@@ -118,4 +119,42 @@ describe("POST /api/transactions/parse - AI provider failure", () => {
     });
     expect(row).not.toBeNull();
   });
+});
+
+// Batch mode (components/transactions/batch-add-transaction-form.tsx) calls
+// this exact route once per row, unmodified - no separate rate-limit rule,
+// no bypass. This proves TRANSACTION_PARSE_USER_RULE (lib/rate-limit.ts)
+// still fires past its limit for a single user regardless of how many
+// individual requests that user's client sends, batch or otherwise -
+// batch mode gets no more AI-call budget than the single-transaction flow
+// already had.
+describe("POST /api/transactions/parse - rate limiting (what batch mode relies on)", () => {
+  let userId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-PARSE-ROUTE-RATE-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    userId = user.id;
+    mockedGetSession.mockResolvedValue(asSession(userId));
+  });
+
+  afterAll(async () => {
+    await prisma.user.delete({ where: { id: userId } });
+  });
+
+  it("allows exactly TRANSACTION_PARSE_USER_RULE.limit calls for one user, then 429s the next one", async () => {
+    // Deterministic bank-sms fast path (see TEJARAT_SMS above) - no AI call,
+    // so hammering this doesn't depend on lib/nvidia-ai being reachable.
+    for (let i = 0; i < TRANSACTION_PARSE_USER_RULE.limit; i++) {
+      const res = await POST(makeRequest({ text: TEJARAT_SMS }));
+      expect(res.status).toBe(200);
+    }
+
+    const limited = await POST(makeRequest({ text: TEJARAT_SMS }));
+    expect(limited.status).toBe(429);
+    const data = await limited.json();
+    expect(typeof data.retryAfterSeconds).toBe("number");
+    expect(data.retryAfterSeconds).toBeGreaterThan(0);
+  }, 30000);
 });

@@ -8,6 +8,7 @@ export interface CategoryComparison {
   currentAmount: number;
   percentChange: number | null; // null when previousAmount is 0 and currentAmount is 0
   isIncrease: boolean;
+  isEssential: boolean;
 }
 
 export interface MonthlyComparisonResult {
@@ -106,10 +107,10 @@ export async function getComparison(
   const categoryRecords = categoryIds.size
     ? await prisma.category.findMany({
         where: { id: { in: [...categoryIds] } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, isEssential: true },
       })
     : [];
-  const nameById = new Map(categoryRecords.map((c) => [c.id, c.name]));
+  const recordById = new Map(categoryRecords.map((c) => [c.id, c]));
 
   const categories: CategoryComparison[] = [];
   let totalPrevious = 0;
@@ -123,12 +124,17 @@ export async function getComparison(
 
     if (previousAmount === 0 && currentAmount === 0) continue;
 
+    const record = recordById.get(categoryId);
     categories.push({
-      category: nameById.get(categoryId) ?? "نامشخص",
+      category: record?.name ?? "نامشخص",
       previousAmount,
       currentAmount,
       percentChange: computePercentChange(previousAmount, currentAmount),
       isIncrease: currentAmount > previousAmount,
+      // Same default as Category.isEssential's own schema default (prisma/schema.prisma) -
+      // record should always be found since categoryIds is derived from these same rows,
+      // this is only a defensive fallback.
+      isEssential: record?.isEssential ?? true,
     });
   }
 

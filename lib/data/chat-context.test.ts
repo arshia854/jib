@@ -28,6 +28,7 @@ async function makeUserWithAccount(label: string) {
 async function cleanup(userId: number) {
   await prisma.transaction.deleteMany({ where: { userId } });
   await prisma.spendingSummaryCache.deleteMany({ where: { userId } });
+  await prisma.goal.deleteMany({ where: { userId } });
   await prisma.category.deleteMany({ where: { userId } });
   await prisma.financeAccount.deleteMany({ where: { userId } });
   await prisma.user.delete({ where: { id: userId } });
@@ -123,5 +124,66 @@ describe("getFinancialContextSummary - Phase 10 additions", () => {
     expect(context).toContain("هزینه تکرارشونده‌ای شناسایی نشد");
     expect(context).toContain("تراکنش‌های غیرعادی این ماه");
     expect(context).toContain("تراکنش غیرعادی‌ای شناسایی نشد");
+  });
+});
+
+// Goals were previously invisible to the chat assistant - this closes that
+// gap the same way Phase 10 did for assets. Focused on the prompt text
+// actually showing up, not the feasibility math itself (already covered by
+// lib/goals/feasibility.test.ts).
+describe("getFinancialContextSummary - goals integration", () => {
+  let noGoalUserId: number;
+  let withGoalUserId: number;
+
+  beforeAll(async () => {
+    const noGoal = await makeUserWithAccount("NO-GOAL");
+    noGoalUserId = noGoal.userId;
+
+    const withGoal = await makeUserWithAccount("WITH-GOAL");
+    withGoalUserId = withGoal.userId;
+    const farFutureDeadline = new Date(currentRange.start.getFullYear() + 5, 0, 1);
+    await prisma.goal.create({
+      data: {
+        userId: withGoalUserId,
+        name: "سفر شمال تست",
+        category: "travel",
+        targetAmount: 10000000,
+        initialAmount: 2000000,
+        deadline: farFutureDeadline,
+        status: "active",
+      },
+    });
+    // An achieved goal - should never show up in the prompt (no ongoing
+    // feasibility to report on, see formatGoalLines' own doc comment).
+    await prisma.goal.create({
+      data: {
+        userId: withGoalUserId,
+        name: "هدف محقق‌شده تست",
+        category: "other",
+        targetAmount: 5000000,
+        initialAmount: 5000000,
+        deadline: farFutureDeadline,
+        status: "achieved",
+      },
+    });
+  });
+
+  afterAll(async () => {
+    await cleanup(noGoalUserId);
+    await cleanup(withGoalUserId);
+  });
+
+  it("shows the empty-state note when the user has no active goals", async () => {
+    const context = await getFinancialContextSummary(noGoalUserId);
+
+    expect(context).toContain("اهداف مالی کاربر:");
+    expect(context).toContain("هدف مالی فعالی تعریف نشده");
+  });
+
+  it("lists an active goal with its target/saved/deadline/feasibility, and omits achieved goals", async () => {
+    const context = await getFinancialContextSummary(withGoalUserId);
+
+    expect(context).toContain("سفر شمال تست: هدف ۱۰٬۰۰۰٬۰۰۰ تومان، ۲٬۰۰۰٬۰۰۰ تومان جمع‌شده");
+    expect(context).not.toContain("هدف محقق‌شده تست");
   });
 });
