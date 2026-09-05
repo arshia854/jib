@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { getActualMonthlyAverage, computeGoalFeasibility, type GoalFeasibility } from "@/lib/goals/feasibility";
+import { getGoalFeasibilityContext, computeGoalFeasibility, type GoalFeasibility } from "@/lib/goals/feasibility";
 
 type PrismaClient = typeof prisma;
 
@@ -52,13 +52,19 @@ export async function listGoalsWithFeasibility(
   userId: number,
   client: PrismaClient = prisma
 ): Promise<GoalWithFeasibility[]> {
-  const [goals, actualMonthlyAverage] = await Promise.all([
+  const [goals, context] = await Promise.all([
     client.goal.findMany({ where: { userId }, orderBy: { deadline: "asc" } }),
-    getActualMonthlyAverage(userId, undefined, client),
+    getGoalFeasibilityContext(userId, client),
   ]);
 
   const sorted = [...goals].sort((a, b) => Number(a.status !== "active") - Number(b.status !== "active"));
 
+  // context.availableBalancePerActiveGoal is already the user's whole
+  // current balance split evenly across their active goals (see that
+  // field's own doc comment on lib/goals/feasibility.ts's
+  // GoalFeasibilityContext for why, and why the split itself lives there
+  // rather than here) - an already-achieved/abandoned goal isn't competing
+  // for that pool, so it gets 0 instead of a share.
   return sorted.map((goal) => ({
     ...goal,
     feasibility: computeGoalFeasibility({
@@ -68,8 +74,10 @@ export async function listGoalsWithFeasibility(
       // caller passes 0 (see lib/goals/feasibility.ts's own doc comment on
       // this input, and why it's still a separate parameter).
       alreadySaved: 0,
+      availableBalance: goal.status === "active" ? context.availableBalancePerActiveGoal : 0,
       deadline: goal.deadline,
-      actualMonthlyAverage,
+      actualMonthlyAverage: context.actualMonthlyAverage,
+      incomeRegularity: context.incomeRegularity,
     }),
   }));
 }

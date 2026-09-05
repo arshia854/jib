@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { getGoal, GoalNotFoundError } from "@/lib/data/goals";
-import { getActualMonthlyAverage, computeGoalFeasibility } from "@/lib/goals/feasibility";
+import { getGoalFeasibilityContext, computeGoalFeasibility } from "@/lib/goals/feasibility";
 import { generateGoalStrategy } from "@/lib/goals/strategy";
 import { checkRateLimit, rateLimitResponse, GOAL_STRATEGY_USER_RULE } from "@/lib/rate-limit";
 import { reportError } from "@/lib/observability/report-error";
@@ -54,14 +54,22 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
   // Same feasibility computation listGoalsWithFeasibility (lib/data/goals.ts)
   // runs per goal - reused here rather than re-deriving a second, possibly
   // drifting version of it, just scoped to this one goal instead of the
-  // user's whole list.
-  const actualMonthlyAverage = await getActualMonthlyAverage(session.userId);
+  // user's whole list. getGoalFeasibilityContext's own
+  // availableBalancePerActiveGoal already apportions the user's whole
+  // balance across their active goals identically to what
+  // listGoalsWithFeasibility shows for this same goal - this route has no
+  // sibling-goal list of its own, but doesn't need one, since
+  // activeGoalCount/the resulting per-goal share are computed inside
+  // getGoalFeasibilityContext, not derived from a list the caller fetched.
+  const context = await getGoalFeasibilityContext(session.userId);
   const feasibility = computeGoalFeasibility({
     targetAmount: goal.targetAmount,
     initialAmount: goal.initialAmount,
     alreadySaved: 0,
+    availableBalance: goal.status === "active" ? context.availableBalancePerActiveGoal : 0,
     deadline: goal.deadline,
-    actualMonthlyAverage,
+    actualMonthlyAverage: context.actualMonthlyAverage,
+    incomeRegularity: context.incomeRegularity,
   });
 
   try {

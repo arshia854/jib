@@ -48,6 +48,68 @@ describe("listGoalsWithFeasibility", () => {
   });
 });
 
+// getGoalFeasibilityContext's own describe block (lib/goals/
+// feasibility.test.ts) already covers the availableBalancePerActiveGoal
+// arithmetic itself in isolation; this confirms listGoalsWithFeasibility
+// actually reads that shared value (rather than re-deriving its own,
+// possibly-drifting version of it - the bug app/api/goals/[id]/strategy/
+// route.ts had before it was pointed at the same shared context field, see
+// that route's own test file for the equivalent check on that surface).
+describe("listGoalsWithFeasibility - availableBalance apportionment across active goals", () => {
+  let userId: number;
+  let activeGoalAId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-GOALS-DATA-BALANCE-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    userId = user.id;
+
+    await prisma.financeAccount.create({
+      data: { userId, name: "حساب تست", type: "cash", initialBalance: 9_000_000 },
+    });
+
+    const goalA = await prisma.goal.create({
+      data: { userId, name: "فعال ۱", category: "other", targetAmount: 60_000_000, deadline: daysFromNow(180) },
+    });
+    activeGoalAId = goalA.id;
+    await prisma.goal.create({
+      data: { userId, name: "فعال ۲", category: "other", targetAmount: 30_000_000, deadline: daysFromNow(90) },
+    });
+    await prisma.goal.create({
+      data: { userId, name: "رهاشده", category: "other", targetAmount: 5_000_000, deadline: daysFromNow(30), status: "abandoned" },
+    });
+  });
+
+  afterAll(async () => {
+    await prisma.goal.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+  });
+
+  it("attributes a 9,000,000 / 2-active-goals = 4,500,000 share to an active goal, not the whole balance", async () => {
+    const goals = await listGoalsWithFeasibility(userId);
+    const goalA = goals.find((g) => g.id === activeGoalAId)!;
+
+    const expectedWithCorrectSplit = (60_000_000 - 4_500_000) / goalA.feasibility.monthsRemaining;
+    const expectedWithFullBalance = (60_000_000 - 9_000_000) / goalA.feasibility.monthsRemaining;
+    expect(goalA.feasibility.requiredMonthlyAmount).toBeCloseTo(expectedWithCorrectSplit, 6);
+    expect(goalA.feasibility.requiredMonthlyAmount).not.toBeCloseTo(expectedWithFullBalance, 6);
+  });
+
+  it("attributes no balance share to the abandoned goal", async () => {
+    const goals = await listGoalsWithFeasibility(userId);
+    const abandoned = goals.find((g) => g.name === "رهاشده")!;
+
+    // No availableBalance at all -> requiredMonthlyAmount is the raw
+    // targetAmount / monthsRemaining, unaffected by the account balance.
+    expect(abandoned.feasibility.requiredMonthlyAmount).toBeCloseTo(
+      5_000_000 / abandoned.feasibility.monthsRemaining,
+      6
+    );
+  });
+});
+
 describe("updateGoal / deleteGoal - not found", () => {
   let userId: number;
 
