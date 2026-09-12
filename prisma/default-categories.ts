@@ -13,6 +13,14 @@ export interface DefaultCategorySeed {
   // for income categories - always `true` there, just the harmless schema
   // default, so nothing downstream has to special-case income type.
   isEssential: boolean;
+  // Internal transfer between the user's own FinanceAccounts (see
+  // Transaction.transferGroupId, prisma/schema.prisma) rather than real
+  // spending/income - excluded from every spending/income aggregation that
+  // filters on Category.isTransfer (lib/analytics/spending-summary.ts,
+  // lib/reports/*, lib/goals/feasibility.ts). Optional/omitted for every
+  // category that existed before this flag was introduced - same harmless
+  // `false` schema default as isEssential above, just inverted.
+  isTransfer?: boolean;
   children?: { name: string; icon: string; color: string; isEssential: boolean }[];
 }
 
@@ -158,6 +166,16 @@ export const DEFAULT_CATEGORIES: DefaultCategorySeed[] = [
   {
     name: "سایر هزینه‌ها", icon: "🔖", color: "#94A3B8", type: "expense", isEssential: false,
   },
+  // Internal transfer between the user's own FinanceAccounts (see
+  // Transaction.transferGroupId, prisma/schema.prisma) - not real spending,
+  // so isEssential: true for the same "never surfaced as reducible
+  // spending" reason as «پس‌انداز و سرمایه‌گذاری» above. isTransfer: true
+  // is what actually excludes it from every spending/income aggregation
+  // that already filters on that flag (see lib/analytics/spending-summary.ts,
+  // lib/reports/*, lib/goals/feasibility.ts) - isEssential alone wouldn't.
+  {
+    name: "انتقال بین حساب‌ها", icon: "🔁", color: "#94A3B8", type: "expense", isEssential: true, isTransfer: true,
+  },
 
   // ---------- INCOME ----------
   { name: "حقوق", icon: "💰", color: "#10B981", type: "income", isEssential: true },
@@ -172,4 +190,11 @@ export const DEFAULT_CATEGORIES: DefaultCategorySeed[] = [
   { name: "اجاره‌ی ملک", icon: "🏠", color: "#10B981", type: "income", isEssential: true },
   { name: "هدیه", icon: "🎁", color: "#10B981", type: "income", isEssential: true },
   { name: "سایر درآمدها", icon: "➕", color: "#10B981", type: "income", isEssential: true },
+  // Income-side counterpart of the expense transfer category above - same
+  // name (schema allows it: @@unique([name, type]) is keyed on the pair,
+  // not name alone), same isTransfer purpose. Note: unlike "سایر هزینه‌ها"/
+  // "سایر درآمدها" above, no other existing income/expense pair in this
+  // file actually reuses an identical name - see docs/roadmap-status.md's
+  // entry for this phase for that discrepancy.
+  { name: "انتقال بین حساب‌ها", icon: "🔁", color: "#10B981", type: "income", isEssential: true, isTransfer: true },
 ];

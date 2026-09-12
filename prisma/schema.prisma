@@ -177,6 +177,16 @@ model Transaction {
   // transaction first (see updateTransaction) - a slow-finishing background
   // job must never clobber a manual correction.
   enrichmentStatus String?
+  // Links the two rows (one expense, one income) that together make up a
+  // single internal transfer between the user's own FinanceAccounts - e.g.
+  // moving money from a checking account to a savings account is one
+  // expense Transaction on the source account and one income Transaction
+  // on the destination account, both sharing the same transferGroupId so
+  // they can be recognized as a pair rather than counted as real
+  // spending/income. Null for every regular income/expense Transaction -
+  // the vast majority of rows, and the only value that existed before this
+  // field was added.
+  transferGroupId  String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -194,6 +204,7 @@ model Transaction {
   @@index([type])
   @@index([categoryId])
   @@index([accountId])
+  @@index([transferGroupId])
   // Phase 17 (docs/roadmap-status.md): serves
   // lib/data/accounts.ts's getTotalBalance() -
   // transaction.groupBy({ by: ["accountId", "type"], where: { userId },
