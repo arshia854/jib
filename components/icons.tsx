@@ -326,6 +326,34 @@ export function LockIcon(props: IconProps) {
   );
 }
 
+// Phase A3 (docs/roadmap-status.md savings roadmap): two opposing
+// horizontal arrows - the internal-transfer entry point (accounts-manager.tsx)
+// and the merged transfer list row (transfer-row.tsx) both use this rather
+// than reusing ArrowUpIcon/ArrowDownIcon, which already mean "income"/
+// "expense" everywhere else in this codebase (transaction-row.tsx, stat-card.tsx) -
+// a transfer is neither, and reusing either would misleadingly imply it is.
+export function TransferIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 8h13M13 4l4 4-4 4" />
+      <path d="M20 16H7M11 12l-4 4 4 4" />
+    </svg>
+  );
+}
+
+// Savings-specific dashboard card icon (savings-card.tsx) - distinct from
+// WalletIcon (already balance-card.tsx's "total balance" icon) so the two
+// gradient hero cards aren't visually identical at a glance.
+export function PiggyBankIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 13a5 5 0 0 1 5-5h6.5a4.5 4.5 0 0 1 3 7.87V19h-3v-2H9v2H6v-3.3A5 5 0 0 1 4 13Z" />
+      <circle cx="15" cy="10.5" r="0.9" fill="currentColor" stroke="none" />
+      <path d="M9 8V6.5M18.5 9.5 21 8" />
+    </svg>
+  );
+}
+
 // Google's official four-color "G" mark. Per Google's branding guidelines,
 // this must be reproduced as-is (not restyled to the app's monochrome icon
 // set above).
