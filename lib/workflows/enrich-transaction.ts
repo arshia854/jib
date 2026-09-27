@@ -15,27 +15,40 @@
 // the outer function is the sandboxed orchestrator ("use workflow") and
 // must stay limited to plain control flow - see
 // node_modules/workflow/docs/foundations/workflows-and-steps.mdx.
+import { FatalError } from "workflow";
 import { parseTransactionWithAI, type ParsedTransaction } from "@/lib/ai/parse-transaction";
-import { listCategories } from "@/lib/data/categories";
+import { listCategories, toCategoryOptions } from "@/lib/data/categories";
 import { applyTransactionEnrichment, markEnrichmentFailed } from "@/lib/data/transactions";
-import type { CategoryType } from "@/lib/categories";
+import { checkRateLimit, TRANSACTION_PARSE_USER_RULE } from "@/lib/rate-limit";
 import { reportError } from "@/lib/observability/report-error";
 import { ERROR_TYPES } from "@/lib/observability/error-types";
+import { logger } from "@/lib/observability/logger"; // TEMP-LATENCY
+import { getRequestId } from "@/lib/observability/request-context"; // TEMP-LATENCY
 
-export async function enrichTransactionWorkflow(userId: number, transactionId: number, rawInput: string) {
+// `keepDate`: the user picked the transaction's date explicitly (see
+// app/api/transactions/route.ts's dateIsManual) - rawInput carries no trace
+// of that pick, so the AI's own date (usually just "today") must not replace
+// it. Optional, so runs started before this argument existed replay unchanged.
+export async function enrichTransactionWorkflow(
+  userId: number,
+  transactionId: number,
+  rawInput: string,
+  options: { keepDate?: boolean } = {}
+) {
   "use workflow";
 
   try {
     const parsed = await runAiParse(userId, rawInput);
-    await applyEnrichment(userId, transactionId, parsed);
+    await applyEnrichment(userId, transactionId, parsed, options.keepDate === true);
   } catch (error) {
     // Reached once runAiParse's own retries are exhausted, or if
     // applyEnrichment itself throws (e.g. the AI-resolved category no
-    // longer exists - see applyTransactionEnrichment's own comment). Either
-    // way the quick-submit's deterministic best-guess values are left
-    // standing; this just flips the row out of "pending" so the UI stops
-    // showing a spinner that will never resolve.
-    await recordFailure(userId, transactionId, error);
+    // longer exists - see applyTransactionEnrichment's own comment). The
+    // quick-submit's deterministic best-guess values are left standing
+    // except for markEnrichmentFailed's own narrow heuristic correction
+    // (see its own comment) - this just flips the row out of "pending" so
+    // the UI stops showing a spinner that will never resolve.
+    await recordFailure(userId, transactionId, rawInput, error);
   }
 }
 
@@ -46,30 +59,85 @@ export async function enrichTransactionWorkflow(userId: number, transactionId: n
 async function runAiParse(userId: number, rawInput: string): Promise<ParsedTransaction> {
   "use step";
 
-  const categories = await listCategories(userId);
-  const categoryById = new Map(categories.map((c) => [c.id, c]));
-  const categoryOptions = categories.map((c) => ({
-    name: c.name,
-    type: c.type as CategoryType,
-    parentName: c.parentId ? categoryById.get(c.parentId)?.name : undefined,
-  }));
+  // Defense-in-depth re-check of the same per-user AI-cost budget POST
+  // /api/transactions already enforces before start(): the generated
+  // /.well-known/workflow/* routes aren't covered by proxy.ts's matcher, so
+  // a run started by calling them directly never passed through that check
+  // (see docs/deploy-runbook.md §4). This only caps AI spend - it doesn't
+  // stop a direct caller from naming another user's userId/transactionId.
+  // FatalError, not a plain Error: a plain throw would be retried (default
+  // 3x), each retry consuming another unit of this same budget for nothing.
+  // Either way the outer try/catch routes it to recordFailure ->
+  // markEnrichmentFailed, same terminal outcome as the route's own
+  // rate-limited branch.
+  const limit = checkRateLimit(`transaction-parse:user:${userId}`, TRANSACTION_PARSE_USER_RULE);
+  if (!limit.allowed) {
+    throw new FatalError("Transaction enrichment skipped: per-user AI parse rate limit exceeded");
+  }
 
-  return parseTransactionWithAI(userId, rawInput, categoryOptions);
+  const listCategoriesStartedAt = Date.now(); // TEMP-LATENCY
+  const categories = await listCategories(userId);
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "workflows/enrich-transaction", // TEMP-LATENCY
+      userId, // TEMP-LATENCY
+      step: "listCategories", // TEMP-LATENCY
+      duration: Date.now() - listCategoriesStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "enrichTransactionWorkflow step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
+  const categoryOptions = toCategoryOptions(categories);
+
+  // chatCompletion duration + completionTokens are already logged one layer
+  // down, inside parseTransactionWithAI itself ("AI call succeeded", see
+  // lib/ai/parse-transaction.ts) - not duplicated here, just this call's
+  // own total wall time. // TEMP-LATENCY
+  const parseStartedAt = Date.now(); // TEMP-LATENCY
+  const parsed = await parseTransactionWithAI(userId, rawInput, categoryOptions);
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "workflows/enrich-transaction", // TEMP-LATENCY
+      userId, // TEMP-LATENCY
+      step: "parseTransactionWithAI", // TEMP-LATENCY
+      duration: Date.now() - parseStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "enrichTransactionWorkflow step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
+  return parsed;
 }
 
-async function applyEnrichment(userId: number, transactionId: number, parsed: ParsedTransaction) {
+async function applyEnrichment(userId: number, transactionId: number, parsed: ParsedTransaction, keepDate: boolean) {
   "use step";
 
+  const applyEnrichmentStartedAt = Date.now(); // TEMP-LATENCY
   await applyTransactionEnrichment(userId, transactionId, {
     amount: parsed.amount,
     type: parsed.type,
     categoryName: parsed.category,
     description: parsed.description,
-    date: new Date(parsed.date),
+    date: keepDate ? undefined : new Date(parsed.date),
+    // Only ever set alongside parsed.category already having fallen back to
+    // resolveFallbackCategory(type) ("سایر...") - see parseTransactionWithAI's
+    // own comment on suggestedCategory being "strictly additive". Passed
+    // through as-is; applyTransactionEnrichment/schema.prisma decide what
+    // happens with it from here.
+    suggestedCategory: parsed.suggestedCategory,
   });
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "workflows/enrich-transaction", // TEMP-LATENCY
+      userId, // TEMP-LATENCY
+      step: "applyEnrichment", // TEMP-LATENCY
+      duration: Date.now() - applyEnrichmentStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "enrichTransactionWorkflow step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
 }
 
-async function recordFailure(userId: number, transactionId: number, error: unknown) {
+async function recordFailure(userId: number, transactionId: number, rawInput: string, error: unknown) {
   "use step";
 
   reportError({
@@ -80,5 +148,5 @@ async function recordFailure(userId: number, transactionId: number, error: unkno
     error,
     context: { transactionId },
   });
-  await markEnrichmentFailed(userId, transactionId);
+  await markEnrichmentFailed(userId, transactionId, rawInput);
 }

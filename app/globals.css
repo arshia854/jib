@@ -98,6 +98,29 @@
   --border: rgba(255, 255, 255, 0.1);
 }
 
+/* Light theme - see lib/theme.ts / components/settings/theme-toggle.tsx.
+   Set on <html data-theme="light"> by the blocking script in app/layout.tsx
+   (or server-side from the jib-theme cookie); overrides every variable
+   above. Keeps the same #ffd400 brand primary/accent, tuned for WCAG AA
+   contrast against the light --foreground/--background pair. */
+[data-theme="light"] {
+  --background: #ffffff;
+  --surface: #f4f4f6;
+  --foreground: #14141a;
+  --primary-bg: #fff8dc;
+  --primary-subtle: #fff1b8;
+  --primary-soft: #b8860b;
+  --primary: #ffd400;
+  --primary-dark: #e6bf00;
+  --primary-darker: #cca800;
+  --on-primary: #000000;
+  --accent: #ffd400;
+  --success: #16a34a;
+  --warning: #dc2626;
+  --muted: #6b7280;
+  --border: rgba(0, 0, 0, 0.1);
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-surface: var(--surface);
@@ -179,4 +202,61 @@ body {
   .reveal.pre-reveal {
     opacity: 1;
   }
+}
+
+/* Hero floating mock-UI cards (see components/landing/phone-mockup.tsx):
+   a one-shot "settle in" entrance chained into an infinite gentle drift, so
+   the cards feel alive rather than a static screenshot. Per-card stagger is
+   set by each instance via inline `animation-delay` (a two-value list
+   matching the two animation-names below) - never via the `animation`
+   shorthand, so this media query can still zero out animation-name
+   regardless of what delay an instance sets (same technique as
+   .reveal/.reveal.is-visible above). */
+@keyframes card-settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes card-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+.hero-floating-card {
+  opacity: 0;
+  animation-name: card-settle-in, card-float;
+  animation-duration: 0.6s, 5s;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1), ease-in-out;
+  animation-iteration-count: 1, infinite;
+  animation-fill-mode: both, none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-floating-card {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Landing hero backdrop (components/landing/hero-section.tsx): a faint grid
+   drawn in the theme's own --border token, so it follows light/dark without
+   a per-theme override. The fade-out toward the edges is a Tailwind
+   mask-radial-* utility on the element itself. */
+.landing-grid {
+  background-image:
+    linear-gradient(to right, var(--border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+  background-size: 44px 44px;
 }

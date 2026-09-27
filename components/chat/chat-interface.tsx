@@ -117,7 +117,7 @@ export function ChatInterface({
       if (targetConversationId === null) {
         const created = await fetch("/api/chat/conversations", { method: "POST" });
         const createdData = await created.json().catch(() => ({}));
-        if (!created.ok) throw new Error(createdData.error || "خطا در ساخت گفتگو.");
+        if (!created.ok) throw new Error(createdData.error || "گفتگو ساخته نشد، دوباره تلاش کن.");
         targetConversationId = createdData.conversation.id as number;
         setActiveConversationId(targetConversationId);
         createdConversation = true;
@@ -131,7 +131,7 @@ export function ChatInterface({
 
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "خطا در ارتباط با دستیار.");
+        throw new Error(data.error || "ارتباط با دستیار برقرار نشد، دوباره تلاش کن.");
       }
 
       // suggest_transaction responses come back as a single JSON object
@@ -170,7 +170,7 @@ export function ChatInterface({
       }
       delivered = true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+      setError(err instanceof Error ? err.message : "یه مشکلی پیش اومد، دوباره تلاش کن.");
       setMessages((prev) => prev.filter((m) => m.id !== assistantId));
     } finally {
       setSending(false);
@@ -265,7 +265,7 @@ export function ChatInterface({
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "خطا در ثبت تراکنش.");
+      if (!res.ok) throw new Error(data.error || "تراکنش ثبت نشد، دوباره تلاش کن.");
 
       setMessages((prev) => [
         ...updateSuggestion(prev, messageId, { status: "confirmed" }),
@@ -279,7 +279,7 @@ export function ChatInterface({
       setMessages((prev) =>
         updateSuggestion(prev, messageId, {
           status: "error",
-          error: err instanceof Error ? err.message : "خطای ناشناخته رخ داد.",
+          error: err instanceof Error ? err.message : "یه مشکلی پیش اومد، دوباره تلاش کن.",
         })
       );
     }

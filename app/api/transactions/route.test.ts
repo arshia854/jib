@@ -5,7 +5,13 @@ import { prisma } from "@/lib/prisma";
 vi.mock("@/lib/auth/session", () => ({
   getSession: vi.fn(),
 }));
+// Only reached by a quick submit - lets those tests see what the background
+// enrichment workflow would have been started with.
+vi.mock("workflow/api", () => ({
+  start: vi.fn(async () => ({})),
+}));
 
+import { start } from "workflow/api";
 import { getSession } from "@/lib/auth/session";
 import { GET, POST } from "@/app/api/transactions/route";
 import {
@@ -19,6 +25,7 @@ import {
 } from "@/lib/limits";
 
 const mockedGetSession = vi.mocked(getSession);
+const mockedStart = vi.mocked(start);
 
 function makeRequest(body: unknown): NextRequest {
   return new NextRequest("http://localhost/api/transactions", {
@@ -310,6 +317,74 @@ describe("POST /api/transactions - idempotency (SEC-10)", () => {
 
     const rows = await prisma.transaction.findMany({ where: { userId, idempotencyKey: key } });
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe("POST /api/transactions - quick submit enrichment kickoff", () => {
+  let userId: number;
+  let accountId: number;
+  const categoryName = "دسته تست quick route";
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-TRANSACTIONS-ROUTE-QUICK-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    userId = user.id;
+    mockedGetSession.mockResolvedValue(asSession(userId));
+
+    const account = await prisma.financeAccount.create({ data: { userId, name: "حساب تست", type: "cash" } });
+    accountId = account.id;
+    await prisma.category.create({
+      data: { userId, name: categoryName, icon: "🧪", color: "#3B82F6", type: "expense" },
+    });
+  });
+
+  afterAll(async () => {
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.category.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+  });
+
+  function quickBody(overrides: Record<string, unknown> = {}) {
+    return {
+      amount: 50000,
+      type: "expense",
+      category: categoryName,
+      accountId,
+      rawInput: "۵۰ هزار قهوه",
+      date: "2026-09-25",
+      quick: true,
+      ...overrides,
+    };
+  }
+
+  it("tells the workflow to keep a hand-picked date", async () => {
+    mockedStart.mockClear();
+    const res = await POST(makeRequest(quickBody({ dateIsManual: true })));
+    expect(res.status).toBe(201);
+    const { transaction } = await res.json();
+
+    expect(mockedStart).toHaveBeenCalledWith(expect.anything(), [
+      userId,
+      transaction.id,
+      "۵۰ هزار قهوه",
+      { keepDate: true },
+    ]);
+  });
+
+  it("lets the workflow set the date when it wasn't picked by hand", async () => {
+    mockedStart.mockClear();
+    const res = await POST(makeRequest(quickBody()));
+    expect(res.status).toBe(201);
+    const { transaction } = await res.json();
+
+    expect(mockedStart).toHaveBeenCalledWith(expect.anything(), [
+      userId,
+      transaction.id,
+      "۵۰ هزار قهوه",
+      { keepDate: false },
+    ]);
   });
 });
 

@@ -2352,3 +2352,125 @@ like a product call, otherwise use your judgment" allowance for the rate-limit n
 not confirmed with the project owner. The choice to always show the strategy button (relabeled
 "دریافت مجدد استراتژی" post-fetch) rather than hiding it once a strategy exists was also this
 session's own call, reasoned through above but not put to the project owner directly.
+
+## Phase 20: Light/Dark/System Theme Toggle
+
+Added a `jib-theme` cookie ('system' | 'light' | 'dark', default 'system') as the only persistence
+mechanism - a device preference, so deliberately no `User` column/migration and no new npm
+dependency (no next-themes). `app/globals.css` gained a `[data-theme="light"]` override block
+next to the existing (now implicitly dark) `:root` variables. `app/layout.tsx` reads the cookie
+server-side for an explicit light/dark choice and additionally carries a blocking inline `<head>`
+script (must stay inline/non-deferred - resolves 'system'/missing-cookie via `matchMedia` before
+first paint, to avoid a flash of the wrong theme). New `components/settings/theme-toggle.tsx`
+(3-segment client pill) and a new "ظاهر برنامه" section in `app/app/settings/page.tsx`, styled
+after the existing `AssetDisplayToggle` section.
+
+Audited every hardcoded-color hit this phase's own grep turned up (13 component files) against the
+new light theme by hand in-browser - all confirmed fine as-is: the black-gradient hero cards
+(`balance-card.tsx`, `assets-hero-card.tsx`) and the landing-page phone mockup are an intentional
+always-dark accent design, not theme bugs; `text-white` on `bg-warning`/`bg-success` buttons and on
+arbitrary user-chosen category-color swatches keeps sufficient contrast in both themes. No further
+component changes made.
+
+- `npm run test`: no regressions (this phase touched no test-covered logic).
+- `git diff package.json`: empty - no new dependency.
+
+## Phase 20b: Fixed migration-ordering bug in `20260822213426_add_user_role_check_constraint`
+
+Separate, unrelated fix surfaced by Phase 20's own baseline test run: that migration's
+`migration.sql` had `showBalanceInAssets` added to its `CREATE TABLE`/`INSERT`/`SELECT` (via
+some other uncommitted work on the branch), a column that migration predates - it's only genuinely
+introduced three migrations later, in `20260825171540_add_assets`. Replayed in timestamp order (as
+`global-setup.ts` does for the ephemeral test DB), the premature `SELECT "showBalanceInAssets" ...
+FROM "User"` failed outright ("no such column"), aborting the entire suite at 0/965 before this fix.
+
+Fix: removed `showBalanceInAssets` from all three places in that one file, restoring it to its
+committed (`f079e04`) state - confirmed via `git diff` against HEAD being empty afterward. Nothing
+else touched; `20260825171540_add_assets` (which still introduces the column correctly, via its own
+`DEFAULT false`) was left as-is. Neither migration has been applied to the live Turso DB.
+
+- `npm run test`: **86/86 files, 1004/1004 tests passing** - new baseline (supersedes the previous
+  85/86, 960/965-with-5-known-failures figure; those 5 `suggested-category` route failures are gone
+  too, apparently resolved by other uncommitted work on this branch, not by this fix).
+- `npm run lint`: unchanged - same 3 pre-existing warnings as prior phases.
+
+## Internal Account Transfers — Schema + Default Categories (Phase A1) — 2026-09-11
+
+Schema-only groundwork for internal account-to-account transfers, the first phase of the savings
+roadmap. No API, no UI, no live-DB write - all four deliverables below stop at "generated and
+reviewed locally."
+
+**`Transaction.transferGroupId String?`** (`prisma/schema.prisma`) - links the two rows (one
+expense, one income) that make up a single internal transfer; null for every existing/regular
+transaction. Doc comment follows the `idempotencyKey`/`enrichmentStatus` style already in the file.
+Added `@@index([transferGroupId])` alongside it, same pattern as this model's other indexes.
+
+**Two new `DefaultCategory` rows** (`prisma/default-categories.ts`), both named "انتقال بین
+حساب‌ها", `isTransfer: true`, `isEssential: true` (matches `پس‌انداز و سرمایه‌گذاری`'s reasoning -
+not real spending/income, must never be surfaced as reducible/discretionary). Icon `🔁` (distinct
+from `🔄`, already used for `اشتراک نرم‌افزار و سرویس`, to avoid conflating "recurring subscription"
+with "account transfer"); color `#94A3B8` for the expense side (neutral/utility, matching `سایر
+هزینه‌ها`'s "not really a spending category" gray rather than any of the varied per-category
+expense colors) and `#10B981` for the income side (every existing income top-level category shares
+this exact green - confirmed by inspection, not assumed). `DefaultCategorySeed`'s `isTransfer?:
+boolean` field added to support this (optional/omitted for every pre-existing entry, same harmless
+default as the schema column). `prisma/seed.ts`'s upsert updated to actually pass `isTransfer`
+through (it previously only carried `icon`/`color`/`isEssential` - the field would otherwise never
+reach `DefaultCategory` even after this data change).
+
+**Discrepancy found in the task's own premise, reported per its own instruction rather than forced:**
+the task described the Persian naming convention as "reusing a shared name across the income/expense
+pair, per existing pairs like `سایر هزینه‌ها`/`سایر درآمدها`" - checked, and that's not accurate:
+those two names actually differ (هزینه‌ها vs درآمدها), and no existing pair among all 82 current
+category names anywhere in `DEFAULT_CATEGORIES` reuses an identical string across both types. Used
+the identical name for both new rows anyway, since the task specified it explicitly and the schema
+supports it cleanly (`@@unique([name, type])` is keyed on the pair, not name alone) - just flagging
+that this specific pairing has no actual precedent in the current data, unlike the rest of the
+approach.
+
+**Migration** - generated fully offline via `migrate diff` per `AGENTS.md`'s process (no DB
+connection attempted or needed); saved as
+`prisma/migrations/20260911104341_add_transaction_transfer_group_id/migration.sql`:
+```sql
+-- AlterTable
+ALTER TABLE "Transaction" ADD COLUMN "transferGroupId" TEXT;
+
+-- CreateIndex
+CREATE INDEX "Transaction_transferGroupId_idx" ON "Transaction"("transferGroupId");
+```
+One subtlety worth recording: this schema had already picked up staged-but-uncommitted changes
+from other work on this branch (the `suggestedCategory*` fields) before this session started, so
+diffing against `git show HEAD:prisma/schema.prisma` would have bundled that
+unrelated, already-in-progress change into this migration's SQL. Diffed against `git show
+:prisma/schema.prisma` (the index/staged version) instead - confirmed via `diff` that this produces
+exactly and only the `transferGroupId` addition, nothing else. **Not applied to the live Turso DB or
+any local/test DB** - `npx prisma generate` was run (schema-only, no DB connection) to refresh the
+generated client so the rest of the codebase type-checks against the new field, but no migration
+was executed anywhere.
+
+**Backfill script** (`prisma/backfill-transfer-categories.ts`, written, not run) - inserts the two
+new categories into every existing user's own `Category` rows (not `DefaultCategory`, which is the
+global template). No existing script does exactly this shape: `prisma/backfill-categories.ts` only
+touches users with zero `Category` rows, `prisma/refresh-user-categories.ts` wipes and reseeds a
+user's *entire* tree, and `prisma/backfill-category-essentiality.ts` only updates fields on rows a
+user already has - none of them "insert specific new rows into an otherwise-untouched, already-
+populated tree." Followed the closest precedent's shape anyway (dry-run-by-default / `--execute` to
+write, same `@/lib/prisma` Prisma Client connection pattern as its siblings, per-user row counts
+logged, matches on `Category`'s own `@@unique([userId, name, type])` before inserting so a re-run
+only ever inserts what's still missing). Requires the two `DefaultCategory` rows to exist
+first (aborts loudly, zero writes, if either is missing) rather than hardcoding icon/color/
+isEssential values that could drift from whatever actually got seeded.
+
+**Scope held:** only `prisma/schema.prisma`, `prisma/default-categories.ts`, `prisma/seed.ts` (the
+one `isTransfer` passthrough fix), the new migration folder, and the new backfill script were
+touched. No API route, component, or goals/feasibility code touched - those are separate follow-up
+prompts per the task's own instruction. No new npm dependency. No live-DB read or write of any
+kind, migration or otherwise.
+
+- `npm run test`: **86/86 files, 1004/1004 tests passing** - unchanged from the pre-existing
+  baseline recorded just above; this phase's changes are additive-only and touched no test-covered
+  runtime logic.
+- `npx tsc --noEmit`: same pre-existing 8 `BigInt literal` target errors in two files this session
+  never touched (`app/api/assets/route.test.ts`, `lib/prices/get-live-prices.test.ts`) - no new
+  errors from this phase's changes.
+

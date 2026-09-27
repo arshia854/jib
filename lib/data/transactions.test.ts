@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { toJalaali } from "jalaali-js";
 import { prisma } from "@/lib/prisma";
 import { buildMerchantKey, findMerchant } from "@/lib/merchant-lookup";
@@ -8,10 +8,15 @@ import {
   getTransaction,
   deleteTransaction,
   listTransactions,
+  applyTransactionEnrichment,
+  applySuggestedCategory,
+  dismissSuggestedCategory,
+  markEnrichmentFailed,
   TransactionNotFoundError,
   InvalidAccountError,
 } from "@/lib/data/transactions";
 import { DEFAULT_TRANSACTIONS_PAGE_SIZE, MAX_TRANSACTIONS_PAGE_SIZE } from "@/lib/limits";
+import { FALLBACK_INCOME_CATEGORY } from "@/lib/categories";
 
 // Independent re-implementation of lib/analytics/spending-summary.ts's
 // private monthKeyFor() - deliberately not imported, so these tests prove
@@ -307,6 +312,82 @@ describe("createTransaction (source field)", () => {
   });
 });
 
+// Turso latency fix (docs/roadmap-status.md): both branches of
+// createTransaction() used to call `prisma.transaction.create({ data,
+// include: { category: true } })` - re-fetching the exact category row
+// already loaded a few lines above (accountAndCategoryLookup) inside the
+// same function call. Both now create without that include and attach the
+// already-fetched category object by hand - this proves the returned
+// `.category` is still byte-identical to what the old include would have
+// produced, for both the with-asset and without-asset branches.
+describe("createTransaction (category shape - redundant include removal)", () => {
+  let userId: number;
+  let accountId: number;
+  const categoryName = "دسته تست شکل خروجی";
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-CREATE-TRANSACTION-CATEGORY-SHAPE-${Date.now()}` },
+    });
+    userId = user.id;
+
+    const account = await prisma.financeAccount.create({
+      data: { userId, name: "حساب تست شکل خروجی", type: "cash" },
+    });
+    accountId = account.id;
+
+    await prisma.category.create({
+      data: { userId, name: categoryName, icon: "🧪", color: "#444444", type: "expense" },
+    });
+  });
+
+  afterAll(async () => {
+    await prisma.asset.deleteMany({ where: { userId } });
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.category.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$disconnect();
+  });
+
+  it("returns a .category identical to what include: { category: true } would produce (no asset purchase)", async () => {
+    const created = await createTransaction(userId, {
+      amount: 45000,
+      type: "expense",
+      categoryName,
+      accountId,
+      rawInput: "تست شکل خروجی بدون دارایی",
+      date: new Date("2026-08-07"),
+    });
+
+    const viaInclude = await prisma.transaction.findUniqueOrThrow({
+      where: { id: created.id },
+      include: { category: true },
+    });
+    expect(created.category).toEqual(viaInclude.category);
+  });
+
+  it("returns a .category identical to what include: { category: true } would produce (with asset purchase)", async () => {
+    const created = await createTransaction(userId, {
+      amount: 500000,
+      type: "expense",
+      categoryName,
+      accountId,
+      rawInput: "تست شکل خروجی با دارایی",
+      date: new Date("2026-08-07"),
+      assetPurchase: { type: "gold", quantity: 1, purchasePricePerUnit: 500000 },
+    });
+
+    expect(created.asset).not.toBeNull();
+
+    const viaInclude = await prisma.transaction.findUniqueOrThrow({
+      where: { id: created.id },
+      include: { category: true },
+    });
+    expect(created.category).toEqual(viaInclude.category);
+  });
+});
+
 // SEC-10 (docs/roadmap-status.md): idempotency protection on transaction
 // creation, deliberately deferred out of Phase 5 (see that phase's own
 // "Explicitly not touched" note) and implemented here.
@@ -386,6 +467,35 @@ describe("createTransaction (idempotency - SEC-10)", () => {
 
     const rows = await prisma.transaction.findMany({ where: { userId, idempotencyKey: key } });
     expect(rows).toHaveLength(1);
+  });
+
+  // Turso latency fix (docs/roadmap-status.md): createTransaction() used to
+  // read-first (`prisma.transaction.findFirst` by {userId, idempotencyKey})
+  // before ever attempting the insert - a replay never reached
+  // `prisma.transaction.create` at all under that path. Now it goes straight
+  // to the insert attempt and lets the catch block's unique-constraint
+  // handling do the dedup - this proves that shape directly (not just the
+  // end result the test above already covers): exactly one (failing) create
+  // attempt, then exactly one refetch, no upfront read.
+  it("a replay takes exactly one insert-then-refetch path, not a read-first-then-maybe-insert one", async () => {
+    const key = `test-key-${Date.now()}-single-path`;
+    const first = await createTransaction(userId, { ...baseInput, accountId, idempotencyKey: key });
+
+    const createSpy = vi.spyOn(prisma.transaction, "create");
+    const findFirstSpy = vi.spyOn(prisma.transaction, "findFirst");
+
+    const second = await createTransaction(userId, { ...baseInput, accountId, idempotencyKey: key });
+
+    expect(second.id).toBe(first.id);
+    // The insert is actually attempted (and fails on the unique index) - the
+    // old read-first code never reached this call at all for a replay.
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    // Exactly one refetch (the catch block's), not an upfront read plus a
+    // second lookup.
+    expect(findFirstSpy).toHaveBeenCalledTimes(1);
+
+    createSpy.mockRestore();
+    findFirstSpy.mockRestore();
   });
 
   it("scopes the key per-user - the same key string for a different user creates its own row", async () => {
@@ -814,5 +924,470 @@ describe("transaction mutations invalidate SpendingSummaryCache", () => {
 
     expect(await readCache(monthKey)).toBeNull();
     expect(await readCache(unrelatedMonthKey)).not.toBeNull();
+  });
+});
+
+// This task's own addition: schema.prisma's four suggestedCategory* columns
+// on Transaction, and the three functions that read/write them -
+// applyTransactionEnrichment's new suggestedCategory patch field,
+// applySuggestedCategory, and dismissSuggestedCategory.
+describe("Transaction.suggestedCategory* columns", () => {
+  let userId: number;
+  let accountId: number;
+  let categoryId: number;
+  let otherCategoryId: number;
+  const categoryName = "دسته تست پیشنهاد";
+  const otherCategoryName = "دسته دیگر تست پیشنهاد";
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-SUGGESTED-CATEGORY-${Date.now()}` },
+    });
+    userId = user.id;
+
+    const account = await prisma.financeAccount.create({
+      data: { userId, name: "حساب تست پیشنهاد", type: "cash" },
+    });
+    accountId = account.id;
+
+    const category = await prisma.category.create({
+      data: { userId, name: categoryName, icon: "🧪", color: "#666666", type: "expense" },
+    });
+    categoryId = category.id;
+
+    const otherCategory = await prisma.category.create({
+      data: { userId, name: otherCategoryName, icon: "🧪", color: "#777777", type: "expense" },
+    });
+    otherCategoryId = otherCategory.id;
+  });
+
+  afterAll(async () => {
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.category.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$disconnect();
+  });
+
+  describe("applyTransactionEnrichment", () => {
+    it("writes all four columns when patch.suggestedCategory is present", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 50000,
+          type: "expense",
+          rawInput: "۱۴۰ سیگار",
+          date: new Date("2026-01-01"),
+          enrichmentStatus: "pending",
+        },
+      });
+
+      await applyTransactionEnrichment(userId, txn.id, {
+        amount: 140000,
+        type: "expense",
+        categoryName,
+        date: new Date("2026-01-01"),
+        suggestedCategory: { name: "دخانیات", parentName: null, reason: "خرید سیگار", icon: "🚬" },
+      });
+
+      const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+      expect(updated?.suggestedCategoryName).toBe("دخانیات");
+      expect(updated?.suggestedCategoryParentName).toBeNull();
+      expect(updated?.suggestedCategoryReason).toBe("خرید سیگار");
+      expect(updated?.suggestedCategoryIcon).toBe("🚬");
+      expect(updated?.enrichmentStatus).toBeNull();
+    });
+
+    it("keeps the row's own date when patch.date is omitted (a hand-picked quick-submit date)", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 50000,
+          type: "expense",
+          rawInput: "۵۰ تومن قهوه",
+          date: new Date("2026-01-01"),
+          enrichmentStatus: "pending",
+        },
+      });
+
+      await applyTransactionEnrichment(userId, txn.id, {
+        amount: 55000,
+        type: "expense",
+        categoryName: otherCategoryName,
+      });
+
+      const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+      expect(updated?.date.toISOString().slice(0, 10)).toBe("2026-01-01");
+      expect(updated?.amount).toBe(55000);
+      expect(updated?.categoryId).toBe(otherCategoryId);
+      expect(updated?.enrichmentStatus).toBeNull();
+    });
+
+    it("leaves all four columns null when patch.suggestedCategory is absent", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 50000,
+          type: "expense",
+          rawInput: "۵۰ تومن ناهار",
+          date: new Date("2026-01-02"),
+          enrichmentStatus: "pending",
+        },
+      });
+
+      await applyTransactionEnrichment(userId, txn.id, {
+        amount: 50000,
+        type: "expense",
+        categoryName,
+        date: new Date("2026-01-02"),
+      });
+
+      const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+      expect(updated?.suggestedCategoryName).toBeNull();
+      expect(updated?.suggestedCategoryParentName).toBeNull();
+      expect(updated?.suggestedCategoryReason).toBeNull();
+      expect(updated?.suggestedCategoryIcon).toBeNull();
+    });
+  });
+
+  describe("updateTransaction clears a standing suggestion (manual edit wins)", () => {
+    it("nulls all four columns on a manual edit", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 140000,
+          type: "expense",
+          rawInput: "۱۴۰ سیگار",
+          date: new Date("2026-01-03"),
+          suggestedCategoryName: "دخانیات",
+          suggestedCategoryParentName: null,
+          suggestedCategoryReason: "خرید سیگار",
+          suggestedCategoryIcon: "🚬",
+        },
+      });
+
+      await updateTransaction(userId, txn.id, {
+        amount: 140000,
+        type: "expense",
+        categoryName,
+        accountId,
+        date: new Date("2026-01-03"),
+      });
+
+      const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+      expect(updated?.suggestedCategoryName).toBeNull();
+      expect(updated?.suggestedCategoryParentName).toBeNull();
+      expect(updated?.suggestedCategoryReason).toBeNull();
+      expect(updated?.suggestedCategoryIcon).toBeNull();
+    });
+  });
+
+  describe("applySuggestedCategory", () => {
+    it("sets categoryId and clears all four columns", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 140000,
+          type: "expense",
+          rawInput: "۱۴۰ سیگار",
+          date: new Date("2026-01-04"),
+          suggestedCategoryName: "دخانیات",
+          suggestedCategoryParentName: null,
+          suggestedCategoryReason: "خرید سیگار",
+          suggestedCategoryIcon: "🚬",
+        },
+      });
+
+      await applySuggestedCategory(userId, txn.id, otherCategoryId);
+
+      const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+      expect(updated?.categoryId).toBe(otherCategoryId);
+      expect(updated?.suggestedCategoryName).toBeNull();
+      expect(updated?.suggestedCategoryParentName).toBeNull();
+      expect(updated?.suggestedCategoryReason).toBeNull();
+      expect(updated?.suggestedCategoryIcon).toBeNull();
+    });
+
+    it("throws TransactionNotFoundError when the transaction has no standing suggestion", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 50000,
+          type: "expense",
+          rawInput: "۵۰ تومن ناهار",
+          date: new Date("2026-01-05"),
+        },
+      });
+
+      await expect(applySuggestedCategory(userId, txn.id, otherCategoryId)).rejects.toBeInstanceOf(
+        TransactionNotFoundError
+      );
+    });
+
+    it("throws TransactionNotFoundError (not a silent no-op) when called by another user", async () => {
+      const otherUser = await prisma.user.create({
+        data: { phoneNumber: `TEST-SUGGESTED-CATEGORY-OTHER-${Date.now()}` },
+      });
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 140000,
+          type: "expense",
+          rawInput: "۱۴۰ سیگار",
+          date: new Date("2026-01-06"),
+          suggestedCategoryName: "دخانیات",
+          suggestedCategoryParentName: null,
+          suggestedCategoryReason: "خرید سیگار",
+          suggestedCategoryIcon: "🚬",
+        },
+      });
+
+      await expect(applySuggestedCategory(otherUser.id, txn.id, otherCategoryId)).rejects.toBeInstanceOf(
+        TransactionNotFoundError
+      );
+
+      const untouched = await prisma.transaction.findUnique({ where: { id: txn.id } });
+      expect(untouched?.categoryId).toBe(categoryId);
+      expect(untouched?.suggestedCategoryName).toBe("دخانیات");
+
+      await prisma.user.delete({ where: { id: otherUser.id } });
+    });
+  });
+
+  describe("dismissSuggestedCategory", () => {
+    it("clears all four columns without touching categoryId", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 140000,
+          type: "expense",
+          rawInput: "۱۴۰ سیگار",
+          date: new Date("2026-01-07"),
+          suggestedCategoryName: "دخانیات",
+          suggestedCategoryParentName: null,
+          suggestedCategoryReason: "خرید سیگار",
+          suggestedCategoryIcon: "🚬",
+        },
+      });
+
+      await dismissSuggestedCategory(userId, txn.id);
+
+      const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+      expect(updated?.categoryId).toBe(categoryId);
+      expect(updated?.suggestedCategoryName).toBeNull();
+      expect(updated?.suggestedCategoryParentName).toBeNull();
+      expect(updated?.suggestedCategoryReason).toBeNull();
+      expect(updated?.suggestedCategoryIcon).toBeNull();
+    });
+
+    it("throws TransactionNotFoundError when the transaction has no standing suggestion", async () => {
+      const txn = await prisma.transaction.create({
+        data: {
+          userId,
+          accountId,
+          categoryId,
+          amount: 50000,
+          type: "expense",
+          rawInput: "۵۰ تومن ناهار",
+          date: new Date("2026-01-08"),
+        },
+      });
+
+      await expect(dismissSuggestedCategory(userId, txn.id)).rejects.toBeInstanceOf(TransactionNotFoundError);
+    });
+  });
+});
+
+// Covers the data-integrity bug this heuristic fallback exists to mitigate:
+// a quick-submit transaction (add-transaction-form.tsx's handleQuickSubmit)
+// whose background AI enrichment permanently fails must not stay silently
+// mistyped forever - see markEnrichmentFailed's own comment in
+// lib/data/transactions.ts and lib/extract-income-signal.ts.
+describe("markEnrichmentFailed (heuristic fallback)", () => {
+  let userId: number;
+  let accountId: number;
+  let expenseCategoryId: number;
+  let incomeCategoryId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-MARK-ENRICHMENT-FAILED-${Date.now()}` },
+    });
+    userId = user.id;
+
+    const account = await prisma.financeAccount.create({
+      data: { userId, name: "حساب تست شکست تحلیل", type: "cash" },
+    });
+    accountId = account.id;
+
+    const expenseCategory = await prisma.category.create({
+      data: { userId, name: "دسته هزینه تست شکست تحلیل", icon: "🧪", color: "#666666", type: "expense" },
+    });
+    expenseCategoryId = expenseCategory.id;
+
+    // Named exactly like the real seeded fallback category
+    // (prisma/seed.ts/DefaultCategory) - markEnrichmentFailed looks this up
+    // by this exact (name, type) pair.
+    const incomeCategory = await prisma.category.create({
+      data: { userId, name: FALLBACK_INCOME_CATEGORY, icon: "🧪", color: "#777777", type: "income" },
+    });
+    incomeCategoryId = incomeCategory.id;
+  });
+
+  afterAll(async () => {
+    await prisma.transaction.deleteMany({ where: { userId } });
+    await prisma.category.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$disconnect();
+  });
+
+  it("flips a pending transaction to failed without touching type/category when the text has no income signal", async () => {
+    const txn = await prisma.transaction.create({
+      data: {
+        userId,
+        accountId,
+        categoryId: expenseCategoryId,
+        amount: 50000,
+        type: "expense",
+        rawInput: "۵۰ تومن ناهار خوردم",
+        date: new Date("2026-02-01"),
+        enrichmentStatus: "pending",
+      },
+    });
+
+    await markEnrichmentFailed(userId, txn.id, txn.rawInput);
+
+    const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+    expect(updated?.enrichmentStatus).toBe("failed");
+    expect(updated?.type).toBe("expense");
+    expect(updated?.categoryId).toBe(expenseCategoryId);
+  });
+
+  it("corrects type and category to the income fallback when the text has a strong income signal", async () => {
+    const txn = await prisma.transaction.create({
+      data: {
+        userId,
+        accountId,
+        categoryId: expenseCategoryId,
+        amount: 15_000_000,
+        type: "expense",
+        rawInput: "حقوق این ماه ریخت",
+        date: new Date("2026-02-02"),
+        enrichmentStatus: "pending",
+      },
+    });
+
+    await markEnrichmentFailed(userId, txn.id, txn.rawInput);
+
+    const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+    expect(updated?.enrichmentStatus).toBe("failed");
+    expect(updated?.type).toBe("income");
+    expect(updated?.categoryId).toBe(incomeCategoryId);
+  });
+
+  it("does not correct type/category when the text merely mentions the ambiguous verb form (واریز کردم)", async () => {
+    // "واریز کردم" ("I deposited/paid") is first-person active - it usually
+    // means money going OUT (paying someone), the opposite of income. See
+    // lib/extract-income-signal.ts's own comment for why the bare word
+    // "واریز" is deliberately excluded from the keyword list.
+    const txn = await prisma.transaction.create({
+      data: {
+        userId,
+        accountId,
+        categoryId: expenseCategoryId,
+        amount: 500000,
+        type: "expense",
+        rawInput: "۵۰۰ به علی واریز کردم",
+        date: new Date("2026-02-03"),
+        enrichmentStatus: "pending",
+      },
+    });
+
+    await markEnrichmentFailed(userId, txn.id, txn.rawInput);
+
+    const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+    expect(updated?.enrichmentStatus).toBe("failed");
+    expect(updated?.type).toBe("expense");
+    expect(updated?.categoryId).toBe(expenseCategoryId);
+  });
+
+  it("does not touch a transaction whose enrichmentStatus is no longer pending (manual edit already won)", async () => {
+    const txn = await prisma.transaction.create({
+      data: {
+        userId,
+        accountId,
+        categoryId: expenseCategoryId,
+        amount: 15_000_000,
+        type: "expense",
+        rawInput: "حقوق این ماه ریخت",
+        date: new Date("2026-02-04"),
+        enrichmentStatus: null,
+      },
+    });
+
+    await markEnrichmentFailed(userId, txn.id, txn.rawInput);
+
+    const untouched = await prisma.transaction.findUnique({ where: { id: txn.id } });
+    expect(untouched?.enrichmentStatus).toBeNull();
+    expect(untouched?.type).toBe("expense");
+    expect(untouched?.categoryId).toBe(expenseCategoryId);
+  });
+
+  it("still flips to failed, without a correction, when the income fallback category doesn't exist for this user", async () => {
+    const otherUser = await prisma.user.create({
+      data: { phoneNumber: `TEST-MARK-ENRICHMENT-FAILED-NO-INCOME-CAT-${Date.now()}` },
+    });
+    const otherAccount = await prisma.financeAccount.create({
+      data: { userId: otherUser.id, name: "حساب بدون دسته درآمد", type: "cash" },
+    });
+    const otherExpenseCategory = await prisma.category.create({
+      data: { userId: otherUser.id, name: "دسته هزینه بدون درآمد", icon: "🧪", color: "#888888", type: "expense" },
+    });
+
+    const txn = await prisma.transaction.create({
+      data: {
+        userId: otherUser.id,
+        accountId: otherAccount.id,
+        categoryId: otherExpenseCategory.id,
+        amount: 15_000_000,
+        type: "expense",
+        rawInput: "حقوق این ماه ریخت",
+        date: new Date("2026-02-05"),
+        enrichmentStatus: "pending",
+      },
+    });
+
+    await markEnrichmentFailed(otherUser.id, txn.id, txn.rawInput);
+
+    const updated = await prisma.transaction.findUnique({ where: { id: txn.id } });
+    expect(updated?.enrichmentStatus).toBe("failed");
+    expect(updated?.type).toBe("expense");
+    expect(updated?.categoryId).toBe(otherExpenseCategory.id);
+
+    // Same explicit "transaction, then category, then account, then user"
+    // teardown order this file's other describe blocks already use (see
+    // e.g. the "Transaction.suggestedCategory* columns" afterAll above) -
+    // Transaction's FKs to FinanceAccount/Category are onDelete: Restrict.
+    await prisma.transaction.deleteMany({ where: { userId: otherUser.id } });
+    await prisma.category.deleteMany({ where: { userId: otherUser.id } });
+    await prisma.financeAccount.deleteMany({ where: { userId: otherUser.id } });
+    await prisma.user.delete({ where: { id: otherUser.id } });
   });
 });

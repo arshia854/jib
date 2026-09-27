@@ -2,34 +2,34 @@
 // caller of chatCompletion()/streamChatCompletion() (Phase 12.4) - shared
 // here rather than each call site hardcoding its own copy, so it can't
 // drift if this ever needs to change (e.g. .env.example already keeps
-// OpenRouter/ArvanCloud around "in case we switch back").
-export const AI_PROVIDER = "openrouter";
+// NVIDIA/OpenRouter around "in case we switch back").
+export const AI_PROVIDER = "arvan";
 
 function getApiKey(): string {
-  const key = process.env.OPENROUTER_API_KEY;
+  const key = process.env.ARVAN_AI_API_KEY;
   if (!key) {
-    throw new Error("OPENROUTER_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("ARVAN_AI_API_KEY تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return key;
 }
 
 function getBaseUrl(): string {
-  const url = process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
+  const url = process.env.ARVAN_AI_BASE_URL;
   if (!url) {
-    throw new Error("OPENROUTER_BASE_URL تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("ARVAN_AI_BASE_URL تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return url.replace(/\/+$/, "");
 }
 
 function getModel(): string {
-  const model = process.env.OPENROUTER_MODEL;
+  const model = process.env.ARVAN_AI_MODEL;
   if (!model) {
-    throw new Error("OPENROUTER_MODEL تنظیم نشده است. آن را در فایل .env قرار دهید.");
+    throw new Error("ARVAN_AI_MODEL تنظیم نشده است. آن را در فایل .env قرار دهید.");
   }
   return model;
 }
 
-// Output-side cost/abuse cap (SEC-6) - OpenRouter's chat/completions
+// Output-side cost/abuse cap (SEC-6) - ArvanCloud's chat/completions
 // endpoint is OpenAI-compatible and, per NIM's own quickstart/model-card
 // curl examples (build on vLLM's OpenAI-compatible server), takes this as
 // `max_tokens`; `max_completion_tokens` is an OpenAI-specific alias for
@@ -62,18 +62,29 @@ const CHAT_REPLY_MAX_TOKENS = 2500;
 // stall, provider-side hang) would leave the request pending indefinitely,
 // with no bound on it beyond whatever timeout Next.js's own hosting
 // platform enforces at the function level (not something this module can
-// rely on for a responsive UX). One shared value for both call sites
-// (chatCompletion/streamChatCompletion), sized against the larger of the
-// two output caps above (CHAT_REPLY_MAX_TOKENS = 1000): for
-// streamChatCompletion, fetch()'s promise resolves once the response
-// headers/first SSE bytes arrive (well before the full 1000-token
-// generation completes), so this bounds time-to-first-byte, not the whole
-// stream; for chatCompletion's non-streaming call, the provider typically
-// doesn't send the response until the full completion (up to 500 tokens
-// here) is ready, so this bounds the whole generation. 30s is generous
-// headroom (multiple times a realistic generation time for either cap on a
-// hosted 70B-class model) while still failing a genuinely stuck request in
-// a bounded, user-visible time instead of hanging.
+// rely on for a responsive UX). This is the *default* for every caller
+// (chatCompletion/streamChatCompletion): for streamChatCompletion, fetch()'s
+// promise resolves once the response headers/first SSE bytes arrive (well
+// before the full generation completes), so this bounds time-to-first-byte,
+// not the whole stream; for chatCompletion's non-streaming call, the
+// provider typically doesn't send the response until the full completion is
+// ready, so this bounds the whole generation. 30s was sized as generous
+// headroom against JSON_EXTRACTION_MAX_TOKENS/CHAT_REPLY_MAX_TOKENS's
+// *original* (smaller) values.
+//
+// It is now overridable per call via chatCompletion's `timeoutMs` option -
+// same reason maxTokens became overridable (see JSON_EXTRACTION_MAX_TOKENS's
+// own comment): lib/goals/strategy.ts's generateGoalStrategy raised its own
+// output budget from 1500 to 3000 tokens to fix the "استراتژی ساخته نشد"
+// truncation bug, but that call is non-streaming, so a bigger completion
+// also means fetch() itself takes longer to resolve - this shared 30s
+// default was never reconsidered for that, and production then hit it
+// directly (AI_ERROR logs with duration: 30002 - the exact timeout value -
+// for goals/strategy). Left unchanged here as the default for every other
+// caller (transaction parsing, intent detection, chat), which don't need
+// more room and shouldn't fail slower just because one caller's completions
+// got bigger - see GOAL_STRATEGY_TIMEOUT_MS in lib/goals/strategy.ts for the
+// dedicated override.
 export const NVIDIA_REQUEST_TIMEOUT_MS = 30_000;
 
 // Phase 9.1 retry policy - deliberately narrow. Only a *connection-level*
@@ -96,7 +107,7 @@ export interface ChatMessageInput {
   content: string;
 }
 
-// OpenRouter's OpenAI-compatible chat/completions response includes a
+// ArvanCloud's OpenAI-compatible chat/completions response includes a
 // standard `usage` object (prompt_tokens/completion_tokens/total_tokens) on
 // every non-streaming response - part of the OpenAI schema itself, not
 // something specific to this model. Re-cased to camelCase for consistency
@@ -111,18 +122,16 @@ function isConnectionLevelFailure(error: unknown): boolean {
   return error instanceof TypeError;
 }
 
-function wrapFetchError(error: unknown): Error {
+function wrapFetchError(error: unknown, timeoutMs: number): Error {
   if (error instanceof Error && error.name === "AbortError") {
-    return new Error(
-      `درخواست به OpenRouter به دلیل کندی پاسخ لغو شد (بیش از ${NVIDIA_REQUEST_TIMEOUT_MS / 1000} ثانیه).`
-    );
+    return new Error(`درخواست به آروان کلاد به دلیل کندی پاسخ لغو شد (بیش از ${timeoutMs / 1000} ثانیه).`);
   }
-  return new Error(`ارتباط با OpenRouter برقرار نشد: ${error instanceof Error ? error.message : String(error)}`);
+  return new Error(`ارتباط با آروان کلاد برقرار نشد: ${error instanceof Error ? error.message : String(error)}`);
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), NVIDIA_REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
@@ -130,7 +139,10 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
   }
 }
 
-async function callNvidiaAI(body: Record<string, unknown>): Promise<Response> {
+// timeoutMs defaults to NVIDIA_REQUEST_TIMEOUT_MS - only lib/goals/strategy.ts
+// currently passes its own (larger) value through chatCompletion's
+// `timeoutMs` option; see that constant's own comment for why.
+async function callNvidiaAI(body: Record<string, unknown>, timeoutMs: number = NVIDIA_REQUEST_TIMEOUT_MS): Promise<Response> {
   const url = `${getBaseUrl()}/chat/completions`;
   const init: RequestInit = {
     method: "POST",
@@ -143,41 +155,88 @@ async function callNvidiaAI(body: Record<string, unknown>): Promise<Response> {
 
   let response: Response;
   try {
-    response = await fetchWithTimeout(url, init);
+    response = await fetchWithTimeout(url, init, timeoutMs);
   } catch (firstError) {
     if (!isConnectionLevelFailure(firstError) || CONNECTION_RETRY_ATTEMPTS < 1) {
-      throw wrapFetchError(firstError);
+      throw wrapFetchError(firstError, timeoutMs);
     }
     try {
-      response = await fetchWithTimeout(url, init);
+      response = await fetchWithTimeout(url, init, timeoutMs);
     } catch (secondError) {
-      throw wrapFetchError(secondError);
+      throw wrapFetchError(secondError, timeoutMs);
     }
   }
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
-    throw new Error(`درخواست به OpenRouter ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
+    throw new Error(`درخواست به آروان کلاد ناموفق بود (${response.status}): ${errorText.slice(0, 300)}`);
   }
 
   return response;
 }
 
+// Why generation stopped ("stop", or "length" when it ran into max_tokens)
+// and how much hidden reasoning text came back alongside the answer, if
+// any. A json:true call that hits "length" returns cut-off JSON; if most of
+// its completion_tokens went to reasoning rather than `content`, the
+// thinking phase wasn't actually disabled for that request.
+export interface ResponseMeta {
+  finishReason?: string;
+  reasoningChars?: number;
+}
+
 export async function chatCompletion(
   messages: ChatMessageInput[],
-  options?: { json?: boolean; onUsage?: (usage: TokenUsage) => void }
+  options?: {
+    json?: boolean;
+    onUsage?: (usage: TokenUsage) => void;
+    onResponseMeta?: (meta: ResponseMeta) => void;
+    maxTokens?: number;
+    timeoutMs?: number;
+  }
 ): Promise<string> {
-  const response = await callNvidiaAI({
-    messages,
-    max_tokens: JSON_EXTRACTION_MAX_TOKENS,
-    reasoning: { exclude: true },
-    ...(options?.json ? { response_format: { type: "json_object" } } : {}),
-  });
+  const response = await callNvidiaAI(
+    {
+      messages,
+      // Overridable per call (see GOAL_STRATEGY_JSON_MAX_TOKENS in
+      // lib/goals/strategy.ts) - JSON_EXTRACTION_MAX_TOKENS alone was sized
+      // for the two small schemas listed in its own comment above
+      // (single-transaction parse, one-boolean intent-detection) and was too
+      // tight for generateGoalStrategy's much larger 3-5 action + summary +
+      // monthlyAction + inflationNote schema, causing the model's JSON to be
+      // cut off mid-object and fail JSON.parse in extractJson() - the actual
+      // cause behind goal-strategy generation intermittently failing with
+      // "استراتژی ساخته نشد" in production. Left as the default for every
+      // other caller, which don't need more room.
+      max_tokens: options?.maxTokens ?? JSON_EXTRACTION_MAX_TOKENS,
+      // Disables DeepSeek-V4-Flash's default thinking phase. ArvanCloud's
+      // gateway rejects top-level `reasoning: { exclude: true }` and
+      // `thinking: { type: "disabled" }` with 400 "Unrecognized request
+      // argument supplied" (as of 2026-09-23), but accepts vLLM's standard
+      // `chat_template_kwargs.thinking` passthrough. Measured with
+      // scripts/probe-arvan-thinking.ts against detectTransactionIntent's
+      // real prompt: 4/4 accepted, median ~3.4s vs ~7.0s with no field.
+      // Re-run that script if the gateway's accepted parameters change again.
+      // Caveat (2026-09-27): accepted, but it does NOT reliably stop the
+      // reasoning phase. On goal-strategy's prompt every probed call, with
+      // this field, with `enable_thinking: false`, or with neither, still
+      // returned reasoning_content and 1671-3000 reasoning_tokens. Size
+      // maxTokens for reasoning plus the answer (see
+      // GOAL_STRATEGY_JSON_MAX_TOKENS in lib/goals/strategy.ts).
+      chat_template_kwargs: { thinking: false },
+      ...(options?.json ? { response_format: { type: "json_object" } } : {}),
+    },
+    // Overridable per call for the same reason maxTokens is (see
+    // NVIDIA_REQUEST_TIMEOUT_MS's own comment) - a caller that raises its
+    // token budget on a non-streaming call may also need more wall-clock
+    // time for fetch() to resolve.
+    options?.timeoutMs
+  );
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string") {
-    throw new Error("پاسخ نامعتبر از OpenRouter دریافت شد.");
+    throw new Error("پاسخ نامعتبر از آروان کلاد دریافت شد.");
   }
 
   // Phase 9.4 - previously parsed and immediately discarded. Passed back
@@ -200,16 +259,54 @@ export async function chatCompletion(
     });
   }
 
+  if (options?.onResponseMeta) {
+    const choice = data.choices[0];
+    // vLLM-based gateways return a thinking model's reasoning as
+    // `reasoning_content`; some OpenAI-compatible ones call it `reasoning`.
+    const reasoning = choice.message.reasoning_content ?? choice.message.reasoning;
+    options.onResponseMeta({
+      finishReason: typeof choice.finish_reason === "string" ? choice.finish_reason : undefined,
+      reasoningChars: typeof reasoning === "string" ? reasoning.length : undefined,
+    });
+  }
+
   return content;
 }
 
-/** Streams raw text deltas (already extracted from SSE `data:` chunks). */
+// Phase 1 chat-pipeline-instrumentation addition: same shape as
+// chatCompletion's onUsage (TokenUsage), plus `model` - the streaming
+// SSE chunks each carry their own top-level `model` field per the
+// OpenAI-compatible schema (same as the non-streaming response's
+// top-level `model`), so it's surfaced here alongside usage rather than
+// invented as a separate lookup. Deliberately its own type/callback,
+// not a reuse of chatCompletion's `onUsage` option - chatCompletion's
+// existing `(usage: TokenUsage) => void` contract is mocked directly
+// across ~30 call sites (see this file's own onUsage comment above) and
+// isn't touched by this addition.
+export interface StreamUsageInfo extends TokenUsage {
+  model?: string;
+}
+
+// Only requested when a caller actually wants it: `stream_options.
+// include_usage` is what makes an OpenAI-compatible streaming endpoint
+// emit one extra final SSE chunk (empty `choices`, populated `usage`) -
+// asking for it unconditionally would add that chunk to every stream
+// whether or not anything reads it.
 export async function streamChatCompletion(
-  messages: ChatMessageInput[]
+  messages: ChatMessageInput[],
+  options?: { onUsage?: (info: StreamUsageInfo) => void }
 ): Promise<ReadableStream<Uint8Array>> {
-  const response = await callNvidiaAI({ messages, stream: true, max_tokens: CHAT_REPLY_MAX_TOKENS, reasoning: { exclude: true } });
+  const response = await callNvidiaAI({
+    messages,
+    stream: true,
+    max_tokens: CHAT_REPLY_MAX_TOKENS,
+    // See chatCompletion()'s matching comment for why this field, and not
+    // top-level `reasoning`/`thinking`.
+    chat_template_kwargs: { thinking: false },
+    ...(options?.onUsage ? { stream_options: { include_usage: true } } : {}),
+  });
   if (!response.body) {
-    throw new Error("پاسخ جریانی از OpenRouter دریافت نشد.");
+    throw new Error("پاسخ جریانی از آروان کلاد دریافت نشد.");
   }
 
   const reader = response.body.getReader();
@@ -240,6 +337,19 @@ export async function streamChatCompletion(
               const delta = json?.choices?.[0]?.delta?.content;
               if (typeof delta === "string" && delta.length > 0) {
                 controller.enqueue(encoder.encode(delta));
+              }
+              // The final usage chunk (only sent when stream_options.
+              // include_usage was requested above) carries `usage` with an
+              // empty/absent `choices` array, not a text delta - handled as
+              // its own branch here rather than folded into the delta check.
+              if (options?.onUsage && json?.usage && typeof json.usage === "object") {
+                const u = json.usage as Record<string, unknown>;
+                options.onUsage({
+                  promptTokens: typeof u.prompt_tokens === "number" ? u.prompt_tokens : undefined,
+                  completionTokens: typeof u.completion_tokens === "number" ? u.completion_tokens : undefined,
+                  totalTokens: typeof u.total_tokens === "number" ? u.total_tokens : undefined,
+                  model: typeof json.model === "string" ? json.model : undefined,
+                });
               }
             } catch {
               // Ignore incomplete/malformed SSE chunks; buffer continues on next read.

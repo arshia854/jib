@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckIcon, SpinnerIcon } from "@/components/icons";
+import { AmountInput } from "@/components/ui/amount-input";
 import { getAccountTypeIcon, type AccountOption } from "@/lib/accounts";
 import { MAX_TRANSACTION_AMOUNT, MAX_DESCRIPTION_LENGTH } from "@/lib/limits";
 
@@ -19,12 +20,35 @@ import { MAX_TRANSACTION_AMOUNT, MAX_DESCRIPTION_LENGTH } from "@/lib/limits";
 // button (spinner swapped in, same as accounts-manager.tsx's own
 // handleSave), and one `error` string rendered right above the submit
 // button.
-export function TransferForm({ accounts }: { accounts: AccountOption[] }) {
+//
+// The four `initial*` props seed the corresponding fields' initial state
+// (used by the savings page's "do this transfer now" shortcut, via
+// app/app/transfer/page.tsx's query-param parsing). An account id that isn't
+// in `accounts` is ignored and that side falls back to its normal default -
+// a stale/bad prefill never throws or shows an error.
+export function TransferForm({
+  accounts,
+  initialFromAccountId,
+  initialToAccountId,
+  initialAmount,
+  initialNote,
+}: {
+  accounts: AccountOption[];
+  initialFromAccountId?: number;
+  initialToAccountId?: number;
+  initialAmount?: number;
+  initialNote?: string;
+}) {
   const router = useRouter();
-  const [fromAccountId, setFromAccountId] = useState<number>(accounts[0]?.id ?? 0);
-  const [toAccountId, setToAccountId] = useState<number>(accounts[1]?.id ?? accounts[0]?.id ?? 0);
-  const [amount, setAmount] = useState("");
-  const [note, setNote] = useState("");
+  const isKnownAccountId = (id: number | undefined): id is number => id !== undefined && accounts.some((a) => a.id === id);
+  const [fromAccountId, setFromAccountId] = useState<number>(
+    isKnownAccountId(initialFromAccountId) ? initialFromAccountId : (accounts[0]?.id ?? 0)
+  );
+  const [toAccountId, setToAccountId] = useState<number>(
+    isKnownAccountId(initialToAccountId) ? initialToAccountId : (accounts[1]?.id ?? accounts[0]?.id ?? 0)
+  );
+  const [amount, setAmount] = useState(initialAmount !== undefined ? String(initialAmount) : "");
+  const [note, setNote] = useState(initialNote ?? "");
   const [date, setDate] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,12 +138,10 @@ export function TransferForm({ accounts }: { accounts: AccountOption[] }) {
 
         <div>
           <label className="block text-xs text-muted">مبلغ (تومان)</label>
-          <input
-            type="number"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+          <AmountInput
+            value={Number(amount) || 0}
+            onChange={(next) => setAmount(next ? String(next) : "")}
             placeholder="۰"
-            className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm tabular-fa outline-none focus:border-accent"
           />
         </div>
 

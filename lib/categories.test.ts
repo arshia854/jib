@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findSimilarCategory, resolveNewCategoryIcon } from "@/lib/categories";
+import { excludeArchived, findSimilarCategory, resolveNewCategoryIcon } from "@/lib/categories";
 import type { CategoryOption } from "@/lib/ai/parse-transaction";
 
 const EXPENSE_CATEGORIES: CategoryOption[] = [
@@ -172,5 +172,38 @@ describe("resolveNewCategoryIcon", () => {
 
   it("returns the default fallback icon for an unrecognized name", () => {
     expect(resolveNewCategoryIcon("سفر شمال")).toBe("📦");
+  });
+});
+
+describe("excludeArchived", () => {
+  it("drops an archived subcategory but keeps its parent and siblings", () => {
+    const categories: CategoryOption[] = [
+      { name: "پس‌انداز و سرمایه‌گذاری", type: "expense" },
+      { name: "واریز به حساب پس‌انداز", type: "expense", parentName: "پس‌انداز و سرمایه‌گذاری", isArchived: true },
+      { name: "خرید طلا و ارز", type: "expense", parentName: "پس‌انداز و سرمایه‌گذاری" },
+    ];
+    expect(excludeArchived(categories).map((c) => c.name)).toEqual(["پس‌انداز و سرمایه‌گذاری", "خرید طلا و ارز"]);
+  });
+
+  it("drops every child of an archived top-level category, even children not flagged themselves", () => {
+    const categories: CategoryOption[] = [
+      { name: "حیوان خانگی", type: "expense", isArchived: true },
+      { name: "دامپزشک", type: "expense", parentName: "حیوان خانگی" },
+      { name: "سلامت", type: "expense" },
+      { name: "دارو", type: "expense", parentName: "سلامت" },
+    ];
+    expect(excludeArchived(categories).map((c) => c.name)).toEqual(["سلامت", "دارو"]);
+  });
+
+  // "انتقال بین حساب‌ها" is seeded under both types with the same name - an
+  // archived parent of one type must not take out a same-named parent's
+  // children under the other type.
+  it("matches an archived parent by type as well as name", () => {
+    const categories: CategoryOption[] = [
+      { name: "مشترک", type: "expense", isArchived: true },
+      { name: "مشترک", type: "income" },
+      { name: "زیرشاخه", type: "income", parentName: "مشترک" },
+    ];
+    expect(excludeArchived(categories).map((c) => `${c.type}:${c.name}`)).toEqual(["income:مشترک", "income:زیرشاخه"]);
   });
 });

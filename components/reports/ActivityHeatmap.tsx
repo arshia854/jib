@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
+import { toJalaali } from "jalaali-js";
 import type { ActivityHeatmapResult } from "@/lib/data/activity-heatmap";
-import { formatJalaaliDate, formatNumber } from "@/lib/format";
+import { formatJalaaliDate, formatNumber, jalaaliMonthKeyToLabel } from "@/lib/format";
 import { ZapIcon, SparklesIcon, ChartIcon } from "@/components/icons";
 
 interface ActivityHeatmapProps {
@@ -76,12 +77,23 @@ function intensityClass(count: number): string {
   return "bg-primary";
 }
 
-// Visually matches components/dashboard/stat-card.tsx's pattern (icon
-// circle + label + value on a bordered surface card), just condensed
-// (p-3 not p-4, smaller icon circle/text) to fit three across instead of
-// stat-card.tsx's two, and not money (no formatToman) - so a local variant
-// here rather than reusing that component as-is.
-function StatPill({
+// Jalali month name for the week column that contains a month's 1st day,
+// so the grid gets GitHub-style month markers along its top edge. Weeks
+// without a 1st get no label - one label per month, never per column.
+function monthStartLabel(week: HeatmapCell[]): string | null {
+  for (const cell of week) {
+    const { jy, jm, jd } = toJalaali(cell.date);
+    if (jd === 1) return jalaaliMonthKeyToLabel(`${jy}-${String(jm).padStart(2, "0")}`);
+  }
+  return null;
+}
+
+// One column of the stats strip at the top of the card - value first (the
+// thing worth reading), label under it. Condensed from the home page's
+// icon-circle + label + value pattern (components/dashboard/month-summary-card.tsx)
+// into an inline row, since this strip is secondary to the tabs/list below
+// and shouldn't take that pattern's full height three times over.
+function Stat({
   label,
   value,
   tone,
@@ -93,12 +105,14 @@ function StatPill({
   icon: ReactNode;
 }) {
   const toneClasses =
-    tone === "primary" ? "bg-primary/10 text-primary" : tone === "success" ? "bg-success/10 text-success" : "bg-muted/10 text-muted";
+    tone === "primary" ? "bg-primary/15 text-primary-soft" : tone === "success" ? "bg-success/15 text-success" : "bg-muted/15 text-muted";
   return (
-    <div className="flex-1 rounded-2xl border border-border bg-surface p-3">
-      <div className={`flex h-8 w-8 items-center justify-center rounded-full ${toneClasses}`}>{icon}</div>
-      <p className="mt-2 text-[11px] text-muted">{label}</p>
-      <p className="mt-1 text-sm font-bold tabular-fa text-foreground">{value}</p>
+    <div className="flex min-w-0 flex-col items-center gap-1 px-2 text-center">
+      <span className="flex items-center gap-1.5">
+        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${toneClasses}`}>{icon}</span>
+        <span className="text-lg font-bold leading-none text-foreground">{value}</span>
+      </span>
+      <span className="truncate text-[11px] text-muted">{label}</span>
     </div>
   );
 }
@@ -107,41 +121,62 @@ export function ActivityHeatmap({ heatmap }: ActivityHeatmapProps) {
   const weeks = buildWeeks(heatmap.days);
 
   return (
-    <div className="space-y-3">
-      <div className="flex gap-2">
-        <StatPill label="استریک فعلی" value={formatNumber(heatmap.currentStreak)} tone="primary" icon={<ZapIcon className="h-4 w-4" />} />
-        <StatPill label="بهترین استریک" value={formatNumber(heatmap.longestStreak)} tone="success" icon={<SparklesIcon className="h-4 w-4" />} />
-        <StatPill label="روزهای فعال" value={formatNumber(heatmap.activeDays)} tone="muted" icon={<ChartIcon className="h-4 w-4" />} />
+    <section className="rounded-2xl border border-border bg-surface">
+      <div className="grid grid-cols-3 divide-x divide-border py-3.5">
+        <Stat label="استریک فعلی" value={formatNumber(heatmap.currentStreak)} tone="primary" icon={<ZapIcon className="h-3.5 w-3.5" />} />
+        <Stat label="بهترین استریک" value={formatNumber(heatmap.longestStreak)} tone="success" icon={<SparklesIcon className="h-3.5 w-3.5" />} />
+        <Stat label="روزهای فعال" value={formatNumber(heatmap.activeDays)} tone="muted" icon={<ChartIcon className="h-3.5 w-3.5" />} />
       </div>
 
-      <div className="rounded-2xl border border-border bg-surface p-4">
-        <div className="overflow-x-auto">
+      <div className="flex gap-2 border-t border-border py-3 ps-3 pe-2">
+        {/* Weekday labels sit outside the scroller, on the right: the
+            scroller opens scrolled to its newest (right-hand) end, so labels
+            placed inside it on the left - as they used to be - started out
+            off-screen. The h-4 spacer lines them up under the month row. */}
+        <div aria-hidden="true" className="flex shrink-0 flex-col gap-[3px]">
+          <span className="h-4" />
+          {WEEKDAY_LABELS.map((label, i) => (
+            <span key={i} className="flex h-3 w-3 items-center justify-center text-[9px] leading-none text-muted">
+              {i % 2 === 1 ? label : ""}
+            </span>
+          ))}
+        </div>
+
+        {/* Left-edge fade hints that older weeks continue past the edge. */}
+        <div className="min-w-0 flex-1 overflow-x-auto mask-l-from-85% [scrollbar-width:none]">
           {/* Chronological (oldest -> newest, left -> right) grid, same "LTR
               island inside an RTL page" technique already used for OTP
               digits/phone numbers (see components/auth/verify-form.tsx,
               login-form.tsx) - a mirrored calendar would read backwards. */}
-          <div dir="ltr" className="flex w-max gap-1">
-            <div className="flex flex-col gap-1">
-              {WEEKDAY_LABELS.map((label, i) => (
-                <span key={i} className="flex h-2.5 w-4 items-center justify-center text-[9px] text-muted">
-                  {i % 2 === 1 ? label : ""}
-                </span>
-              ))}
-            </div>
-            {weeks.map((week, wi) => (
-              <div key={wi} className="flex flex-col gap-1">
-                {week.map((cell, di) => (
-                  <div
-                    key={di}
-                    title={`${formatJalaaliDate(cell.date)} - ${cell.count > 0 ? `${formatNumber(cell.count)} تراکنش` : "بدون تراکنش"}`}
-                    className={`h-2.5 w-2.5 rounded-sm ${intensityClass(cell.count)}`}
-                  />
-                ))}
-              </div>
-            ))}
+          <div dir="ltr" className="flex w-max gap-[3px]">
+            {weeks.map((week, wi) => {
+              const monthLabel = monthStartLabel(week);
+              // A label hangs rightward off its column, which would push past the
+              // grid's newest (right) edge - where an RTL scroller can't reach -
+              // for a month starting in the last few weeks; anchor those leftward.
+              const anchor = wi >= weeks.length - 3 ? "right-0" : "left-0";
+              return (
+                <div key={wi} className="flex flex-col gap-[3px]">
+                  <span className="relative h-4">
+                    {monthLabel && (
+                      <span dir="rtl" className={`absolute top-0 whitespace-nowrap text-[10px] leading-none text-muted ${anchor}`}>
+                        {monthLabel}
+                      </span>
+                    )}
+                  </span>
+                  {week.map((cell, di) => (
+                    <div
+                      key={di}
+                      title={`${formatJalaaliDate(cell.date)} - ${cell.count > 0 ? `${formatNumber(cell.count)} تراکنش` : "بدون تراکنش"}`}
+                      className={`h-3 w-3 rounded-[3px] ${intensityClass(cell.count)}`}
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
-    </div>
+    </section>
   );
 }

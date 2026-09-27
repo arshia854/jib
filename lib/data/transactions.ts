@@ -1,12 +1,16 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { CategoryType } from "@/lib/categories";
+import { FALLBACK_INCOME_CATEGORY } from "@/lib/categories";
+import { hasStrongIncomeSignal } from "@/lib/extract-income-signal";
 import { buildMerchantKey } from "@/lib/merchant-lookup";
 import { DEFAULT_TRANSACTIONS_PAGE_SIZE, MAX_TRANSACTIONS_PAGE_SIZE } from "@/lib/limits";
 import { invalidateSpendingSummaryCache } from "@/lib/analytics/spending-summary";
 import { isUniqueConstraintError } from "@/lib/observability/classify-error";
 import { buildAssetCreateData } from "@/lib/data/assets";
 import type { LivePricedAssetType } from "@/lib/assets";
+import { logger } from "@/lib/observability/logger"; // TEMP-LATENCY
+import { getRequestId } from "@/lib/observability/request-context"; // TEMP-LATENCY
 
 export interface TransactionFilters {
   type?: CategoryType;
@@ -43,7 +47,16 @@ export async function listTransactions(
   const [transactions, total] = await Promise.all([
     prisma.transaction.findMany({
       where,
-      include: { category: true },
+      // account (id/name only, not the full FinanceAccount row) added
+      // alongside the pre-existing `category` include - Phase A3
+      // (docs/roadmap-status.md savings roadmap) needs each leg's account
+      // name to render a merged transferGroupId pair as "از X به Y" (see
+      // lib/transactions/group-transfer-pairs.ts, called by this
+      // function's own callers - app/app/dashboard/page.tsx). Purely
+      // additive: existing consumers of this result (GET
+      // /api/transactions) just see one new field per transaction, nothing
+      // removed or renamed.
+      include: { category: true, account: { select: { id: true, name: true } } },
       orderBy: { date: "desc" },
       skip,
       take: safePageSize,
@@ -192,6 +205,15 @@ export async function updateTransaction(userId: number, id: number, input: Updat
         // below both check this is still "pending" before writing, so
         // clearing it here is what makes that check actually stop them.
         enrichmentStatus: null,
+        // Same reasoning: a manual edit has already resolved whatever
+        // category the AI would have suggested (see schema.prisma's own
+        // comment on these four columns) - clear them so a stale banner
+        // from a previous background enrichment never lingers past a
+        // deliberate user correction.
+        suggestedCategoryName: null,
+        suggestedCategoryParentName: null,
+        suggestedCategoryReason: null,
+        suggestedCategoryIcon: null,
       },
       include: { category: true },
     }),
@@ -223,41 +245,43 @@ export async function updateTransaction(userId: number, id: number, input: Updat
 
 // SEC-10 idempotency (docs/roadmap-status.md). `input.idempotencyKey` is
 // optional and, when absent, this function's behavior is completely
-// unchanged from before this sub-task - the two branches below only run
-// when a caller actually sends one.
+// unchanged from before this sub-task - the catch branch below only runs
+// when a caller actually sends one and the insert it wraps collides.
 //
-// Two dedup paths, both needed:
-// 1. Read-first: an already-existing row for {userId, idempotencyKey} is
-//    returned as-is - no re-validation of account/category (it already
-//    passed the first time) and no second invalidateSpendingSummaryCache
-//    call (nothing new happened, so nothing new needs invalidating). This
-//    is the common case: a client retrying a request whose response it
-//    never saw (network drop, timeout) - by the time the retry arrives,
-//    the original create has long since committed.
-// 2. Catch-and-refetch on the unique-index violation
-//    (Transaction_userId_idempotencyKey_key): the true concurrent case -
-//    two requests with the same key both pass the read-first check before
-//    either has committed, so both proceed to insert; the DB's unique
-//    index is the actual guarantee (not step 1, which has an inherent
-//    race window), and whichever request loses the race gets a unique-
-//    constraint error here instead of a duplicate row. Reusing
-//    isUniqueConstraintError()'s exact P2039-plus-message-sniffing check
-//    (lib/observability/classify-error.ts) - this codebase's own
-//    precedent for what a unique violation actually looks like through
-//    @prisma/adapter-libsql, not the P2002 code Prisma's native engine
-//    would use.
+// Turso latency fix: this used to also read-first (a `prisma.transaction.
+// findFirst` by {userId, idempotencyKey}, returned as-is on a hit) before
+// ever attempting the insert, on every call that carried a key. Removed -
+// that pre-read only ever existed to shortcut the *replay* case (a client
+// retrying a request whose response it never saw), but the catch-and-
+// refetch path below already handles that exact case correctly on its own:
+// inserting an already-used idempotencyKey hits the same unique-index
+// violation either way, replay or genuine race, and the catch block below
+// reacts to it. Removing the pre-read costs one extra (fast-failing) insert
+// attempt on the rare replay path, in exchange for one fewer round-trip on
+// every single non-replay call - the overwhelming majority.
 //
-// Both paths return the *existing* row, matching this function's normal
-// return shape unchanged (no {transaction, replayed} wrapper) - from the
-// caller's point of view, asking to create an already-created transaction
-// looks exactly like the create succeeding, which is the point of an
-// idempotency key. `asset: null` on both replay paths is a known, accepted
-// gap: there's no FK from Transaction to the Asset row a first, successful
-// call might have created (see the assetPurchase branch below's own
-// comment on why), so a retry can't look it up to echo back - the asset
-// itself is unaffected (it was already created once, for real, on the
-// original request), only this response's best-effort confirmation detail
-// is missing on a replay.
+// The one dedup path left, catch-and-refetch on the unique-index violation
+// (Transaction_userId_idempotencyKey_key), also covers the true-concurrent
+// case: two requests with the same key both pass validation and proceed to
+// insert; the DB's unique index is the actual guarantee, and whichever
+// request loses the race gets a unique-constraint error here instead of a
+// duplicate row. Reusing isUniqueConstraintError()'s exact
+// P2039-plus-message-sniffing check (lib/observability/classify-error.ts) -
+// this codebase's own precedent for what a unique violation actually looks
+// like through @prisma/adapter-libsql, not the P2002 code Prisma's native
+// engine would use.
+//
+// The refetched row is returned in place of the create's own result,
+// matching this function's normal return shape unchanged (no
+// {transaction, replayed} wrapper) - from the caller's point of view,
+// asking to create an already-created transaction looks exactly like the
+// create succeeding, which is the point of an idempotency key. `asset:
+// null` on this replay path is a known, accepted gap: there's no FK from
+// Transaction to the Asset row a first, successful call might have created
+// (see the assetPurchase branch below's own comment on why), so a retry
+// can't look it up to echo back - the asset itself is unaffected (it was
+// already created once, for real, on the original request), only this
+// response's best-effort confirmation detail is missing on a replay.
 //
 // input.assetPurchase (set only when the AI detected this text as buying a
 // live-priced asset - lib/ai/parse-transaction.ts's assetSuggestion) makes
@@ -270,20 +294,23 @@ export async function updateTransaction(userId: number, id: number, input: Updat
 // relationship - deleting/editing the transaction later doesn't touch the
 // asset it created, same as the Assets page's own manually-entered rows.
 export async function createTransaction(userId: number, input: CreateTransactionInput) {
-  if (input.idempotencyKey) {
-    const existing = await prisma.transaction.findFirst({
-      where: { userId, idempotencyKey: input.idempotencyKey },
-      include: { category: true },
-    });
-    if (existing) {
-      return { ...existing, asset: null };
-    }
-  }
+  const createTransactionStartedAt = Date.now(); // TEMP-LATENCY
 
+  const lookupStartedAt = Date.now(); // TEMP-LATENCY
   const [account, category] = await Promise.all([
     prisma.financeAccount.findFirst({ where: { id: input.accountId, userId } }),
     prisma.category.findFirst({ where: { userId, name: input.categoryName, type: input.type } }),
   ]);
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "data/transactions.createTransaction", // TEMP-LATENCY
+      userId, // TEMP-LATENCY
+      step: "accountAndCategoryLookup", // TEMP-LATENCY
+      duration: Date.now() - lookupStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "createTransaction step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
 
   if (!account) {
     throw new InvalidAccountError("حساب نامعتبر است.");
@@ -308,22 +335,95 @@ export async function createTransaction(userId: number, input: CreateTransaction
 
   try {
     if (input.assetPurchase) {
+      const createStartedAt = Date.now(); // TEMP-LATENCY
       const [transaction, asset] = await prisma.$transaction([
-        prisma.transaction.create({ data: transactionData, include: { category: true } }),
+        // No `include: { category: true }` - `category` was already fully
+        // loaded a few lines above (accountAndCategoryLookup) and is
+        // attached to the returned row by hand below, in the exact shape
+        // Prisma's include would have produced, saving a redundant
+        // re-fetch of the same row.
+        prisma.transaction.create({ data: transactionData }),
         prisma.asset.create({
           data: buildAssetCreateData(userId, { ...input.assetPurchase, purchaseDate: input.date }),
         }),
       ]);
+      logger.info( // TEMP-LATENCY
+        { // TEMP-LATENCY
+          requestId: getRequestId(), // TEMP-LATENCY
+          route: "data/transactions.createTransaction", // TEMP-LATENCY
+          userId, // TEMP-LATENCY
+          step: "create", // TEMP-LATENCY
+          duration: Date.now() - createStartedAt, // TEMP-LATENCY
+          withAsset: true, // TEMP-LATENCY
+        }, // TEMP-LATENCY
+        "createTransaction step timing" // TEMP-LATENCY
+      ); // TEMP-LATENCY
       // A transaction can be logged retroactively into an already-cached
       // past month (e.g. parsing an old bank SMS) - see
       // invalidateSpendingSummaryCache's doc comment.
+      const invalidateStartedAt = Date.now(); // TEMP-LATENCY
       await invalidateSpendingSummaryCache(userId, input.date);
-      return { ...transaction, asset };
+      logger.info( // TEMP-LATENCY
+        { // TEMP-LATENCY
+          requestId: getRequestId(), // TEMP-LATENCY
+          route: "data/transactions.createTransaction", // TEMP-LATENCY
+          userId, // TEMP-LATENCY
+          step: "invalidateSpendingSummaryCache", // TEMP-LATENCY
+          duration: Date.now() - invalidateStartedAt, // TEMP-LATENCY
+        }, // TEMP-LATENCY
+        "createTransaction step timing" // TEMP-LATENCY
+      ); // TEMP-LATENCY
+      logger.info( // TEMP-LATENCY
+        { // TEMP-LATENCY
+          requestId: getRequestId(), // TEMP-LATENCY
+          route: "data/transactions.createTransaction", // TEMP-LATENCY
+          userId, // TEMP-LATENCY
+          step: "total", // TEMP-LATENCY
+          duration: Date.now() - createTransactionStartedAt, // TEMP-LATENCY
+        }, // TEMP-LATENCY
+        "createTransaction step timing" // TEMP-LATENCY
+      ); // TEMP-LATENCY
+      return { ...transaction, category, asset };
     }
 
-    const transaction = await prisma.transaction.create({ data: transactionData, include: { category: true } });
+    const createStartedAt = Date.now(); // TEMP-LATENCY
+    // Same redundant-include removal as the assetPurchase branch above -
+    // `category` is attached by hand from the already-fetched row.
+    const transaction = await prisma.transaction.create({ data: transactionData });
+    logger.info( // TEMP-LATENCY
+      { // TEMP-LATENCY
+        requestId: getRequestId(), // TEMP-LATENCY
+        route: "data/transactions.createTransaction", // TEMP-LATENCY
+        userId, // TEMP-LATENCY
+        step: "create", // TEMP-LATENCY
+        duration: Date.now() - createStartedAt, // TEMP-LATENCY
+        withAsset: false, // TEMP-LATENCY
+      }, // TEMP-LATENCY
+      "createTransaction step timing" // TEMP-LATENCY
+    ); // TEMP-LATENCY
+    const invalidateStartedAt = Date.now(); // TEMP-LATENCY
     await invalidateSpendingSummaryCache(userId, input.date);
-    return { ...transaction, asset: null };
+    logger.info( // TEMP-LATENCY
+      { // TEMP-LATENCY
+        requestId: getRequestId(), // TEMP-LATENCY
+        route: "data/transactions.createTransaction", // TEMP-LATENCY
+        userId, // TEMP-LATENCY
+        step: "invalidateSpendingSummaryCache", // TEMP-LATENCY
+        duration: Date.now() - invalidateStartedAt, // TEMP-LATENCY
+      }, // TEMP-LATENCY
+      "createTransaction step timing" // TEMP-LATENCY
+    ); // TEMP-LATENCY
+    logger.info( // TEMP-LATENCY
+      { // TEMP-LATENCY
+        requestId: getRequestId(), // TEMP-LATENCY
+        route: "data/transactions.createTransaction", // TEMP-LATENCY
+        userId, // TEMP-LATENCY
+        step: "total", // TEMP-LATENCY
+        duration: Date.now() - createTransactionStartedAt, // TEMP-LATENCY
+      }, // TEMP-LATENCY
+      "createTransaction step timing" // TEMP-LATENCY
+    ); // TEMP-LATENCY
+    return { ...transaction, category, asset: null };
   } catch (error) {
     if (input.idempotencyKey && isUniqueConstraintError(error)) {
       const existing = await prisma.transaction.findFirst({
@@ -343,7 +443,18 @@ export interface TransactionEnrichmentPatch {
   type: CategoryType;
   categoryName: string;
   description?: string;
-  date: Date;
+  // Omitted when the user picked the date themselves on quick submit (see
+  // lib/workflows/enrich-transaction.ts's keepDate) - the row's own date
+  // then stays as saved instead of being replaced by the AI's reading of
+  // rawInput, which never saw the picked date.
+  date?: Date;
+  // Mirrors lib/ai/parse-transaction.ts's SuggestedCategoryWithIcon
+  // field-for-field. Set only when parseTransactionWithAI's result carried
+  // a suggestedCategory that this workflow run could not resolve to an
+  // existing category (see lib/workflows/enrich-transaction.ts) - undefined
+  // otherwise, which applyTransactionEnrichment below writes as all-null,
+  // same as schema.prisma's own comment on these four Transaction columns.
+  suggestedCategory?: { name: string; parentName: string | null; reason: string; icon: string };
 }
 
 // Applies the background AI-parse result from lib/workflows/enrich-transaction.ts
@@ -393,9 +504,21 @@ export async function applyTransactionEnrichment(
       amount: patch.amount,
       type: patch.type,
       description: patch.description,
-      date: patch.date,
+      ...(patch.date ? { date: patch.date } : {}),
       categoryId: category.id,
       enrichmentStatus: null,
+      // Written unconditionally (not just when patch.suggestedCategory is
+      // present) - this update only ever runs once per transaction (guarded
+      // by the still-"pending" check above, and this call itself clears
+      // enrichmentStatus to null, so a second run can never reach past that
+      // guard again for the same row) - so there is no prior suggestion
+      // that could otherwise go stale here; explicitly nulling on the
+      // "absent" branch is just this write's normal shape, not a
+      // speculative reset for a re-enrichment path that doesn't exist.
+      suggestedCategoryName: patch.suggestedCategory?.name ?? null,
+      suggestedCategoryParentName: patch.suggestedCategory?.parentName ?? null,
+      suggestedCategoryReason: patch.suggestedCategory?.reason ?? null,
+      suggestedCategoryIcon: patch.suggestedCategory?.icon ?? null,
     },
   });
 
@@ -404,7 +527,7 @@ export async function applyTransactionEnrichment(
   // boundary) - invalidate both, same reasoning as updateTransaction above.
   await Promise.all([
     invalidateSpendingSummaryCache(userId, existing.date),
-    invalidateSpendingSummaryCache(userId, patch.date),
+    ...(patch.date ? [invalidateSpendingSummaryCache(userId, patch.date)] : []),
   ]);
 }
 
@@ -414,9 +537,108 @@ export async function applyTransactionEnrichment(
 // /api/transactions). Same "still pending" guard as
 // applyTransactionEnrichment above and for the same reason: a manual edit
 // that already landed must win.
-export async function markEnrichmentFailed(userId: number, id: number): Promise<void> {
-  await prisma.transaction.updateMany({
+//
+// `rawInput` is the same free text createTransaction stored on this row
+// (quick-submit only - see CreateTransactionInput.rawInput's own comment) -
+// checked here against hasStrongIncomeSignal (lib/extract-income-signal.ts)
+// as a last-resort correction. Without this, a quick-submit transaction
+// whose AI enrichment never completes is stuck on handleQuickSubmit's
+// hardcoded type: "expense" guess forever, silently corrupting every
+// downstream balance calculation (getTotalBalance in lib/data/accounts.ts
+// sums by `type` unconditionally, feeding straight into goal feasibility -
+// see lib/goals/feasibility.ts). This is deliberately narrow (only the
+// clearest, unambiguous keyword matches flip type/category - see that
+// function's own comment) and is belt-and-suspenders with, not a
+// replacement for, enrichmentStatus: "failed"'s own UI nudge
+// (transaction-row.tsx) - the row still lands on "failed" either way so the
+// user is still prompted to double-check it by hand.
+export async function markEnrichmentFailed(userId: number, id: number, rawInput: string): Promise<void> {
+  let correction: { type: "income"; categoryId: number } | undefined;
+  if (hasStrongIncomeSignal(rawInput)) {
+    const incomeCategory = await prisma.category.findFirst({
+      where: { userId, name: FALLBACK_INCOME_CATEGORY, type: "income" },
+    });
+    // Same "never throw away a saved transaction over a missing category"
+    // reasoning as applyTransactionEnrichment's own category lookup above -
+    // if the seeded fallback category is somehow missing for this user,
+    // leave the row exactly as the guard below would with no correction at
+    // all, rather than fail this whole call.
+    if (incomeCategory) {
+      correction = { type: "income", categoryId: incomeCategory.id };
+    }
+  }
+
+  const result = await prisma.transaction.updateMany({
     where: { id, userId, enrichmentStatus: "pending" },
-    data: { enrichmentStatus: "failed" },
+    data: { enrichmentStatus: "failed", ...correction },
+  });
+
+  // Only reachable once the update above actually applied (guarded by the
+  // still-"pending" where clause) and it actually changed `type` - a plain
+  // status flip with no correction doesn't change any month's income/
+  // expense totals, so there's nothing to invalidate.
+  if (result.count > 0 && correction) {
+    const updated = await prisma.transaction.findFirst({ where: { id, userId }, select: { date: true } });
+    if (updated) await invalidateSpendingSummaryCache(userId, updated.date);
+  }
+}
+
+// Backs POST /api/transactions/[id]/suggested-category's "accept" action -
+// `categoryId` is the real category already resolved by that route (via
+// lib/data/categories.ts's resolveOrCreateCategoryFromSuggestion), not
+// re-validated here beyond ownership since resolving/creating it is that
+// route's job, not this data-layer function's.
+//
+// Guarded on suggestedCategoryName still being non-null, read fresh here
+// rather than trusted from the caller - same "source of truth, not an
+// assumption about call order" reasoning as applyTransactionEnrichment's
+// own "still pending" guard: a transaction whose suggestion was already
+// accepted/dismissed (or that never had one) must not be silently
+// re-pointed at some other category by a stale/replayed request.
+export async function applySuggestedCategory(userId: number, id: number, categoryId: number): Promise<void> {
+  const existing = await prisma.transaction.findFirst({ where: { id, userId } });
+  if (!existing) {
+    throw new TransactionNotFoundError("تراکنش یافت نشد.");
+  }
+  if (existing.suggestedCategoryName === null) {
+    throw new TransactionNotFoundError("این تراکنش پیشنهاد دسته‌بندی‌ای ندارد.");
+  }
+
+  await prisma.transaction.update({
+    where: { id },
+    data: {
+      categoryId,
+      suggestedCategoryName: null,
+      suggestedCategoryParentName: null,
+      suggestedCategoryReason: null,
+      suggestedCategoryIcon: null,
+    },
+  });
+
+  await invalidateSpendingSummaryCache(userId, existing.date);
+}
+
+// Backs POST /api/transactions/[id]/suggested-category's "dismiss" action -
+// same guard as applySuggestedCategory above, but leaves categoryId (and
+// everything else about the row) untouched: dismissing just means "stop
+// showing me this banner," not "undo the fallback category enrichment
+// already assigned."
+export async function dismissSuggestedCategory(userId: number, id: number): Promise<void> {
+  const existing = await prisma.transaction.findFirst({ where: { id, userId } });
+  if (!existing) {
+    throw new TransactionNotFoundError("تراکنش یافت نشد.");
+  }
+  if (existing.suggestedCategoryName === null) {
+    throw new TransactionNotFoundError("این تراکنش پیشنهاد دسته‌بندی‌ای ندارد.");
+  }
+
+  await prisma.transaction.update({
+    where: { id },
+    data: {
+      suggestedCategoryName: null,
+      suggestedCategoryParentName: null,
+      suggestedCategoryReason: null,
+      suggestedCategoryIcon: null,
+    },
   });
 }

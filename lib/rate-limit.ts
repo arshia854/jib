@@ -144,7 +144,7 @@ export const OTP_REQUEST_PHONE_RULE: RateLimitRule = { limit: 4, windowSeconds: 
 export const OTP_REQUEST_IP_RULE: RateLimitRule = { limit: 15, windowSeconds: 60 * 60 };
 
 // Additional defense-in-depth on top of the per-code attempt cap already
-// enforced via the signed OTP cookie (see lib/auth/otp.ts MAX_ATTEMPTS) -
+// enforced by the server-side OTP challenge store (see lib/auth/otp.ts MAX_ATTEMPTS) -
 // bounds total verify volume per phone across multiple requested codes.
 export const OTP_VERIFY_PHONE_RULE: RateLimitRule = { limit: 8, windowSeconds: 15 * 60 };
 
@@ -173,6 +173,23 @@ export const GOAL_STRATEGY_USER_RULE: RateLimitRule = { limit: 10, windowSeconds
 
 // Generous coarse backstop applied per-IP across all API routes.
 export const GENERAL_API_IP_RULE: RateLimitRule = { limit: 200, windowSeconds: 5 * 60 };
+
+// POST /api/log-error is unauthenticated by necessity (see that route's
+// own comment) and every accepted call is a DB write, so it gets its own
+// limits well under GENERAL_API_IP_RULE. A legitimate client only posts
+// here when an error boundary fires - one page crash is one call, and even
+// a render loop that trips a boundary repeatedly stays within a handful -
+// so 20 per 5 minutes per IP leaves room for a real burst while capping
+// one IP's ErrorLog writes at 1/10th of what GENERAL_API_IP_RULE allows.
+export const CLIENT_ERROR_LOG_IP_RULE: RateLimitRule = { limit: 20, windowSeconds: 5 * 60 };
+// Shared across every caller under one fixed key, regardless of IP. Until
+// the reverse proxy is configured (see getClientIp()'s caveat above and
+// docs/deploy-runbook.md §4) the IP is spoofable, so cycling fake IPs
+// would otherwise bypass CLIENT_ERROR_LOG_IP_RULE entirely - this bounds
+// total ErrorLog writes from this route either way. Trade-off: a flood can
+// exhaust it and drop real client errors for the rest of the window,
+// which is preferable to unbounded writes.
+export const CLIENT_ERROR_LOG_GLOBAL_RULE: RateLimitRule = { limit: 500, windowSeconds: 5 * 60 };
 
 // Email/password auth - bounds brute-force guessing per account and per IP.
 export const EMAIL_LOGIN_EMAIL_RULE: RateLimitRule = { limit: 8, windowSeconds: 15 * 60 };

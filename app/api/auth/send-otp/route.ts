@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { generateOtpCode, createOtpToken, sendOtpSms, OTP_COOKIE, OTP_TTL_SECONDS } from "@/lib/auth/otp";
+import { generateOtpCode, createOtpChallenge, sendOtpSms, OTP_COOKIE, OTP_TTL_SECONDS } from "@/lib/auth/otp";
 import { isValidIranianPhone, normalizePhone } from "@/lib/auth/phone";
 import { checkRateLimit, getClientIp, rateLimitResponse, OTP_REQUEST_PHONE_RULE, OTP_REQUEST_IP_RULE } from "@/lib/rate-limit";
 import { logError } from "@/lib/error-log";
@@ -56,10 +56,12 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json({ error: "ارسال پیامک با خطا مواجه شد. لطفاً دوباره تلاش کنید." }, { status: 502 });
   }
-  const token = await createOtpToken(phone, code);
+  // The cookie carries only an opaque challenge id - the code itself stays
+  // server-side (see lib/auth/otp.ts).
+  const challengeId = createOtpChallenge(phone, code);
 
   const store = await cookies();
-  store.set(OTP_COOKIE, token, {
+  store.set(OTP_COOKIE, challengeId, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",

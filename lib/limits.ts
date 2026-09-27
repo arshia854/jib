@@ -159,3 +159,15 @@ export const MAX_ASSET_PRICE_PER_UNIT = 1_000_000_000_000_000;
 // BigInt like Asset's Toman-price fields) shouldn't silently also change
 // the other's.
 export const MAX_GOAL_TARGET_AMOUNT = 2_147_483_647;
+
+// SavingsStrategy.targetAmount (Int, Toman - see prisma/schema.prisma's
+// SavingsStrategy model). Same underlying constraint as
+// MAX_TRANSACTION_AMOUNT/MAX_GOAL_TARGET_AMOUNT above - all three fields are
+// declared `Int` in schema.prisma, so all three are actually bounded by
+// Int32's max (2^31 - 1) regardless of what SQLite itself tolerates. Kept as
+// its own named constant rather than reusing MAX_GOAL_TARGET_AMOUNT
+// directly, for the same reason that constant isn't a reuse of
+// MAX_TRANSACTION_AMOUNT: a savings-strategy target and a goal target are
+// different business concepts that happen to share a numeric ceiling for
+// now, and this phase has no API route to enforce it with yet regardless.
+export const MAX_SAVINGS_STRATEGY_TARGET_AMOUNT = 2_147_483_647;

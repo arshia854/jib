@@ -4,10 +4,11 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/session";
 import { getComparison } from "@/lib/reports/monthly-comparison";
 import { generateHighlights } from "@/lib/reports/generate-highlights";
-import { getPeriodTrend, getRecurringExpenses, getUnusualTransactions } from "@/lib/reports/trend-insights";
+import { getPeriodTrend, getExpensePatterns } from "@/lib/reports/trend-insights";
 import { generateNarrativeReport } from "@/lib/reports/narrative-report";
 import { dateToPeriodKey, getPreviousPeriod, type ReportGranularity } from "@/lib/reports/period-range";
 import { getTodaySpending } from "@/lib/reports/today-spending";
+import { getLivePrices, LivePriceUnavailableError, type LivePrices } from "@/lib/prices/get-live-prices";
 import { MonthlyComparisonReport } from "@/components/reports/MonthlyComparisonReport";
 import { TodaySpendingReport } from "@/components/reports/TodaySpendingReport";
 import { EmptyState } from "@/components/empty-state";
@@ -80,13 +81,23 @@ export default async function ReportsPage({ searchParams }: PageProps) {
   } else {
     const currentPeriod = dateToPeriodKey(new Date(), tab);
     const previousPeriod = getPreviousPeriod(currentPeriod, tab);
-    const [comparison, trend, recurringExpenses, unusualTransactions] = await Promise.all([
+    const [comparison, trend, { recurringExpenses, unusualTransactions }, livePrices] = await Promise.all([
       getComparison(String(session.userId), currentPeriod, previousPeriod, tab),
       // Phase 1 (docs/roadmap-status.md) fetched these three as data-layer-only; Phase 2 wires
       // them into MonthlyComparisonReport below.
       getPeriodTrend(String(session.userId), currentPeriod, tab, TREND_PERIODS_BACK),
-      getRecurringExpenses(String(session.userId), currentPeriod, tab),
-      getUnusualTransactions(String(session.userId), currentPeriod, tab),
+      // Recurring + unusual share one fetch of the same lookback window -
+      // getRecurringExpenses/getUnusualTransactions separately would fetch
+      // it twice (see getExpensePatterns' own comment).
+      getExpensePatterns(String(session.userId), currentPeriod, tab),
+      // For DiscretionarySplitCard's gold-equivalent detail view. Caught here (not left to
+      // bubble) so a live-price outage never breaks the whole reports page - the card just
+      // omits its gold figures, same "degrade gracefully" contract as every other
+      // getLivePrices() caller (lib/data/assets.ts, lib/data/dashboard.ts).
+      getLivePrices().catch((error): LivePrices | undefined => {
+        if (error instanceof LivePriceUnavailableError) return undefined;
+        throw error;
+      }),
     ]);
     const highlights = generateHighlights(comparison, PERIOD_LABELS[tab]);
     const narrative = generateNarrativeReport({
@@ -108,6 +119,7 @@ export default async function ReportsPage({ searchParams }: PageProps) {
             recurringExpenses={recurringExpenses}
             unusualTransactions={unusualTransactions}
             narrative={narrative}
+            livePrices={livePrices}
           />
         );
   }

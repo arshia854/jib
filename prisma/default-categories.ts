@@ -147,12 +147,23 @@ export const DEFAULT_CATEGORIES: DefaultCategorySeed[] = [
       { name: "چک و سفته", icon: "📄", color: "#78716C", isEssential: true },
     ],
   },
+  // isEssential: true here despite this reading like a discretionary
+  // "expense" category - it's savings/investment outflow, not consumption,
+  // so it must never be surfaced as spending to cut (see
+  // lib/reports/generate-highlights.ts and narrative-report.ts's
+  // resolveOpportunity, which treat isEssential: false as "reducible").
+  // "واریز به حساب پس‌انداز" (recording a savings deposit as this kind of
+  // expense) was removed from here - it overlapped with the dedicated
+  // /app/transfer flow's isTransfer-excluded paired transactions, which
+  // exist specifically to keep an internal savings transfer out of
+  // spending totals. Existing rows for it (per-user Category and the stale
+  // DefaultCategory row) are flagged isArchived rather than deleted - see
+  // prisma/archive-retired-categories.ts for why.
   {
-    name: "پس‌انداز و سرمایه‌گذاری", icon: "📈", color: "#10B981", type: "expense", isEssential: false,
+    name: "پس‌انداز و سرمایه‌گذاری", icon: "📈", color: "#10B981", type: "expense", isEssential: true,
     children: [
-      { name: "واریز به حساب پس‌انداز", icon: "💰", color: "#10B981", isEssential: false },
-      { name: "خرید طلا و ارز", icon: "🪙", color: "#10B981", isEssential: false },
-      { name: "صندوق سرمایه‌گذاری و بورس", icon: "📊", color: "#10B981", isEssential: false },
+      { name: "خرید طلا و ارز", icon: "🪙", color: "#10B981", isEssential: true },
+      { name: "صندوق سرمایه‌گذاری و بورس", icon: "📊", color: "#10B981", isEssential: true },
     ],
   },
   {

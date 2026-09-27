@@ -8,7 +8,12 @@ import {
   type RecurringExpense,
   type UnusualTransaction,
 } from "@/lib/analytics/spending-summary";
-import { periodToGregorianRange, getPreviousPeriod, type ReportGranularity } from "./period-range";
+import {
+  periodToGregorianRange,
+  getPreviousPeriod,
+  type GregorianRange,
+  type ReportGranularity,
+} from "./period-range";
 
 export type { RecurringExpense, UnusualTransaction };
 
@@ -34,14 +39,18 @@ function periodKeyToLabel(periodKey: string, granularity: ReportGranularity): st
 }
 
 /**
- * How many periods (current + N-1 prior) to bucket when checking for
- * recurring expenses, per granularity - passed to computeRecurringExpenses
- * (lib/analytics/spending-summary.ts), whose own "present in >= 2 buckets"
- * threshold (RECURRING_EXPENSE_MIN_MONTHS, private to that file) is already
- * granularity-agnostic - it doesn't care what a "period" is, only how many
- * of them a description shows up in - so it's reused unchanged for every
- * granularity here. The lookback COUNT is the one thing that does need
- * per-granularity judgement:
+ * How many periods (current + N-1 prior) to bucket for the two lookback-
+ * window analytics in lib/analytics/spending-summary.ts, per granularity -
+ * computeRecurringExpenses ("present in >= 2 buckets") and
+ * computeUnusualTransactions (a category's baseline average across all
+ * buckets). Both of those thresholds (RECURRING_EXPENSE_MIN_MONTHS,
+ * UNUSUAL_TRANSACTION_MIN_BASELINE_SAMPLES - both private to that file) are
+ * already granularity-agnostic: neither cares what a "period" is, only how
+ * many of them a description shows up in / how many transactions land in
+ * the pool - so both are reused unchanged for every granularity here, and
+ * both functions get the same buckets from getPeriodExpenseBuckets below.
+ * The lookback COUNT is the one thing that does need per-granularity
+ * judgement:
  *
  * - month: RECURRING_EXPENSE_LOOKBACK_MONTHS (3), unchanged - this must stay
  *   identical to lib/analytics/spending-summary.ts's own month behavior, so
@@ -76,6 +85,59 @@ function periodKeysMostRecentFirst(currentPeriod: string, granularity: ReportGra
   return keys;
 }
 
+interface PeriodRange extends GregorianRange {
+  periodKey: string;
+}
+
+/**
+ * The `count` periods ending at `currentPeriod` with their own Gregorian
+ * [start, end) bounds (most-recent-first, same order as
+ * periodKeysMostRecentFirst), plus `span`: the single [start, end) range
+ * covering all of them.
+ *
+ * `span` is what both fetches below query on, so each of them costs one
+ * round trip instead of one per period - see bucketByPeriod for the JS-side
+ * split that replaces the per-period WHERE clauses. Periods produced by
+ * getPreviousPeriod are contiguous and strictly decreasing, so the span is
+ * just the oldest period's start up to the newest period's end; no period
+ * math is reimplemented here, only reused from period-range.ts.
+ */
+function periodRangesMostRecentFirst(
+  currentPeriod: string,
+  granularity: ReportGranularity,
+  count: number
+): { periods: PeriodRange[]; span: GregorianRange } {
+  const periods = periodKeysMostRecentFirst(currentPeriod, granularity, count).map((periodKey) => ({
+    periodKey,
+    ...periodToGregorianRange(periodKey, granularity),
+  }));
+
+  return { periods, span: { start: periods[periods.length - 1].start, end: periods[0].end } };
+}
+
+/**
+ * Splits rows fetched over a whole span (see periodRangesMostRecentFirst)
+ * back into one array per period, in the same order as `periods`.
+ *
+ * Each row is placed by the same half-open [start, end) test the per-period
+ * queries this replaces used as their WHERE clause, so a row dated exactly
+ * on a boundary lands in the period that *starts* there, not the one that
+ * ends there - identical bucketing, just done once in JS instead of once per
+ * period in the database. A row matching no period is dropped rather than
+ * forced into one; contiguous periods make that unreachable for rows inside
+ * the span, but it keeps the rule explicit.
+ */
+function bucketByPeriod<T extends { date: Date }>(rows: T[], periods: GregorianRange[]): T[][] {
+  const buckets: T[][] = periods.map(() => []);
+
+  for (const row of rows) {
+    const index = periods.findIndex((p) => row.date >= p.start && row.date < p.end);
+    if (index !== -1) buckets[index].push(row);
+  }
+
+  return buckets;
+}
+
 /**
  * Net income/expense for `currentPeriod` and the `periodsBack` periods
  * before it (so periodsBack + 1 periods total), oldest first. Same
@@ -84,6 +146,16 @@ function periodKeysMostRecentFirst(currentPeriod: string, granularity: ReportGra
  * period-range.ts's generic Jalaali period arithmetic instead of that
  * function's hardwired-to-months SpendingSummaryCache lookups, so it works
  * for week/month/year alike.
+ *
+ * One query for the whole window, summed per period in JS - not one
+ * groupBy per period. A period-bucketed groupBy isn't expressible (the
+ * database has no notion of a Jalaali period to group by, and `by: ["date"]`
+ * would group per distinct timestamp, not per period), so this fetches the
+ * window's rows and buckets them with the same period bounds the per-period
+ * queries used. Motivation: @libsql/client doesn't give these round trips
+ * real HTTP-level concurrency - the Promise.all this replaced queued them
+ * rather than running them in parallel, so the cost was periodsBack + 1
+ * serialized round trips for what is a single narrow scan.
  */
 export async function getPeriodTrend(
   userId: string,
@@ -92,28 +164,77 @@ export async function getPeriodTrend(
   periodsBack: number
 ): Promise<TrendPeriod[]> {
   const userIdNum = Number(userId);
-  const periodKeys = periodKeysMostRecentFirst(currentPeriod, granularity, periodsBack + 1);
+  const { periods, span } = periodRangesMostRecentFirst(currentPeriod, granularity, periodsBack + 1);
 
-  const periods = await Promise.all(
-    periodKeys.map(async (periodKey): Promise<TrendPeriod> => {
-      const { start, end } = periodToGregorianRange(periodKey, granularity);
-      const groups = await prisma.transaction.groupBy({
-        by: ["type"],
-        // Same isTransfer exclusion as sumExpensesByCategory
-        // (lib/reports/monthly-comparison.ts) - a transfer between the
-        // user's own accounts is neither real income nor a real expense.
-        where: { userId: userIdNum, date: { gte: start, lt: end }, category: { isTransfer: false } },
-        _sum: { amount: true },
-      });
+  const transactions = await prisma.transaction.findMany({
+    // Same isTransfer exclusion as sumExpensesByCategory
+    // (lib/reports/monthly-comparison.ts) - a transfer between the
+    // user's own accounts is neither real income nor a real expense.
+    where: { userId: userIdNum, date: { gte: span.start, lt: span.end }, category: { isTransfer: false } },
+    select: { date: true, type: true, amount: true },
+  });
 
-      const income = groups.find((g) => g.type === "income")?._sum.amount ?? 0;
-      const expense = groups.find((g) => g.type === "expense")?._sum.amount ?? 0;
+  const buckets = bucketByPeriod(transactions, periods);
+
+  return periods
+    .map(({ periodKey }, i): TrendPeriod => {
+      // Only income/expense contribute, exactly as the two-row groupBy this
+      // replaces did - any other `type` value is ignored rather than summed.
+      let income = 0;
+      let expense = 0;
+      for (const t of buckets[i]) {
+        if (t.type === "income") income += t.amount;
+        else if (t.type === "expense") expense += t.amount;
+      }
 
       return { periodKey, label: periodKeyToLabel(periodKey, granularity), income, expense, net: income - expense };
     })
+    .reverse();
+}
+
+/**
+ * One array of expense transactions per period in the lookback window (see
+ * RECURRING_EXPENSE_LOOKBACK_PERIODS above for how many, per granularity),
+ * most-recent-first - the input order both computeRecurringExpenses and
+ * computeUnusualTransactions document for their multi-bucket parameter.
+ * Shared by the two functions below so they can't drift onto different
+ * windows, and so the selected fields (the union of what both need: the
+ * description/amount recurring-expense grouping runs on, plus the
+ * id/date/type/category an unusual-transaction result must carry) are
+ * described in one place. isTransfer categories are excluded here, same as
+ * every other aggregate in this module.
+ *
+ * One query for the whole lookback window, bucketed per period in JS - not
+ * one findMany per period (see getPeriodTrend above for why serialized
+ * round trips are what this module optimizes against). A caller that wants
+ * both results should go through getExpensePatterns below so the window is
+ * fetched once rather than once per consumer.
+ */
+async function getPeriodExpenseBuckets(userIdNum: number, currentPeriod: string, granularity: ReportGranularity) {
+  const { periods, span } = periodRangesMostRecentFirst(
+    currentPeriod,
+    granularity,
+    RECURRING_EXPENSE_LOOKBACK_PERIODS[granularity]
   );
 
-  return periods.reverse();
+  const transactions = await prisma.transaction.findMany({
+    where: {
+      userId: userIdNum,
+      type: "expense",
+      date: { gte: span.start, lt: span.end },
+      category: { isTransfer: false },
+    },
+    select: {
+      id: true,
+      date: true,
+      amount: true,
+      type: true,
+      description: true,
+      category: { select: { name: true, isEssential: true } },
+    },
+  });
+
+  return bucketByPeriod(transactions, periods);
 }
 
 /**
@@ -130,53 +251,53 @@ export async function getRecurringExpenses(
   currentPeriod: string,
   granularity: ReportGranularity
 ): Promise<RecurringExpense[]> {
-  const userIdNum = Number(userId);
-  const lookback = RECURRING_EXPENSE_LOOKBACK_PERIODS[granularity];
-  // Most-recent-first, matching computeRecurringExpenses' own documented
-  // input order.
-  const periodKeys = periodKeysMostRecentFirst(currentPeriod, granularity, lookback);
-
-  const buckets = await Promise.all(
-    periodKeys.map((periodKey) => {
-      const { start, end } = periodToGregorianRange(periodKey, granularity);
-      return prisma.transaction.findMany({
-        where: { userId: userIdNum, type: "expense", date: { gte: start, lt: end }, category: { isTransfer: false } },
-        select: { description: true, amount: true },
-      });
-    })
-  );
+  const buckets = await getPeriodExpenseBuckets(Number(userId), currentPeriod, granularity);
 
   return computeRecurringExpenses(buckets);
 }
 
 /**
- * Current-period expense transactions flagged as unusual (>= 3x their
- * category's other-transactions-this-period average) - a thin fetch wrapper
- * around computeUnusualTransactions (lib/analytics/spending-summary.ts),
- * which is already granularity-agnostic: it only needs "this period"'s
- * expense transactions, whatever period that is.
+ * Current-period expense transactions flagged as unusual (>= 3x the
+ * average of their category's other transactions across the same
+ * multi-period lookback window recurring expenses use) - a thin fetch
+ * wrapper around computeUnusualTransactions
+ * (lib/analytics/spending-summary.ts), which is already
+ * granularity-agnostic: it only needs correctly-bucketed period arrays,
+ * most-recent-first, whatever a period is here.
  */
 export async function getUnusualTransactions(
   userId: string,
   currentPeriod: string,
   granularity: ReportGranularity
 ): Promise<UnusualTransaction[]> {
-  const userIdNum = Number(userId);
-  const { start, end } = periodToGregorianRange(currentPeriod, granularity);
+  const buckets = await getPeriodExpenseBuckets(Number(userId), currentPeriod, granularity);
 
-  const transactions = await prisma.transaction.findMany({
-    where: { userId: userIdNum, type: "expense", date: { gte: start, lt: end }, category: { isTransfer: false } },
-    select: {
-      id: true,
-      date: true,
-      amount: true,
-      type: true,
-      description: true,
-      category: { select: { name: true, isEssential: true } },
-    },
-  });
+  return computeUnusualTransactions(buckets);
+}
 
-  return computeUnusualTransactions(transactions);
+/**
+ * Both of the above from a single fetch of the lookback window - what a
+ * caller that wants both (app/app/reports/page.tsx does) should use.
+ *
+ * getRecurringExpenses and getUnusualTransactions are each independent
+ * fetch wrappers, so calling both meant fetching the exact same window
+ * twice; since @libsql/client doesn't run this project's queries
+ * concurrently, that duplicate was a whole extra serialized round trip for
+ * rows already in hand. Both are kept as-is for callers that genuinely want
+ * only one of the two - the buckets they pass on are the same ones this
+ * returns results from, so the two paths can't disagree.
+ */
+export async function getExpensePatterns(
+  userId: string,
+  currentPeriod: string,
+  granularity: ReportGranularity
+): Promise<{ recurringExpenses: RecurringExpense[]; unusualTransactions: UnusualTransaction[] }> {
+  const buckets = await getPeriodExpenseBuckets(Number(userId), currentPeriod, granularity);
+
+  return {
+    recurringExpenses: computeRecurringExpenses(buckets),
+    unusualTransactions: computeUnusualTransactions(buckets),
+  };
 }
 
 /**

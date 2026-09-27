@@ -39,6 +39,26 @@ export const DEFAULT_ACCOUNT = {
 export const FALLBACK_EXPENSE_CATEGORY = "سایر هزینه‌ها";
 export const FALLBACK_INCOME_CATEGORY = "سایر درآمدها";
 
+// Drops every category a NEW transaction must not land on: one flagged
+// Category.isArchived itself, or a child of an archived top-level category
+// (archiving a parent retires its whole subtree - otherwise its children
+// would still be reachable through a merchant override or findSimilarCategory
+// even though formatCategoryTree no longer lists them under any parent).
+// Existing transactions keep pointing at archived rows untouched - this is
+// only ever applied to candidate lists for new selection/suggestion, never
+// to anything that displays history. Replaces the old name-based
+// DEPRECATED_CATEGORY_NAMES list; see prisma/archive-retired-categories.ts
+// for the one-off backfill that flagged its only entry
+// ("واریز به حساب پس‌انداز") on existing users' rows.
+export function excludeArchived<T extends CategoryOption>(categories: T[]): T[] {
+  const archivedTopLevel = new Set(
+    categories.filter((c) => c.isArchived && !c.parentName).map((c) => `${c.type}:${c.name}`)
+  );
+  return categories.filter(
+    (c) => !c.isArchived && !(c.parentName && archivedTopLevel.has(`${c.type}:${c.parentName}`))
+  );
+}
+
 // Below this shared-token ratio (intersection size / size of the shorter
 // name's token set), an overlap is treated as coincidental - e.g. sharing
 // one generic word - rather than a genuine near-match, so stage 3 below

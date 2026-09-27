@@ -8,13 +8,14 @@ vi.mock("@/lib/auth/session", () => ({
 
 import { getSession } from "@/lib/auth/session";
 import { POST } from "@/app/api/log-error/route";
+import { checkRateLimit, CLIENT_ERROR_LOG_IP_RULE, CLIENT_ERROR_LOG_GLOBAL_RULE } from "@/lib/rate-limit";
 
 const mockedGetSession = vi.mocked(getSession);
 
-function makeRequest(body: unknown): NextRequest {
+function makeRequest(body: unknown, ip?: string): NextRequest {
   return new NextRequest("http://localhost/api/log-error", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(ip ? { "X-Real-IP": ip } : {}) },
     body: JSON.stringify(body),
   });
 }
@@ -93,5 +94,49 @@ describe("POST /api/log-error", () => {
 
     const row = await prisma.errorLog.findFirst({ where: { route: "client", message }, orderBy: { id: "desc" } });
     expect(row?.stack).toBeNull();
+  });
+});
+
+describe("POST /api/log-error - rate limiting", () => {
+  it(`per-IP: request #${CLIENT_ERROR_LOG_IP_RULE.limit + 1} from one IP in the window gets 429 and writes nothing`, async () => {
+    mockedGetSession.mockResolvedValue(null);
+    const ip = "10.20.30.40";
+    // Empty-body requests are rejected with 400 before any DB write, but
+    // only after the rate limit check - so they drain this IP's budget
+    // without creating ErrorLog rows.
+    for (let i = 0; i < CLIENT_ERROR_LOG_IP_RULE.limit; i++) {
+      const res = await POST(makeRequest({}, ip));
+      expect(res.status).toBe(400);
+    }
+
+    const message = `${testRoute}-ip-limited`;
+    const res = await POST(makeRequest({ message }, ip));
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).not.toBeNull();
+    const row = await prisma.errorLog.findFirst({ where: { route: "client", message } });
+    expect(row).toBeNull();
+
+    // A different IP is unaffected.
+    const other = await POST(makeRequest({ message: `${testRoute}-other-ip` }, "10.20.30.41"));
+    expect(other.status).toBe(200);
+  });
+
+  // Must stay the last test in this file: it exhausts the shared
+  // "log-error:global" counter, which is module-level state that persists
+  // for the rest of this file's run.
+  it("global: once the shared cap is spent, even a fresh IP gets 429 and writes nothing", async () => {
+    mockedGetSession.mockResolvedValue(null);
+    // Drain whatever is left of the global budget directly (earlier tests
+    // in this file already consumed some of it) instead of issuing
+    // CLIENT_ERROR_LOG_GLOBAL_RULE.limit real requests.
+    for (let i = 0; i < CLIENT_ERROR_LOG_GLOBAL_RULE.limit; i++) {
+      if (!checkRateLimit("log-error:global", CLIENT_ERROR_LOG_GLOBAL_RULE).allowed) break;
+    }
+
+    const message = `${testRoute}-global-limited`;
+    const res = await POST(makeRequest({ message }, "10.99.99.99"));
+    expect(res.status).toBe(429);
+    const row = await prisma.errorLog.findFirst({ where: { route: "client", message } });
+    expect(row).toBeNull();
   });
 });

@@ -28,7 +28,28 @@ export function extractDate(rawText: string, now: Date = new Date()): string | n
   if (signalCount > 1) return null;
 
   const offsetDays = hasWeekAgo ? -7 : hasDayBeforeYesterday ? -2 : hasYesterday ? -1 : 0;
-  return offsetDate(now, offsetDays);
+  return tehranIsoDate(now, offsetDays);
+}
+
+const TEHRAN_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Tehran",
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+});
+
+/**
+ * The yyyy-mm-dd calendar day it is in Tehran at `now`, shifted by
+ * `offsetDays` - this app's "today" everywhere a transaction date is
+ * defaulted. Not the runtime's own day: the server runs in UTC, and so did
+ * every `toISOString().slice(0, 10)` default this replaced, which lags
+ * Tehran (UTC+3:30, no DST since 1401) by a whole day from 00:00 to 03:30
+ * local - a transaction logged just after midnight landed on yesterday.
+ */
+export function tehranIsoDate(now: Date = new Date(), offsetDays = 0): string {
+  const parts = TEHRAN_DAY_FORMATTER.formatToParts(now);
+  const field = (type: "year" | "month" | "day") => Number(parts.find((p) => p.type === type)?.value);
+  return new Date(Date.UTC(field("year"), field("month") - 1, field("day") + offsetDays)).toISOString().slice(0, 10);
 }
 
 function containsTokenSequence(tokens: string[], needle: string[]): boolean {
@@ -39,9 +60,4 @@ function containsTokenSequence(tokens: string[], needle: string[]): boolean {
     return true;
   }
   return false;
-}
-
-function offsetDate(base: Date, days: number): string {
-  const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + days));
-  return d.toISOString().slice(0, 10);
 }

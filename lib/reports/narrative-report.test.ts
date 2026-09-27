@@ -45,6 +45,8 @@ function trendPeriod(overrides: Partial<TrendPeriod> & { periodKey: string }): T
   };
 }
 
+// isEssential defaults to false (discretionary) for the same reason category() above does -
+// existing tests that don't care about the essential/discretionary split are unaffected.
 function unusual(overrides: Partial<UnusualTransaction> & { category: string }): UnusualTransaction {
   return {
     id: 1,
@@ -53,6 +55,7 @@ function unusual(overrides: Partial<UnusualTransaction> & { category: string }):
     amount: 300,
     categoryAverage: 100,
     multiple: 3,
+    isEssential: false,
     ...overrides,
   };
 }
@@ -159,6 +162,56 @@ describe("generateNarrativeReport", () => {
       expect(report.insight?.category).toBe("پوشاک");
       expect(report.insight?.multiple).toBe(6);
       expect(report.insight?.amount).toBe(1000);
+      // v1.1 expression bank idiom opens the message, ahead of the category/amount/multiple.
+      expect(report.insight?.message).toContain("پول از دستت مثل آب سُر خورد");
+      expect(report.insight?.message).toContain("«پوشاک»");
+      expect(report.insight?.message).toContain(formatToman(1000));
+      // The baseline is a multi-period average now - the message must not claim an all-time
+      // ("همیشگی") one, which is what the old copy said back when it was same-period-only.
+      expect(report.insight?.message).toContain("میانگین این دسته توی دوره‌های اخیر");
+      expect(report.insight?.message).not.toContain("همیشگی");
+    });
+
+    it("prefers a discretionary unusual transaction over an essential one with a higher multiple", () => {
+      const report = generate({
+        unusualTransactions: [
+          unusual({ category: "اجاره", amount: 5000, multiple: 9, isEssential: true }), // highest multiple overall
+          unusual({ category: "سرگرمی", amount: 600, multiple: 4, isEssential: false }),
+        ],
+      });
+      expect(report.insight?.category).toBe("سرگرمی");
+      expect(report.insight?.multiple).toBe(4);
+      expect(report.insight?.message).toContain("پول از دستت مثل آب سُر خورد");
+    });
+
+    it("picks the highest-multiple discretionary transaction among several", () => {
+      const report = generate({
+        unusualTransactions: [
+          unusual({ category: "اجاره", multiple: 20, isEssential: true }),
+          unusual({ category: "سرگرمی", multiple: 4, isEssential: false }),
+          unusual({ category: "پوشاک", multiple: 7, isEssential: false }),
+        ],
+      });
+      expect(report.insight?.category).toBe("پوشاک");
+      expect(report.insight?.multiple).toBe(7);
+    });
+
+    it("falls back to an essential unusual transaction, with neutral (non-warning) wording, when there is no discretionary one", () => {
+      const report = generate({
+        unusualTransactions: [
+          unusual({ category: "اجاره", amount: 5000, multiple: 9, isEssential: true }),
+          unusual({ category: "درمان", amount: 2000, multiple: 5, isEssential: true }),
+        ],
+      });
+      expect(report.insight?.category).toBe("اجاره");
+      expect(report.insight?.multiple).toBe(9);
+      expect(report.insight?.message).toContain("«اجاره»");
+      expect(report.insight?.message).toContain(formatToman(5000));
+      expect(report.insight?.message).toContain("میانگین این دسته توی دوره‌های اخیر");
+      // Neutral register (see generate-highlights.ts's essentialIncreaseCandidate) - none of the
+      // discretionary branch's "money slipped through your fingers / watch out" framing.
+      expect(report.insight?.message).not.toContain("پول از دستت مثل آب سُر خورد");
+      expect(report.insight?.message).not.toContain("مراقب");
     });
 
     it("falls back to the largest absolute increase when there are no unusual transactions", () => {
@@ -173,6 +226,10 @@ describe("generateNarrativeReport", () => {
       expect(report.insight?.category).toBe("خوراک");
       expect(report.insight?.amount).toBe(150);
       expect(report.insight?.multiple).toBeUndefined();
+      // v1.1 expression bank idiom - deliberately different from the unusual-transaction branch's.
+      expect(report.insight?.message).toContain("دست و دلت واقعاً باز بوده");
+      expect(report.insight?.message).toContain("«خوراک»");
+      expect(report.insight?.message).toContain(formatToman(150));
     });
 
     it("picks the largest absolute increase by amount even when its percent change is smaller", () => {
@@ -288,7 +345,11 @@ describe("generateNarrativeReport", () => {
           ],
         }),
       });
-      expect(report.opportunity?.amount).toBe(Math.round((2000 * OPPORTUNITY_REDUCTION_PERCENT) / 100));
+      const expectedAmount = Math.round((2000 * OPPORTUNITY_REDUCTION_PERCENT) / 100);
+      expect(report.opportunity?.amount).toBe(expectedAmount);
+      // v1.1 expression bank idiom opens the message, ahead of the percent/amount.
+      expect(report.opportunity?.message).toContain("یه‌جای خالی برای پس‌انداز پیدا کردم");
+      expect(report.opportunity?.message).toContain(formatToman(expectedAmount));
     });
 
     it("is omitted when there is no discretionary spending", () => {

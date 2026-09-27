@@ -39,6 +39,48 @@ self.addEventListener("message", (event) => {
   );
 });
 
+// Web Push (Phase 2 of the notifications feature - see
+// lib/notifications/send-push.ts for the server side that sends these).
+// The payload is always JSON (see sendPushToUser's `payload` below) -
+// falls back to a plain string body if a push ever arrives without one so
+// a malformed/older payload still shows something instead of throwing.
+self.addEventListener("push", (event) => {
+  let data = { title: "جیب", body: "" };
+  if (event.data) {
+    try {
+      data = event.data.json();
+    } catch {
+      data = { title: "جیب", body: event.data.text() };
+    }
+  }
+
+  event.waitUntil(
+    self.registration.showNotification(data.title || "جیب", {
+      body: data.body || "",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      data: { url: data.url || "/" },
+    })
+  );
+});
+
+// Focuses an already-open app tab instead of always opening a new one, same
+// "reuse what's already there" spirit as this file's own fetch/cache
+// handling below.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || "/";
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if (client.url === targetUrl && "focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+    })
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;

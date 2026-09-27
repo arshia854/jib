@@ -117,8 +117,16 @@ function statusFromSavingsRate(savingsRate: number | undefined): NarrativeStatus
 
 /**
  * Rule 3 (insight priority):
- *   a. the single highest-`multiple` unusual transaction, if any exist (computeUnusualTransactions
- *      already returns them sorted descending by multiple - see spending-summary.ts).
+ *   a. the single highest-`multiple` unusual transaction, if any exist - but preferring the
+ *      DISCRETIONARY (isEssential: false) ones, even when an essential transaction has a
+ *      numerically higher multiple. A discretionary overspend is something the user can act on;
+ *      an essential one (rent, insurance, a medical bill) usually isn't, so leading the whole
+ *      report with it would spend the single headline slot on something that can't change. Same
+ *      essential/discretionary split philosophy generate-highlights.ts already applies with its
+ *      discretionaryWarningCandidate (priority 1, actionable, warning tone) vs.
+ *      essentialIncreaseCandidate (priority 2, informational, neutral tone). An essential
+ *      transaction is used only when there is no discretionary one at all, and then gets its own
+ *      neutral wording rather than the discretionary branch's "watch out" framing (see below).
  *   b. otherwise, the comparison category with the largest *absolute* toman increase
  *      (currentAmount - previousAmount), matching generate-highlights.ts's own "amount over
  *      percent" principle for its discretionary-warning candidate. That file's own qualifying
@@ -130,20 +138,61 @@ function statusFromSavingsRate(savingsRate: number | undefined): NarrativeStatus
  *      "meaningful" at all.
  *   c. otherwise omitted - not fabricated.
  */
+/**
+ * Rule 3a's discretionary wording. v1.1 expression bank (docs/jib-persona.md), "Overspending vs.
+ * own average" row - opens with the "پول از دستت مثل آب سُر خورد" idiom, then the concrete
+ * number, per the bank's "idiom first, number second" rule. "این دوره" replaces the bank's
+ * literal "این ماه": this message fires for week/month/year reports alike (no periodLabel reaches
+ * this function), and "این دوره" is already this file's own period-neutral phrasing (see
+ * resolveSuggestion/resolveOpportunity below).
+ *
+ * The average clause used to read "میانگین همیشگیت توی این دسته" ("your usual/ever average"),
+ * which was simply false back when computeUnusualTransactions compared a transaction only against
+ * the same period's other transactions - the "average" could be a single unrelated purchase from
+ * the same month. That baseline is now a real multi-period one, so the wording says what it
+ * actually is: the category's average over the recent periods, not an all-time figure it still
+ * isn't (the window is only a few periods deep - see RECURRING_EXPENSE_LOOKBACK_PERIODS).
+ */
+function discretionaryInsightMessage(top: UnusualTransaction): string {
+  return `پول از دستت مثل آب سُر خورد این دوره - توی «${top.category}» یه تراکنش ${formatToman(top.amount)} ثبت شده، ${formatNumber(top.multiple)} برابر میانگین این دسته توی دوره‌های اخیر.`;
+}
+
+/**
+ * Rule 3a's essential-category wording - deliberately NOT the discretionary idiom above. "پول از
+ * دستت مثل آب سُر خورد ... مراقب باش" frames the spend as something that went wrong and can be
+ * fixed; for an essential cost that's both inaccurate and, per the persona's rule 1 ("قضاوت نکن؛
+ * توصیف کن"), unfair - the user didn't choose to spend more on rent or medicine.
+ *
+ * Register matched to generate-highlights.ts's essentialIncreaseCandidate, which handles the same
+ * situation for the highlights strip: no expression-bank idiom (every "recurring spend" idiom
+ * describes steadiness, which would fight a fact about a spike), fact first, then one light
+ * reassuring clause so a bare number can't read as a warning it isn't. The clause itself is
+ * worded differently from that one on purpose - narrative and highlights render on the same
+ * report page, and reading the identical sentence twice is exactly the stale-personality failure
+ * the persona doc warns about.
+ */
+function essentialInsightMessage(top: UnusualTransaction): string {
+  return `هزینه ضروری «${top.category}» این دوره ${formatToman(top.amount)} بوده - ${formatNumber(top.multiple)} برابر میانگین این دسته توی دوره‌های اخیر. این‌جور خرجا همیشه یه‌اندازه نیستن، چیزی نیست که از دستت در رفته باشه.`;
+}
+
 function resolveInsight(
   comparison: MonthlyComparisonResult,
   unusualTransactions: UnusualTransaction[]
 ): NarrativeInsight | undefined {
   if (unusualTransactions.length > 0) {
+    // Discretionary first, whatever the multiples say (see rule 3a above) - only when there
+    // isn't a single discretionary one does an essential transaction get the headline.
+    const discretionary = unusualTransactions.filter((t) => !t.isEssential);
+    const pool = discretionary.length > 0 ? discretionary : unusualTransactions;
     // computeUnusualTransactions (lib/analytics/spending-summary.ts) already returns these sorted
     // descending by multiple, so [0] would normally be enough - reduce() here is a defensive,
     // near-zero-cost explicit max rather than leaning on a sort order this function doesn't own.
-    const top = unusualTransactions.reduce((best, t) => (t.multiple > best.multiple ? t : best));
+    const top = pool.reduce((best, t) => (t.multiple > best.multiple ? t : best));
     return {
       category: top.category,
       amount: top.amount,
       multiple: top.multiple,
-      message: `«${top.category}»: یه تراکنش ${formatToman(top.amount)} ثبت شده، ${formatNumber(top.multiple)} برابر میانگین همیشگیت توی این دسته.`,
+      message: top.isEssential ? essentialInsightMessage(top) : discretionaryInsightMessage(top),
     };
   }
 
@@ -161,7 +210,12 @@ function resolveInsight(
   return {
     category: best.category,
     amount: bestDelta,
-    message: `بیشترین افزایش خرجت مربوط به «${best.category}» بوده، ${formatToman(bestDelta)} بیشتر از دوره قبل.`,
+    // v1.1 expression bank, same "Overspending vs. own average" row as above - deliberately a
+    // DIFFERENT idiom ("دست و دلت واقعاً باز بوده") than the unusual-transaction branch's, so the
+    // two don't read as the same line if a report ever surfaces one right after the other across
+    // periods. Same "این دوره" over the bank's literal "این ماه" for the granularity-agnostic
+    // reason noted above.
+    message: `دست و دلت واقعاً باز بوده این دوره - بیشترین افزایش خرجت مربوط به «${best.category}» بوده، ${formatToman(bestDelta)} بیشتر از دوره قبل.`,
   };
 }
 
@@ -255,7 +309,10 @@ function resolveOpportunity(comparison: MonthlyComparisonResult): NarrativeOppor
   const amount = Math.round((discretionaryTotal * OPPORTUNITY_REDUCTION_PERCENT) / 100);
   return {
     amount,
-    message: `اگه ${formatNumber(OPPORTUNITY_REDUCTION_PERCENT)}٪ از هزینه‌های غیرضروریت رو کم کنی، می‌تونی این دوره حدود ${formatToman(amount)} پس‌انداز کنی.`,
+    // v1.1 expression bank, "Savings opportunity" row - opens with the "یه‌جای خالی برای
+    // پس‌انداز پیدا کردم" idiom (already period-neutral in the bank itself, no "این ماه" to
+    // adapt), then the concrete percent/amount.
+    message: `یه‌جای خالی برای پس‌انداز پیدا کردم - اگه ${formatNumber(OPPORTUNITY_REDUCTION_PERCENT)}٪ از هزینه‌های غیرضروریت رو کم کنی، می‌تونی این دوره حدود ${formatToman(amount)} پس‌انداز کنی.`,
   };
 }
 

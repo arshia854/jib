@@ -187,3 +187,57 @@ describe("getFinancialContextSummary - goals integration", () => {
     expect(context).not.toContain("هدف محقق‌شده تست");
   });
 });
+
+// The assistant gets availableBalance/savingsBalance/totalBalance as three
+// distinct lines (instead of one collapsed "موجودی کل"), so it can tell
+// "what can I spend" apart from "what have I set aside".
+describe("getFinancialContextSummary - balance split", () => {
+  let withSavingsUserId: number;
+  let noSavingsUserId: number;
+
+  beforeAll(async () => {
+    const withSavings = await makeUserWithAccount("WITH-SAVINGS");
+    withSavingsUserId = withSavings.userId;
+    await Promise.all([
+      prisma.financeAccount.update({ where: { id: withSavings.accountId }, data: { initialBalance: 600000 } }),
+      prisma.financeAccount.create({
+        data: { userId: withSavingsUserId, name: "پس‌انداز", type: "savings", initialBalance: 1400000 },
+      }),
+    ]);
+
+    const noSavings = await makeUserWithAccount("NO-SAVINGS");
+    noSavingsUserId = noSavings.userId;
+    await prisma.financeAccount.update({ where: { id: noSavings.accountId }, data: { initialBalance: 250000 } });
+  });
+
+  afterAll(async () => {
+    await cleanup(withSavingsUserId);
+    await cleanup(noSavingsUserId);
+  });
+
+  it("lists available, savings and grand-total balances as three distinct lines", async () => {
+    const context = await getFinancialContextSummary(withSavingsUserId);
+
+    expect(context).toContain(
+      [
+        "موجودی قابل‌استفاده (بدون احتساب پس‌انداز): ۶۰۰٬۰۰۰ تومان",
+        "پس‌انداز: ۱٬۴۰۰٬۰۰۰ تومان",
+        "مجموع کل دارایی نقدی: ۲٬۰۰۰٬۰۰۰ تومان",
+      ].join("\n")
+    );
+    // The old single collapsed line is gone.
+    expect(context).not.toContain("موجودی کل:");
+  });
+
+  it("with no savings account, shows savings as 0 and available equal to the grand total", async () => {
+    const context = await getFinancialContextSummary(noSavingsUserId);
+
+    expect(context).toContain(
+      [
+        "موجودی قابل‌استفاده (بدون احتساب پس‌انداز): ۲۵۰٬۰۰۰ تومان",
+        "پس‌انداز: ۰ تومان",
+        "مجموع کل دارایی نقدی: ۲۵۰٬۰۰۰ تومان",
+      ].join("\n")
+    );
+  });
+});

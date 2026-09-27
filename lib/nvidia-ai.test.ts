@@ -2,9 +2,9 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { chatCompletion, streamChatCompletion, NVIDIA_REQUEST_TIMEOUT_MS, type ChatMessageInput } from "@/lib/nvidia-ai";
 
 function stubEnv() {
-  vi.stubEnv("OPENROUTER_API_KEY", "test-key");
-  vi.stubEnv("OPENROUTER_BASE_URL", "https://example.test/v1");
-  vi.stubEnv("OPENROUTER_MODEL", "test-model");
+  vi.stubEnv("ARVAN_AI_API_KEY", "test-key");
+  vi.stubEnv("ARVAN_AI_BASE_URL", "https://example.test/v1");
+  vi.stubEnv("ARVAN_AI_MODEL", "test-model");
 }
 
 afterEach(() => {
@@ -53,6 +53,25 @@ describe("chatCompletion", () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init.body as string).max_tokens).toBe(1500);
   });
+
+  // A caller with a larger structured-JSON schema than the default was
+  // sized for (e.g. lib/goals/strategy.ts's generateGoalStrategy) can
+  // request more room via options.maxTokens instead of being stuck with
+  // the shared 1500 default - see that module's own GOAL_STRATEGY_JSON_MAX_TOKENS.
+  it("honors an explicit maxTokens override instead of the shared JSON-extraction default", async () => {
+    stubEnv();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await chatCompletion(MESSAGES, { json: true, maxTokens: 3000 });
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.max_tokens).toBe(3000);
+    expect(body.response_format).toEqual({ type: "json_object" });
+  });
 });
 
 describe("streamChatCompletion", () => {
@@ -89,7 +108,7 @@ describe("gateway timeout (Phase 9.1)", () => {
     vi.useRealTimers();
   });
 
-  it("aborts the request and surfaces a clear error if OpenRouter never responds within the timeout", async () => {
+  it("aborts the request and surfaces a clear error if ArvanCloud never responds within the timeout", async () => {
     stubEnv();
     vi.useFakeTimers();
     // Never resolves on its own - only reacts to the AbortController's
@@ -111,6 +130,38 @@ describe("gateway timeout (Phase 9.1)", () => {
     // A timeout abort is not retried (see isConnectionLevelFailure's own
     // comment - it may already be mid-generation server-side) - exactly one
     // fetch call, not two.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression coverage for the goals/strategy production timeout: raising
+  // GOAL_STRATEGY_JSON_MAX_TOKENS to 3000 without a matching timeout meant
+  // the shared 30s default fired on legitimately-longer completions (AI_ERROR
+  // logs with duration: 30002, twice, for that route). A caller with a
+  // larger token budget can now request its own longer timeout via
+  // chatCompletion's `timeoutMs` option, the same way `maxTokens` already
+  // works. The abort fires only once, at the overridden delay (not the
+  // shared default), and the error message reports that overridden value -
+  // if the override weren't actually reaching the abort timer/message, this
+  // would either time out waiting for the promise to settle or report "30"
+  // instead of "60".
+  it("honors an explicit timeoutMs override instead of the shared default", async () => {
+    stubEnv();
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const overrideMs = 60_000;
+    const promise = chatCompletion(MESSAGES, { timeoutMs: overrideMs });
+    const expectation = expect(promise).rejects.toThrow(/بیش از 60 ثانیه/);
+    await vi.advanceTimersByTimeAsync(overrideMs);
+    await expectation;
+
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -137,7 +188,7 @@ describe("gateway timeout (Phase 9.1)", () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(chatCompletion(MESSAGES)).rejects.toThrow(/ارتباط با OpenRouter برقرار نشد/);
+    await expect(chatCompletion(MESSAGES)).rejects.toThrow(/ارتباط با آروان کلاد برقرار نشد/);
     expect(fetchMock).toHaveBeenCalledTimes(2); // original attempt + exactly one retry
   });
 
@@ -185,5 +236,41 @@ describe("chatCompletion onUsage (Phase 9.4)", () => {
     await chatCompletion(MESSAGES, { onUsage });
 
     expect(onUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe("chatCompletion onResponseMeta", () => {
+  it("reports finish_reason and the length of any reasoning text returned alongside the content", async () => {
+    stubEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: "length", message: { content: '{"summary": "ناتما', reasoning_content: "x".repeat(900) } }],
+          }),
+          { status: 200 }
+        )
+      )
+    );
+
+    const onResponseMeta = vi.fn();
+    const content = await chatCompletion(MESSAGES, { json: true, onResponseMeta });
+
+    expect(content).toBe('{"summary": "ناتما');
+    expect(onResponseMeta).toHaveBeenCalledWith({ finishReason: "length", reasoningChars: 900 });
+  });
+
+  it("leaves both fields undefined when the provider sends neither", async () => {
+    stubEnv();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }), { status: 200 }))
+    );
+
+    const onResponseMeta = vi.fn();
+    await chatCompletion(MESSAGES, { json: true, onResponseMeta });
+
+    expect(onResponseMeta).toHaveBeenCalledWith({ finishReason: undefined, reasoningChars: undefined });
   });
 });

@@ -105,10 +105,29 @@ export function CheckIcon(props: IconProps) {
   );
 }
 
+export function CalendarIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="4" y="5.5" width="16" height="14.5" rx="2" />
+      <path d="M4 10h16M8.5 3.5v4M15.5 3.5v4" />
+    </svg>
+  );
+}
+
 export function FilterIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
       <path d="M4 6h16M7 12h10M10 18h4" />
+    </svg>
+  );
+}
+
+// Dropdown affordance (transaction-filter-bar.tsx's styled <select>s) - a
+// plain chevron, not ArrowDownIcon, which already means "expense" elsewhere.
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="m6 9.5 6 6 6-6" />
     </svg>
   );
 }
@@ -330,7 +349,7 @@ export function LockIcon(props: IconProps) {
 // horizontal arrows - the internal-transfer entry point (accounts-manager.tsx)
 // and the merged transfer list row (transfer-row.tsx) both use this rather
 // than reusing ArrowUpIcon/ArrowDownIcon, which already mean "income"/
-// "expense" everywhere else in this codebase (transaction-row.tsx, stat-card.tsx) -
+// "expense" everywhere else in this codebase (transaction-row.tsx, month-summary-card.tsx) -
 // a transfer is neither, and reusing either would misleadingly imply it is.
 export function TransferIcon(props: IconProps) {
   return (

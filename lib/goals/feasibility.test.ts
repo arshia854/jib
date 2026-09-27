@@ -5,10 +5,12 @@ import {
   computeGoalFeasibility,
   getActualMonthlyAverage,
   getGoalFeasibilityContext,
+  getGoalBalanceInputs,
   FEASIBILITY_ON_TRACK_RATIO,
   FEASIBILITY_ADJUSTMENT_RATIO,
   FEASIBILITY_ON_TRACK_RATIO_IRREGULAR_INCOME,
   FEASIBILITY_ADJUSTMENT_RATIO_IRREGULAR_INCOME,
+  AVAILABLE_BALANCE_FLOOR_RATIO,
   type GoalFeasibilityInput,
 } from "@/lib/goals/feasibility";
 
@@ -241,6 +243,46 @@ describe("computeGoalFeasibility", () => {
       expect(result.feasibilityStatus).toBe("unrealistic");
     });
   });
+
+  // Defense-in-depth safety net (see AVAILABLE_BALANCE_FLOOR_RATIO's own
+  // comment) against the exact bug class this task set out to fix: a
+  // mistyped transaction (e.g. a quick-submit "expense" that should have
+  // been "income" - see markEnrichmentFailed in lib/data/transactions.ts)
+  // can swing getTotalBalance by 2x its amount, which without this bound
+  // would otherwise explode requiredMonthlyAmount into a nonsensical
+  // figure.
+  describe("availableBalance sanity bound (AVAILABLE_BALANCE_FLOOR_RATIO)", () => {
+    // input()'s own targetAmount (60,000,000) - the floor is
+    // targetAmount * AVAILABLE_BALANCE_FLOOR_RATIO.
+    const TARGET_AMOUNT = 60_000_000;
+    const FLOOR = TARGET_AMOUNT * AVAILABLE_BALANCE_FLOOR_RATIO;
+
+    it("floors an extremely negative availableBalance so requiredMonthlyAmount stays a sane multiple of targetAmount instead of exploding", () => {
+      // A corrupted balance orders of magnitude past the floor (simulating
+      // a large mistyped income transaction inflating total "debt").
+      const corrupted = computeGoalFeasibility(input({ availableBalance: -10_000_000_000 }));
+      const atFloorExactly = computeGoalFeasibility(input({ availableBalance: FLOOR }));
+
+      // Anything past the floor collapses to the exact same result as the
+      // floor itself - the bound, not the raw corrupted input, determines
+      // the outcome past that point.
+      expect(corrupted.requiredMonthlyAmount).toBe(atFloorExactly.requiredMonthlyAmount);
+      // remainingAmount = 60,000,000 - 12,000,000 - 0 - (-60,000,000) = 108,000,000
+      // requiredMonthlyAmount = 108,000,000 / 6 = 18,000,000 - a sane
+      // multiple of the goal itself, not the ~1.67 billion/month the
+      // uncapped input would otherwise have produced.
+      expect(corrupted.requiredMonthlyAmount).toBe(18_000_000);
+      expect(corrupted.feasibilityStatus).toBe("unrealistic");
+    });
+
+    it("still lets a moderate negative availableBalance (within the floor) worsen requiredMonthlyAmount proportionally, unclamped", () => {
+      // -5,000,000 is well within -1x targetAmount (-60,000,000) - the
+      // bound must not kick in here.
+      const result = computeGoalFeasibility(input({ availableBalance: -5_000_000 }));
+      // remainingAmount = 60,000,000 - 12,000,000 - 0 - (-5,000,000) = 53,000,000
+      expect(result.requiredMonthlyAmount).toBeCloseTo(53_000_000 / 6);
+    });
+  });
 });
 
 // getActualMonthlyAverage/getGoalFeasibilityContext genuinely query the DB
@@ -436,5 +478,95 @@ describe("getGoalFeasibilityContext", () => {
     } finally {
       await cleanup(freshUserId);
     }
+  });
+
+  // Phase B1 (savings roadmap): a goal linked to its own savingsAccountId
+  // must (a) stop counting toward activeGoalCount's divisor, and (b) have
+  // its linked account's balance subtracted from the pool the *other*
+  // active goals still split - otherwise linking a goal would just move the
+  // double-counting bug (the same money counted once via that goal's own
+  // alreadySaved and again via every other active goal's share) instead of
+  // fixing it.
+  it("earmarks a linked active goal's account balance out of the shared pool, and excludes that goal from the divisor", async () => {
+    const { userId: freshUserId } = await makeUserWithAccount("CONTEXT-LINKED");
+    await prisma.financeAccount.updateMany({ where: { userId: freshUserId }, data: { initialBalance: 9_000_000 } });
+    const linkedAccount = await prisma.financeAccount.create({
+      data: { userId: freshUserId, name: "پس‌انداز مرتبط", type: "savings", initialBalance: 3_000_000 },
+    });
+    await Promise.all([
+      prisma.goal.create({
+        data: {
+          userId: freshUserId,
+          name: "مرتبط",
+          category: "other",
+          targetAmount: 10_000_000,
+          deadline: new Date("2027-01-01"),
+          savingsAccountId: linkedAccount.id,
+        },
+      }),
+      prisma.goal.create({
+        data: { userId: freshUserId, name: "بدون لینک", category: "other", targetAmount: 20_000_000, deadline: new Date("2027-06-01") },
+      }),
+    ]);
+    try {
+      const context = await getGoalFeasibilityContext(freshUserId);
+      // totalBalance itself stays the raw, unreduced total (9,000,000 cash +
+      // 3,000,000 linked savings = 12,000,000) - only
+      // availableBalancePerActiveGoal is affected by earmarking.
+      expect(context.totalBalance).toBe(12_000_000);
+      // Only the unlinked goal counts toward the divisor.
+      expect(context.activeGoalCount).toBe(1);
+      // sharedPool = 12,000,000 - 3,000,000 (earmarked to the linked goal) =
+      // 9,000,000, split across the single unlinked active goal.
+      expect(context.availableBalancePerActiveGoal).toBe(9_000_000);
+    } finally {
+      await cleanup(freshUserId);
+    }
+  });
+});
+
+// getGoalBalanceInputs (Phase B1, savings roadmap) - the per-goal
+// alreadySaved/availableBalance split getGoalFeasibilityContext's own
+// availableBalancePerActiveGoal isn't enough to resolve on its own, since it
+// also depends on the individual goal's savingsAccountId/status. Unit-tested
+// directly against a hand-built GoalFeasibilityContext (not a fresh DB
+// query) since the context half of this arithmetic is already covered by
+// getGoalFeasibilityContext's own describe block above.
+describe("getGoalBalanceInputs", () => {
+  let userId: number;
+  let accountId: number;
+
+  beforeAll(async () => {
+    const { userId: freshUserId, accountId: freshAccountId } = await makeUserWithAccount("BALANCE-INPUTS");
+    userId = freshUserId;
+    accountId = freshAccountId;
+    await prisma.financeAccount.update({ where: { id: accountId }, data: { initialBalance: 6_500_000 } });
+  });
+
+  afterAll(async () => {
+    await cleanup(userId);
+  });
+
+  const context: import("@/lib/goals/feasibility").GoalFeasibilityContext = {
+    actualMonthlyAverage: 1_000_000,
+    totalBalance: 6_500_000,
+    incomeRegularity: null,
+    activeGoalCount: 1,
+    availableBalancePerActiveGoal: 6_500_000,
+  };
+
+  it("a goal without a savingsAccountId falls back to its share of the shared pool, alreadySaved 0", async () => {
+    const result = await getGoalBalanceInputs(userId, { status: "active", savingsAccountId: null }, context);
+    expect(result).toEqual({ alreadySaved: 0, availableBalance: 6_500_000 });
+  });
+
+  it("an inactive (achieved/abandoned) goal without a savingsAccountId gets no pool share", async () => {
+    const result = await getGoalBalanceInputs(userId, { status: "achieved", savingsAccountId: null }, context);
+    expect(result).toEqual({ alreadySaved: 0, availableBalance: 0 });
+  });
+
+  it("a goal WITH a savingsAccountId reports the account's real balance as alreadySaved and 0 pool share, regardless of context.availableBalancePerActiveGoal", async () => {
+    const result = await getGoalBalanceInputs(userId, { status: "active", savingsAccountId: accountId }, context);
+    expect(result).toEqual({ alreadySaved: 6_500_000, availableBalance: 0 });
   });
 });

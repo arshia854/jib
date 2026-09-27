@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { getGoal, GoalNotFoundError } from "@/lib/data/goals";
-import { getGoalFeasibilityContext, computeGoalFeasibility } from "@/lib/goals/feasibility";
+import { getGoalFeasibilityContext, getGoalBalanceInputs, computeGoalFeasibility } from "@/lib/goals/feasibility";
 import { generateGoalStrategy } from "@/lib/goals/strategy";
 import { checkRateLimit, rateLimitResponse, GOAL_STRATEGY_USER_RULE } from "@/lib/rate-limit";
 import { reportError } from "@/lib/observability/report-error";
@@ -61,12 +61,21 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
   // sibling-goal list of its own, but doesn't need one, since
   // activeGoalCount/the resulting per-goal share are computed inside
   // getGoalFeasibilityContext, not derived from a list the caller fetched.
+  //
+  // Phase B1.5: getGoalBalanceInputs applies the same per-goal
+  // alreadySaved/availableBalance split listGoalsWithFeasibility already
+  // uses - a goal with its own savingsAccountId draws on that account's real
+  // balance (alreadySaved) instead of a share of the shared pool. Without
+  // this, a linked goal here would still get the stale, pool-based
+  // availableBalance the doc comments above (getGoalFeasibilityContext,
+  // getGoalBalanceInputs) flagged as this route's one remaining gap.
   const context = await getGoalFeasibilityContext(session.userId);
+  const { alreadySaved, availableBalance } = await getGoalBalanceInputs(session.userId, goal, context);
   const feasibility = computeGoalFeasibility({
     targetAmount: goal.targetAmount,
     initialAmount: goal.initialAmount,
-    alreadySaved: 0,
-    availableBalance: goal.status === "active" ? context.availableBalancePerActiveGoal : 0,
+    alreadySaved,
+    availableBalance,
     deadline: goal.deadline,
     actualMonthlyAverage: context.actualMonthlyAverage,
     incomeRegularity: context.incomeRegularity,
@@ -74,7 +83,22 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
 
   try {
     const strategy = await generateGoalStrategy(
-      { name: goal.name, targetAmount: goal.targetAmount, initialAmount: goal.initialAmount, deadline: goal.deadline },
+      {
+        name: goal.name,
+        targetAmount: goal.targetAmount,
+        initialAmount: goal.initialAmount,
+        deadline: goal.deadline,
+        // Same alreadySaved+availableBalance this goal's feasibility
+        // computation above just used, combined into the one balance-share
+        // figure GoalStrategyGoalInput has room for (its own doc comment
+        // documents this as mirroring GoalFeasibilityInput.availableBalance)
+        // - kept identical so the strategy's stated progress can never
+        // disagree with the feasibility numbers computed from the same
+        // figures. For an unlinked goal alreadySaved is always 0, so this is
+        // exactly the pool share as before; for a goal with its own
+        // savingsAccountId it's that account's real balance instead.
+        availableBalance: alreadySaved + availableBalance,
+      },
       feasibility,
       session.userId
     );

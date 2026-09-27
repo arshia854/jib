@@ -6,6 +6,7 @@ import {
   getPeriodTrend,
   getRecurringExpenses,
   getUnusualTransactions,
+  getExpensePatterns,
   getPeriodSavingsRate,
 } from "@/lib/reports/trend-insights";
 
@@ -221,35 +222,65 @@ describe("trend-insights", () => {
   describe("getUnusualTransactions", () => {
     const UNUSUAL_NAME = "دسته تراکنش غیرعادی تست";
     const TRANSFER_NAME = "انتقال غیرعادی تست";
+    const SPARSE_NAME = "دسته کم‌نمونه غیرعادی تست";
+    const LUMP_SUM_NAME = "دسته یک‌قلم غیرعادی تست";
     const CURRENT_PERIOD = "1403-03";
 
     let categoryId: number;
 
     beforeAll(async () => {
-      const [category, transfer] = await Promise.all([
+      const [category, transfer, sparse, lumpSum] = await Promise.all([
         prisma.category.create({
           data: { userId, name: UNUSUAL_NAME, icon: "❗", color: "#100006", type: "expense" },
         }),
         prisma.category.create({
           data: { userId, name: TRANSFER_NAME, icon: "🔄", color: "#100007", type: "expense", isTransfer: true },
         }),
+        prisma.category.create({
+          data: { userId, name: SPARSE_NAME, icon: "🕳️", color: "#100008", type: "expense" },
+        }),
+        prisma.category.create({
+          data: { userId, name: LUMP_SUM_NAME, icon: "🏠", color: "#100009", type: "expense" },
+        }),
       ]);
       categoryId = category.id;
 
+      // The same 3-period lookback getRecurringExpenses uses at month
+      // granularity: current "1403-03" + "1403-02" + "1403-01".
       const start = periodToGregorianRange(CURRENT_PERIOD, "month").start;
+      const prev1Start = periodToGregorianRange("1403-02", "month").start;
+      const prev2Start = periodToGregorianRange("1403-01", "month").start;
 
       await Promise.all([
         makeTxn(categoryId, "expense", 10000, start, "خرید عادی ۱"),
         makeTxn(categoryId, "expense", 10000, start, "خرید عادی ۲"),
-        // 5x the average of the other two (10000) -> flagged.
+        // 5x the average of the category's other 4 transactions (10000
+        // each, two of them from the prior periods below) -> flagged.
         makeTxn(categoryId, "expense", 50000, start, "خرید غیرعادی"),
+        makeTxn(categoryId, "expense", 10000, prev1Start, "خرید ماه قبل"),
+        makeTxn(categoryId, "expense", 10000, prev2Start, "خرید دو ماه قبل"),
         // A huge transfer - must never be considered, even though it would
         // dwarf everything else in the category average if it leaked in.
         makeTxn(transfer.id, "expense", 5000000, start, "انتقال بزرگ"),
+
+        // Only 2 other transactions anywhere in the window - below the
+        // minimum baseline sample size, so nothing here is flagged even
+        // though 900000 vs. a 15000-ish "average" would look enormous.
+        makeTxn(sparse.id, "expense", 900000, start, "تراکنش بزرگ کم‌نمونه"),
+        makeTxn(sparse.id, "expense", 15000, start, "تراکنش کوچک کم‌نمونه"),
+        makeTxn(sparse.id, "expense", 15000, prev1Start, "تراکنش کوچک ماه قبل"),
+
+        // One lump sum per period plus one small item: against this period
+        // alone the lump sum is ~50x the "average", against the category's
+        // real history it's an ordinary payment.
+        makeTxn(lumpSum.id, "expense", 5000000, start, "اجاره این ماه"),
+        makeTxn(lumpSum.id, "expense", 100000, start, "شارژ ساختمان"),
+        makeTxn(lumpSum.id, "expense", 4800000, prev1Start, "اجاره ماه قبل"),
+        makeTxn(lumpSum.id, "expense", 5200000, prev2Start, "اجاره دو ماه قبل"),
       ]);
     });
 
-    it("flags a transaction at least 3x its category's other-transactions-this-period average", async () => {
+    it("flags a transaction at least 3x its category's average across the 3-period lookback window", async () => {
       const unusual = await getUnusualTransactions(String(userId), CURRENT_PERIOD, "month");
 
       expect(unusual).toHaveLength(1);
@@ -258,6 +289,114 @@ describe("trend-insights", () => {
       expect(unusual[0].categoryAverage).toBe(10000);
       expect(unusual[0].multiple).toBe(5);
       expect(unusual[0].category).toBe(UNUSUAL_NAME);
+      // No explicit isEssential on the fixture category -> schema default.
+      expect(unusual[0].isEssential).toBe(true);
+    });
+
+    it("skips a category with fewer than the minimum number of baseline transactions in the window", async () => {
+      const unusual = await getUnusualTransactions(String(userId), CURRENT_PERIOD, "month");
+
+      expect(unusual.map((t) => t.category)).not.toContain(SPARSE_NAME);
+    });
+
+    it("does not flag a per-period lump sum that is normal against the category's own history", async () => {
+      const unusual = await getUnusualTransactions(String(userId), CURRENT_PERIOD, "month");
+
+      // Baseline for the 5,000,000: (100000 + 4800000 + 5200000) / 3 =
+      // 3,366,666 -> 1.5x, below the 3x threshold. A current-period-only
+      // baseline would have been the lone 100,000 -> 50x, flagged.
+      expect(unusual.map((t) => t.category)).not.toContain(LUMP_SUM_NAME);
+    });
+  });
+
+  // Both getPeriodTrend and getPeriodExpenseBuckets now fetch their whole
+  // window in one query and split it per period in JS, so the split itself
+  // (not just the aggregation on top of it) is what needs covering: rows
+  // landing in different periods, a row dated exactly on a period boundary,
+  // and a period with no rows at all. Deliberately in 1401 - every other
+  // fixture in this file lives in 1402-1404, so these rows can't perturb
+  // any of their assertions, or vice versa.
+  describe("period bucketing", () => {
+    const BUCKET_NAME = "دسته باکت تست";
+    const BUCKET_INCOME_NAME = "درآمد باکت تست";
+    const RECURRING_DESCRIPTION = "قبض برق";
+    const BOUNDARY_DESCRIPTION = "خرید لحظه آخر";
+    const CURRENT_PERIOD = "1401-07";
+
+    beforeAll(async () => {
+      const [expense, income] = await Promise.all([
+        prisma.category.create({
+          data: { userId, name: BUCKET_NAME, icon: "🧺", color: "#10000A", type: "expense" },
+        }),
+        prisma.category.create({
+          data: { userId, name: BUCKET_INCOME_NAME, icon: "💵", color: "#10000B", type: "income" },
+        }),
+      ]);
+
+      const month05Start = periodToGregorianRange("1401-05", "month").start;
+      const month06Start = periodToGregorianRange("1401-06", "month").start;
+      const month07Start = periodToGregorianRange(CURRENT_PERIOD, "month").start;
+      // The last instant before 1401-06 begins - must bucket into 1401-05.
+      const lastInstantOf05 = new Date(month06Start.getTime() - 1);
+
+      await Promise.all([
+        makeTxn(income.id, "income", 100000, month05Start),
+        makeTxn(expense.id, "expense", 10000, month05Start, RECURRING_DESCRIPTION),
+        makeTxn(expense.id, "expense", 5000, lastInstantOf05, BOUNDARY_DESCRIPTION),
+
+        // 1401-06 deliberately has no transactions at all.
+
+        // Dated exactly on 1401-07's start - the [start, end) bounds put it
+        // in the period that starts there, never in the one that ends there.
+        makeTxn(expense.id, "expense", 30000, month07Start, RECURRING_DESCRIPTION),
+        makeTxn(income.id, "income", 70000, month07Start),
+      ]);
+    });
+
+    it("buckets trend rows into the right period, including a boundary row and an empty period", async () => {
+      const periods = await getPeriodTrend(String(userId), CURRENT_PERIOD, "month", 2);
+
+      expect(periods.map((p) => p.periodKey)).toEqual(["1401-05", "1401-06", "1401-07"]);
+
+      // 10000 + the 5000 dated one millisecond before 1401-06 starts.
+      expect(periods[0]).toMatchObject({ income: 100000, expense: 15000, net: 85000 });
+      expect(periods[1]).toMatchObject({ income: 0, expense: 0, net: 0 });
+      // The 30000 dated exactly on 1401-07's start belongs here, not to 1401-06.
+      expect(periods[2]).toMatchObject({ income: 70000, expense: 30000, net: 40000 });
+    });
+
+    it("buckets expense rows per period across an empty period", async () => {
+      const { recurringExpenses, unusualTransactions } = await getExpensePatterns(
+        String(userId),
+        CURRENT_PERIOD,
+        "month"
+      );
+
+      const recurring = recurringExpenses.find((r) => r.description === RECURRING_DESCRIPTION);
+      expect(recurring).toBeDefined();
+      // Present in 1401-05 and 1401-07 but not the empty 1401-06 - so 2 of
+      // the 3 checked periods, averaged across the two it appeared in.
+      expect(recurring?.monthsPresent).toBe(2);
+      expect(recurring?.monthsChecked).toBe(3);
+      expect(recurring?.averageAmount).toBe(20000);
+
+      // Only ever in 1401-05 - one of three periods, below the threshold.
+      expect(recurringExpenses.find((r) => r.description === BOUNDARY_DESCRIPTION)).toBeUndefined();
+
+      // Only 2 other rows in this category across the whole window, below
+      // the minimum baseline sample size - nothing to flag.
+      expect(unusualTransactions.map((t) => t.category)).not.toContain(BUCKET_NAME);
+    });
+
+    it("returns the same results from one shared fetch as the separate per-consumer fetches", async () => {
+      const [shared, recurring, unusual] = await Promise.all([
+        getExpensePatterns(String(userId), CURRENT_PERIOD, "month"),
+        getRecurringExpenses(String(userId), CURRENT_PERIOD, "month"),
+        getUnusualTransactions(String(userId), CURRENT_PERIOD, "month"),
+      ]);
+
+      expect(shared.recurringExpenses).toEqual(recurring);
+      expect(shared.unusualTransactions).toEqual(unusual);
     });
   });
 

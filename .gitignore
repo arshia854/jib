@@ -55,3 +55,6 @@ next-env.d.ts
 /.vitest-test.db-shm
 /.vitest-test.db-journal
 /.swc
+
+# Live DB backups (scripts/backup-live-db.ts) - contains real user financial data
+/backups/

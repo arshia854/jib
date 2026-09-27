@@ -19,6 +19,15 @@ export interface ChatIntent {
   isPastUnloggedTransaction: boolean;
 }
 
+// Cheap pre-filter run before the AI call: per buildSystemPrompt()'s own
+// rules, detectTransactionIntent can only ever return true when the message
+// describes a specific past amount, so a message with no amount signal at
+// all always resolves to false regardless of what the AI would say - skip
+// the call entirely in that case.
+export function hasAmountSignal(message: string): boolean {
+  return /[0-9۰-۹]/.test(message) || message.includes("هزار") || message.includes("میلیون");
+}
+
 function buildSystemPrompt(): string {
   return `شما بخشی از دستیار مالی «جیب» هستید. فقط یک وظیفه دارید: تشخیص اینکه آیا آخرین پیام کاربر توصیف یک تراکنش مالی گذشته و هنوز ثبت‌نشده است (چیزی که کاربر می‌خواهد در جیب ثبت شود) یا نه. فقط یک شیء JSON با دقیقاً همین کلید برگردان، بدون هیچ متن یا توضیح اضافه و بدون markdown:
 
@@ -40,6 +49,10 @@ function buildSystemPrompt(): string {
 // AI-latency/failure log line and Sentry report below - not for any
 // behavioral decision in this function.
 export async function detectTransactionIntent(message: string, userId: number): Promise<ChatIntent> {
+  if (!hasAmountSignal(message)) {
+    return { isPastUnloggedTransaction: false };
+  }
+
   const aiCallStartedAt = Date.now();
   let content: string;
   let usage: TokenUsage | undefined;

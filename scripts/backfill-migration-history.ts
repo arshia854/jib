@@ -54,10 +54,18 @@ const MIGRATION_NAMES = [
   "20260806144050_add_category_is_essential",
   "20260808153511_add_transaction_source",
   "20260819081756_add_transaction_idempotency_key",
+  "20260822213426_add_user_role_check_constraint",
   "20260824095212_add_transaction_enrichment_status",
   "20260825171540_add_assets",
   "20260904102636_add_conversation",
   "20260905094309_add_goal",
+  "20260905173527_add_transaction_suggested_category",
+  "20260911104341_add_transaction_transfer_group_id",
+  "20260912134216_add_goal_savings_account",
+  "20260917211853_add_savings_strategy",
+  "20260925093410_add_category_is_archived",
+  "20260912165902_add_live_price_quota_exceeded_until",
+  "20260926152837_add_notifications",
 ];
 
 // The two migrations whose migration.sql was rewritten from its original

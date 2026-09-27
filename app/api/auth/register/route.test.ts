@@ -52,3 +52,24 @@ describe("POST /api/auth/register - length limits", () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe("POST /api/auth/register - existing email", () => {
+  it("returns the identical 409 message whether the existing account has a password or not (no sign-up-method probing)", async () => {
+    const withPassword = `existing-password-${Date.now()}@example.com`;
+    const withoutPassword = `existing-google-only-${Date.now()}@example.com`;
+    createdEmails.push(withPassword, withoutPassword);
+    // The stored hash is never compared on this path, so any non-null
+    // string stands in for a real one.
+    await prisma.user.create({ data: { email: withPassword, passwordHash: "not-a-real-hash" } });
+    await prisma.user.create({ data: { email: withoutPassword } });
+
+    const resA = await POST(makeRequest({ email: withPassword, password: "validpass123" }));
+    const resB = await POST(makeRequest({ email: withoutPassword, password: "validpass123" }));
+
+    expect(resA.status).toBe(409);
+    expect(resB.status).toBe(409);
+    const [dataA, dataB] = [await resA.json(), await resB.json()];
+    expect(dataA).toEqual(dataB);
+    expect(dataA.error).toBe("این ایمیل قبلاً ثبت‌نام شده است.");
+  });
+});

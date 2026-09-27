@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateHighlights } from "@/lib/reports/generate-highlights";
-import { formatToman } from "@/lib/format";
+import { formatToman, formatNumber } from "@/lib/format";
 import type { CategoryComparison, MonthlyComparisonResult } from "@/lib/reports/monthly-comparison";
 
 // Discretionary (isEssential: false) by default - most of this file's existing categories
@@ -28,6 +28,19 @@ function result(overrides: Partial<MonthlyComparisonResult> = {}): MonthlyCompar
     totalPercentChange: 0,
     ...overrides,
   };
+}
+
+// Message-shape assertions (post docs/jib-persona.md v1.1) - these check that a highlight's
+// message contains the category name (where applicable) and the correctly formatted percent/
+// amount, rather than asserting the exact idiomatic wording chosen for each candidate. The exact
+// wording is intentionally free to evolve (rotating expression-bank idioms etc.) as long as the
+// underlying facts still show up, correctly formatted.
+function expectMessageWithPercent(message: string, percent: number) {
+  expect(message).toContain(`${formatNumber(percent)}٪`);
+}
+
+function expectMessageWithCategory(message: string, categoryName: string) {
+  expect(message).toContain(`«${categoryName}»`);
 }
 
 describe("generateHighlights", () => {
@@ -61,19 +74,23 @@ describe("generateHighlights", () => {
     // currentAmount 100 each against totalCurrent 1000 -> a 20% share) but is outranked within
     // its priority tier by both خوراک's 60% and سرگرمی's 55%, so the capped-at-3 output is
     // unchanged from before isEssential existed.
-    expect(highlights).toEqual([
-      { type: "positive", message: "عالی! هزینه‌های شما 25٪ نسبت به ماه قبل کاهش یافته است." },
-      {
-        type: "warning",
-        category: "خوراک",
-        message: "هزینه «خوراک» نسبت به ماه قبل 60٪ افزایش یافته — کمی مراقب باشید.",
-      },
-      {
-        type: "positive",
-        category: "سرگرمی",
-        message: "صرفه‌جویی خوب در «سرگرمی»؛ نسبت به ماه قبل 55٪ کمتر خرج کرده‌اید.",
-      },
-    ]);
+    expect(highlights).toHaveLength(3);
+
+    const overall = highlights[0];
+    expect(overall.type).toBe("positive");
+    expect(overall.category).toBeUndefined();
+    expectMessageWithPercent(overall.message, 25);
+    expect(overall.message).toContain("نسبت به ماه قبل");
+
+    const warning = highlights.find((h) => h.type === "warning")!;
+    expect(warning.category).toBe("خوراک");
+    expectMessageWithCategory(warning.message, "خوراک");
+    expectMessageWithPercent(warning.message, 60);
+
+    const savings = highlights.find((h) => h.type === "positive" && h.category)!;
+    expect(savings.category).toBe("سرگرمی");
+    expectMessageWithCategory(savings.message, "سرگرمی");
+    expectMessageWithPercent(savings.message, 55);
   });
 
   it("keeps only the 3 largest highlights when more than 3 would qualify", () => {
@@ -116,18 +133,17 @@ describe("generateHighlights", () => {
     const highlights = generateHighlights(input);
     const discretionaryTotal = 300; // 3 categories x currentAmount 100
 
-    expect(highlights).toEqual([
-      {
-        type: "warning",
-        category: "پوشاک",
-        message: "هزینه «پوشاک» نسبت به ماه قبل 75٪ افزایش یافته — کمی مراقب باشید.",
-      },
-      {
-        type: "warning",
-        amount: discretionaryTotal,
-        message: `${formatToman(discretionaryTotal)} از هزینه‌های این دوره غیرضروری بوده و قابل کاهش است.`,
-      },
-    ]);
+    expect(highlights).toHaveLength(2);
+
+    const warning = highlights.find((h) => h.category === "پوشاک")!;
+    expect(warning.type).toBe("warning");
+    expectMessageWithCategory(warning.message, "پوشاک");
+    expectMessageWithPercent(warning.message, 75);
+
+    const total = highlights.find((h) => h.amount !== undefined)!;
+    expect(total.type).toBe("warning");
+    expect(total.amount).toBe(discretionaryTotal);
+    expect(total.message).toContain(formatToman(discretionaryTotal));
   });
 
   it("returns the discretionary-total highlight together with a category-savings highlight when rule C qualifies", () => {
@@ -143,18 +159,17 @@ describe("generateHighlights", () => {
     const highlights = generateHighlights(input);
     const discretionaryTotal = 300; // 3 categories x currentAmount 100
 
-    expect(highlights).toEqual([
-      {
-        type: "warning",
-        amount: discretionaryTotal,
-        message: `${formatToman(discretionaryTotal)} از هزینه‌های این دوره غیرضروری بوده و قابل کاهش است.`,
-      },
-      {
-        type: "positive",
-        category: "سفر",
-        message: "صرفه‌جویی خوب در «سفر»؛ نسبت به ماه قبل 90٪ کمتر خرج کرده‌اید.",
-      },
-    ]);
+    expect(highlights).toHaveLength(2);
+
+    const total = highlights.find((h) => h.amount !== undefined)!;
+    expect(total.type).toBe("warning");
+    expect(total.amount).toBe(discretionaryTotal);
+    expect(total.message).toContain(formatToman(discretionaryTotal));
+
+    const savings = highlights.find((h) => h.category === "سفر")!;
+    expect(savings.type).toBe("positive");
+    expectMessageWithCategory(savings.message, "سفر");
+    expectMessageWithPercent(savings.message, 90);
   });
 
   it("ignores categories with a null percentChange", () => {
@@ -177,19 +192,11 @@ describe("generateHighlights", () => {
 
     const highlights = generateHighlights(input, "نسبت به هفته قبل");
 
-    expect(highlights).toEqual([
-      { type: "positive", message: "عالی! هزینه‌های شما 25٪ نسبت به هفته قبل کاهش یافته است." },
-      {
-        type: "warning",
-        category: "خوراک",
-        message: "هزینه «خوراک» نسبت به هفته قبل 60٪ افزایش یافته — کمی مراقب باشید.",
-      },
-      {
-        type: "positive",
-        category: "سرگرمی",
-        message: "صرفه‌جویی خوب در «سرگرمی»؛ نسبت به هفته قبل 55٪ کمتر خرج کرده‌اید.",
-      },
-    ]);
+    expect(highlights).toHaveLength(3);
+    for (const highlight of highlights) {
+      expect(highlight.message).toContain("نسبت به هفته قبل");
+      expect(highlight.message).not.toContain("نسبت به ماه قبل");
+    }
   });
 
   it("flags a discretionary category as a warning via absolute increase share even when its percentChange is under 50%", () => {
@@ -204,18 +211,16 @@ describe("generateHighlights", () => {
 
     const highlights = generateHighlights(input);
 
-    expect(highlights).toEqual([
-      {
-        type: "warning",
-        category: "سفر",
-        message: "هزینه «سفر» نسبت به ماه قبل 23٪ افزایش یافته — کمی مراقب باشید.",
-      },
-      {
-        type: "warning",
-        amount: 3700000,
-        message: `${formatToman(3700000)} از هزینه‌های این دوره غیرضروری بوده و قابل کاهش است.`,
-      },
-    ]);
+    expect(highlights).toHaveLength(2);
+
+    const warning = highlights.find((h) => h.category === "سفر")!;
+    expect(warning.type).toBe("warning");
+    expectMessageWithCategory(warning.message, "سفر");
+    expectMessageWithPercent(warning.message, 23);
+
+    const total = highlights.find((h) => h.amount !== undefined)!;
+    expect(total.amount).toBe(3700000);
+    expect(total.message).toContain(formatToman(3700000));
   });
 
   it("phrases an essential category's cost increase neutrally, as an 'info' highlight rather than a warning", () => {
@@ -225,15 +230,17 @@ describe("generateHighlights", () => {
 
     const highlights = generateHighlights(input);
 
-    expect(highlights).toEqual([
-      {
-        type: "info",
-        category: "اجاره",
-        message: "هزینه ضروری «اجاره» نسبت به ماه قبل 60٪ افزایش یافته است.",
-      },
-    ]);
-    // Neutral, not the actionable "کمی مراقب باشید" tone used for discretionary increases.
-    expect(highlights[0].message).not.toContain("مراقب باشید");
+    expect(highlights).toHaveLength(1);
+    const [highlight] = highlights;
+    expect(highlight.type).toBe("info");
+    expect(highlight.category).toBe("اجاره");
+    expectMessageWithCategory(highlight.message, "اجاره");
+    expectMessageWithPercent(highlight.message, 60);
+    // Neutral, not the actionable/warning tone used for discretionary increases - no call to cut
+    // or watch an essential cost, per docs/jib-persona.md's "don't tell the user to cut an
+    // essential cost" instruction.
+    expect(highlight.message).not.toContain("مراقب باشید");
+    expect(highlight.message).not.toContain("کم کن");
   });
 
   it("still surfaces a category-savings highlight for an essential category's large decrease", () => {
@@ -243,13 +250,12 @@ describe("generateHighlights", () => {
 
     const highlights = generateHighlights(input);
 
-    expect(highlights).toEqual([
-      {
-        type: "positive",
-        category: "بیمه",
-        message: "صرفه‌جویی خوب در «بیمه»؛ نسبت به ماه قبل 60٪ کمتر خرج کرده‌اید.",
-      },
-    ]);
+    expect(highlights).toHaveLength(1);
+    const [highlight] = highlights;
+    expect(highlight.type).toBe("positive");
+    expect(highlight.category).toBe("بیمه");
+    expectMessageWithCategory(highlight.message, "بیمه");
+    expectMessageWithPercent(highlight.message, 60);
   });
 
   it("does not let an essential category's cost increase drown out discretionary/actionable highlights when more than 3 candidates qualify", () => {
@@ -268,23 +274,54 @@ describe("generateHighlights", () => {
     // Despite بیمه's 200% dwarfing every other candidate's magnitude, it sits in the lowest
     // priority tier (essential-cost noise) and is the one dropped - not one of the three
     // discretionary/actionable candidates, which fill every slot on this cap.
-    expect(highlights).toEqual([
-      {
-        type: "positive",
-        category: "سرگرمی",
-        message: "صرفه‌جویی خوب در «سرگرمی»؛ نسبت به ماه قبل 70٪ کمتر خرج کرده‌اید.",
-      },
-      {
-        type: "warning",
-        category: "سفر",
-        message: "هزینه «سفر» نسبت به ماه قبل 60٪ افزایش یافته — کمی مراقب باشید.",
-      },
-      {
-        type: "warning",
-        amount: discretionaryTotal,
-        message: `${formatToman(discretionaryTotal)} از هزینه‌های این دوره غیرضروری بوده و قابل کاهش است.`,
-      },
-    ]);
+    expect(highlights).toHaveLength(3);
     expect(highlights.some((h) => h.type === "info")).toBe(false);
+
+    const savings = highlights.find((h) => h.category === "سرگرمی")!;
+    expect(savings.type).toBe("positive");
+    expectMessageWithPercent(savings.message, 70);
+
+    const warning = highlights.find((h) => h.category === "سفر")!;
+    expect(warning.type).toBe("warning");
+    expectMessageWithPercent(warning.message, 60);
+
+    const total = highlights.find((h) => h.amount !== undefined)!;
+    expect(total.amount).toBe(discretionaryTotal);
+    expect(total.message).toContain(formatToman(discretionaryTotal));
+  });
+
+  // Persona (docs/jib-persona.md v1.1) coverage: each positive/warning highlight type should open
+  // with an idiomatic, non-generic phrase (not just the bare fact), while the essential-increase
+  // "info" highlight stays plain/reassuring rather than picking up a forced idiom.
+  it("opens the overall-savings highlight with expression-bank framing, not the old flat sentence", () => {
+    const input = result({ totalPercentChange: -25 });
+    const [highlight] = generateHighlights(input);
+
+    expect(highlight.message).not.toContain("عالی! هزینه‌های شما");
+    expectMessageWithPercent(highlight.message, 25);
+  });
+
+  it("opens the discretionary-total highlight with expression-bank framing distinct from narrative-report.ts's opportunity line", () => {
+    const input = result({
+      categories: [category({ category: "سرگرمی", percentChange: 5 })],
+    });
+    const highlight = generateHighlights(input).find((h) => h.amount !== undefined)!;
+
+    // narrative-report.ts's resolveOpportunity uses "یه‌جای خالی برای پس‌انداز پیدا کردم" for the
+    // same situation - this highlight must not repeat it verbatim (see the in-code comment on
+    // discretionaryTotalCandidate for why).
+    expect(highlight.message).not.toContain("یه‌جای خالی برای پس‌انداز پیدا کردم");
+    expect(highlight.message).toContain(formatToman(highlight.amount!));
+  });
+
+  it("keeps the essential-increase highlight non-judgmental and free of a cut-spending call to action", () => {
+    const input = result({
+      categories: [category({ category: "اجاره", percentChange: 80, isEssential: true })],
+    });
+    const [highlight] = generateHighlights(input);
+
+    expect(highlight.type).toBe("info");
+    expect(highlight.message).not.toMatch(/کم(تر)? کن/);
+    expect(highlight.message).not.toContain("مراقب باشید");
   });
 });

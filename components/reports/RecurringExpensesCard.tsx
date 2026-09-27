@@ -19,24 +19,45 @@ export function RecurringExpensesCard({ expenses }: RecurringExpensesCardProps) 
   if (expenses.length === 0) return null;
 
   return (
-    <div className="rounded-2xl border border-border bg-surface p-4">
-      <div className="flex items-center gap-1.5">
-        <RefreshIcon className="h-4 w-4 shrink-0 text-muted" />
-        <span className="text-sm font-semibold text-foreground">هزینه‌های تکرارشونده</span>
+    <div className="rounded-2xl border border-border bg-surface">
+      <div className="flex items-start gap-3 p-4">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-bg text-primary-soft">
+          <RefreshIcon className="h-4.5 w-4.5" />
+        </div>
+        <div className="min-w-0">
+          <span className="text-sm font-semibold text-foreground">هزینه‌های تکرارشونده</span>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted">این‌ها را مرور کنید — شاید اشتراک یا قبضی باشد که یادتان رفته.</p>
+        </div>
       </div>
-      <p className="mt-1 text-xs text-muted">این‌ها را مرور کنید — شاید اشتراک یا قبضی باشد که یادتان رفته.</p>
 
-      <ul className="mt-3 space-y-2.5">
+      <ul className="divide-y divide-border border-t border-border">
         {expenses.map((expense) => (
-          <li key={expense.description} className="flex items-center justify-between gap-2 text-sm">
-            <span className="min-w-0 truncate text-foreground">{expense.description}</span>
-            <span className="shrink-0 text-xs tabular-fa text-muted">
-              {formatNumber(expense.monthsPresent)} از {formatNumber(expense.monthsChecked)} دوره ·{" "}
-              {formatToman(expense.averageAmount)}
-            </span>
+          <li key={expense.description} className="flex items-center justify-between gap-3 px-4 py-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-foreground">{expense.description}</p>
+              <div className="mt-1.5 flex items-center gap-2">
+                <PresenceMeter present={expense.monthsPresent} checked={expense.monthsChecked} />
+                <span className="text-[11px] tabular-fa text-muted">
+                  {formatNumber(expense.monthsPresent)} از {formatNumber(expense.monthsChecked)} دوره
+                </span>
+              </div>
+            </div>
+            <span className="shrink-0 text-sm font-semibold tabular-fa text-foreground">{formatToman(expense.averageAmount)}</span>
           </li>
         ))}
       </ul>
     </div>
+  );
+}
+
+// "N of M periods" as M short segments with the first N filled - a count, read like a battery
+// level, alongside (never instead of) the same figure in text right next to it.
+function PresenceMeter({ present, checked }: { present: number; checked: number }) {
+  return (
+    <span aria-hidden="true" className="flex shrink-0 gap-0.5">
+      {Array.from({ length: checked }, (_, i) => (
+        <span key={i} className={`h-1.5 w-2.5 rounded-full ${i < present ? "bg-primary-soft" : "bg-border"}`} />
+      ))}
+    </span>
   );
 }

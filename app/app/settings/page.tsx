@@ -1,8 +1,11 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { getCurrentUser } from "@/lib/auth/session";
 import { LogoutButton } from "@/components/layout/logout-button";
 import { AssetDisplayToggle } from "@/components/settings/asset-display-toggle";
+import { ThemeToggle } from "@/components/settings/theme-toggle";
+import { THEME_COOKIE, isThemePreference } from "@/lib/theme";
 import { TagIcon, WalletIcon, ShieldIcon, BackIcon, UserIcon } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +23,10 @@ export default async function SettingsPage() {
   if (!user) redirect("/login");
 
   const rows = user.role === "admin" ? [...ROWS, { href: "/app/admin", label: "پنل مدیریت", Icon: ShieldIcon }] : ROWS;
+
+  const store = await cookies();
+  const cookieValue = store.get(THEME_COOKIE)?.value;
+  const initialPreference = isThemePreference(cookieValue) ? cookieValue : "system";
 
   return (
     <div className="space-y-6 px-4 pb-8 pt-6">
@@ -61,6 +68,14 @@ export default async function SettingsPage() {
           <p className="mt-0.5 text-xs text-muted">موجودی کل رو معادل گرم طلا و دلار هم نشون بده.</p>
         </div>
         <AssetDisplayToggle initialEnabled={user.showBalanceInAssets} />
+      </section>
+
+      <section className="flex items-center justify-between gap-3 rounded-2xl border border-border bg-surface p-4">
+        <div>
+          <p className="text-sm font-medium text-foreground">ظاهر برنامه</p>
+          <p className="mt-0.5 text-xs text-muted">روشن، تاریک یا هماهنگ با سیستم.</p>
+        </div>
+        <ThemeToggle initialPreference={initialPreference} />
       </section>
 
       <section className="flex items-center justify-between rounded-2xl border border-border bg-surface p-4">

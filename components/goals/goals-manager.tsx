@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   PlusIcon,
   EditIcon,
@@ -15,11 +16,13 @@ import {
   SparklesIcon,
   ArrowUpIcon,
   ArrowDownIcon,
+  PiggyBankIcon,
+  RefreshIcon,
 } from "@/components/icons";
 import { EmptyState } from "@/components/empty-state";
 import { JalaliDatePicker, daysBetween } from "./jalali-date-picker";
-import { formatToman, formatNumber } from "@/lib/format";
-import { toLatinDigits } from "@/lib/normalize";
+import { formatToman, formatNumber, formatCompactToman } from "@/lib/format";
+import { AmountInput } from "@/components/ui/amount-input";
 import { MAX_NAME_LENGTH, MAX_GOAL_TARGET_AMOUNT } from "@/lib/limits";
 
 // Local shapes rather than importing lib/data/goals.ts/lib/goals/feasibility.ts
@@ -62,9 +65,24 @@ interface GoalStrategyAction {
   priority: number;
 }
 
+interface GoalStrategyProgress {
+  currentAmount: number;
+  targetAmount: number;
+  percentage: number;
+}
+
+interface GoalStrategyMonthlyAction {
+  title: string;
+  description: string;
+  amount: number;
+}
+
 interface GoalStrategy {
   actions: GoalStrategyAction[];
   summary: string;
+  progress: GoalStrategyProgress;
+  monthlyAction: GoalStrategyMonthlyAction;
+  inflationNote: string | null;
   generatedAt: string;
 }
 
@@ -134,13 +152,7 @@ function MoneyInput({
   return (
     <>
       <label className="mt-4 block text-xs text-muted">{label}</label>
-      <input
-        type="text"
-        inputMode="numeric"
-        value={value ? formatNumber(Number(value)) : ""}
-        onChange={(e) => onChange(toLatinDigits(e.target.value).replace(/[^0-9]/g, ""))}
-        className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm tabular-fa outline-none focus:border-accent"
-      />
+      <AmountInput value={Number(value) || 0} onChange={(next) => onChange(next ? String(next) : "")} />
     </>
   );
 }
@@ -160,38 +172,175 @@ function daysRemainingLabel(goal: Goal): string {
   return remaining > 0 ? `${formatNumber(remaining)} روز مانده` : "مهلت گذشته";
 }
 
-// GoalStrategyAction.type -> icon shown before its title, so the three
-// action kinds (cut a real expense, save more, earn more) are visually
-// distinguishable at a glance without repeating the English type string in
-// the UI - ArrowDownIcon/ArrowUpIcon/PlusIcon already exist and fit their
-// meaning without adding a new icon.
-const STRATEGY_ACTION_ICON: Record<GoalStrategyActionType, typeof ArrowDownIcon> = {
-  reduce_expense: ArrowDownIcon,
-  increase_savings: ArrowUpIcon,
-  extra_income: PlusIcon,
+// GoalStrategyAction.type -> labeled chip (icon + Persian name) on each
+// action, so the three kinds read at a glance without the English type
+// string. Icons and tones follow what they already mean elsewhere in the
+// app: ArrowDown + warning is "expense", ArrowUp + success is "income"
+// (components/dashboard/month-summary-card.tsx), and the piggy bank +
+// primary is savings (BalanceCard's savings row).
+const STRATEGY_ACTION_KIND: Record<
+  GoalStrategyActionType,
+  { label: string; Icon: typeof ArrowDownIcon; chip: string; amountLabel: string }
+> = {
+  reduce_expense: { label: "کاهش هزینه", Icon: ArrowDownIcon, chip: "bg-warning/10 text-warning", amountLabel: "خرج فعلی" },
+  increase_savings: { label: "پس‌انداز بیشتر", Icon: PiggyBankIcon, chip: "bg-primary/15 text-primary-soft", amountLabel: "مبلغ" },
+  extra_income: { label: "درآمد اضافه", Icon: ArrowUpIcon, chip: "bg-success/10 text-success", amountLabel: "مبلغ" },
 };
 
-function GoalStrategyCard({ strategy }: { strategy: GoalStrategy }) {
+// Computed deterministically (lib/goals/strategy.ts's computeProgress), not
+// model-authored, so this stays accurate whatever the AI's own text says.
+// Deliberately a sentence, not a second progress bar: the goal card right
+// above already has one, and its percentage counts initialAmount only while
+// this one also counts the goal's share of the account balance - two bars
+// disagreeing on the same card would be worse than one. That share can be
+// negative, and "−۲۲ میلیون فراهم شده" reads as nonsense, so that case (and
+// zero) get their own wording.
+function StrategyProgress({ progress }: { progress: GoalStrategyProgress }) {
+  const { currentAmount, targetAmount, percentage } = progress;
   return (
-    <div className="mt-3 rounded-xl bg-background p-3">
-      <p className="text-xs font-medium text-foreground">{strategy.summary}</p>
-      <ul className="mt-2 space-y-2">
-        {strategy.actions.map((action) => {
-          const ActionIcon = STRATEGY_ACTION_ICON[action.type];
-          return (
-            <li key={action.priority} className="flex items-start gap-2 text-xs">
-              <ActionIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
-              <div className="min-w-0 flex-1">
-                <p className="font-medium text-foreground">{action.title}</p>
-                <p className="mt-0.5 text-muted">{action.description}</p>
-                {action.relatedAmount !== undefined && (
-                  <p className="mt-0.5 text-muted">{formatToman(action.relatedAmount)}</p>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+    <p className="text-xs leading-5 text-muted">
+      {currentAmount > 0 ? (
+        <>
+          با سهمت از موجودی حساب‌ها،{" "}
+          <span className="font-medium tabular-fa text-foreground">{formatToman(currentAmount)}</span> از{" "}
+          <span className="tabular-fa">{formatToman(targetAmount)}</span> جمع شده (
+          <span className="tabular-fa">{formatNumber(percentage)}٪</span>).
+        </>
+      ) : currentAmount < 0 ? (
+        <>
+          هنوز چیزی برای این هدف کنار نذاشتی؛ سهمش از موجودی‌ات{" "}
+          <span className="font-medium tabular-fa text-warning">{formatCompactToman(-currentAmount)} تومان</span> منفیه.
+        </>
+      ) : (
+        "هنوز چیزی برای این هدف کنار نذاشتی."
+      )}
+    </p>
+  );
+}
+
+function GoalStrategyCard({
+  strategy,
+  regenerating,
+  error,
+  onRegenerate,
+}: {
+  strategy: GoalStrategy;
+  regenerating: boolean;
+  error: string | undefined;
+  onRegenerate: () => void;
+}) {
+  const { progress, monthlyAction } = strategy;
+  return (
+    <div className="rounded-xl bg-background p-3.5">
+      {/* Once a strategy exists, regenerating is secondary - a small action
+          in the strategy's own header instead of the full-width button that
+          used to sit above it and push the strategy down. */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <SparklesIcon className="h-4 w-4 text-primary-soft" />
+          <h3 className="text-sm font-semibold text-foreground">استراتژی پیشنهادی</h3>
+        </div>
+        <button
+          type="button"
+          onClick={onRegenerate}
+          disabled={regenerating}
+          className="-me-1.5 flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs font-medium text-primary-soft disabled:opacity-60"
+        >
+          {regenerating ? <SpinnerIcon className="h-3.5 w-3.5 animate-spin" /> : <RefreshIcon className="h-3.5 w-3.5" />}
+          {regenerating ? "در حال ساخت..." : "ساخت دوباره"}
+        </button>
+      </div>
+      <p className="mt-0.5 text-[11px] text-muted">پیشنهاد هوش مصنوعی از روی خرج‌ها و پس‌اندازت</p>
+      {error && <p className="mt-2 rounded-lg bg-warning/10 p-2 text-xs text-warning">{error}</p>}
+
+      <div aria-busy={regenerating} className={`transition-opacity ${regenerating ? "opacity-50" : ""}`}>
+        <div className="mt-3">
+          <StrategyProgress progress={progress} />
+        </div>
+
+        <p className="mt-4 text-[13px] leading-6 text-foreground">{strategy.summary}</p>
+
+        {/* The one concrete monthly step, led by its amount - always
+            feasibility.requiredMonthlyAmount (see buildMonthlyAction), never
+            left to the model's own phrasing to include or omit. */}
+        <div className="mt-4 rounded-xl border border-primary/25 bg-primary-bg p-3">
+          <p className="text-[11px] font-medium text-primary-soft">قدم اصلی · هر ماه</p>
+          <p className="mt-1 flex flex-wrap items-baseline gap-x-1">
+            <span className="text-xl font-black tabular-fa text-foreground">{formatNumber(monthlyAction.amount)}</span>
+            <span className="text-xs text-muted">تومان</span>
+          </p>
+          <p className="mt-2 text-sm font-semibold text-foreground">{monthlyAction.title}</p>
+          <p className="mt-1 text-xs leading-6 text-muted">{monthlyAction.description}</p>
+        </div>
+
+        <p className="mt-5 text-xs font-medium text-muted">کارهایی که کمک می‌کنه</p>
+        <ol className="mt-1">
+          {strategy.actions.map((action) => {
+            const kind = STRATEGY_ACTION_KIND[action.type];
+            return (
+              <li key={action.priority} className="flex gap-3 border-b border-border/60 py-3 last:border-b-0 last:pb-0">
+                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface text-xs font-bold tabular-fa text-foreground">
+                  {formatNumber(action.priority)}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                    <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${kind.chip}`}>
+                      <kind.Icon className="h-3 w-3" />
+                      {kind.label}
+                    </span>
+                    {action.relatedAmount !== undefined && (
+                      <span className="text-[11px] text-muted">
+                        {kind.amountLabel}:{" "}
+                        <span className="font-semibold tabular-fa text-foreground">
+                          {formatCompactToman(action.relatedAmount)} تومان
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1.5 text-sm font-semibold text-foreground">{action.title}</p>
+                  <p className="mt-1 text-xs leading-6 text-muted">{action.description}</p>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+
+        {/* Only rendered when generateGoalStrategy actually included one (long
+            enough horizon, past its own instrument-name sanitization) - kept
+            at the bottom as a general note, not styled like an actionable
+            item. */}
+        {strategy.inflationNote && (
+          <div className="mt-4 flex gap-2 rounded-xl bg-surface p-3">
+            <ShieldIcon className="mt-0.5 h-4 w-4 shrink-0 text-muted" />
+            <div>
+              <p className="text-xs font-medium text-foreground">یه نکته درباره‌ی تورم</p>
+              <p className="mt-1 text-xs leading-6 text-muted">{strategy.inflationNote}</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Generation takes 15-35s (measured, see GOAL_STRATEGY_TIMEOUT_MS in
+// lib/goals/strategy.ts) - long enough that a bare spinner looks stuck, so
+// this says up front that the wait is expected.
+function StrategyLoading() {
+  return (
+    <div role="status" className="rounded-xl bg-background p-3.5">
+      <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+        <SpinnerIcon className="h-4 w-4 animate-spin text-primary-soft" />
+        در حال ساخت استراتژی...
+      </div>
+      <p className="mt-1 text-xs leading-5 text-muted">
+        دارم هدفت رو با خرج‌ها و پس‌اندازت مقایسه می‌کنم. ممکنه تا یک دقیقه طول بکشه.
+      </p>
+      <div aria-hidden className="mt-4 space-y-2.5">
+        <div className="h-3 w-full animate-pulse rounded-full bg-border/60" />
+        <div className="h-3 w-4/5 animate-pulse rounded-full bg-border/60" />
+        <div className="h-16 w-full animate-pulse rounded-xl bg-border/40" />
+      </div>
     </div>
   );
 }
@@ -331,21 +480,32 @@ function GoalCard({
 
       {isActive && (
         <div className="mt-3 border-t border-border pt-3">
-          <button
-            type="button"
-            onClick={onGenerateStrategy}
-            disabled={strategyLoading}
-            className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-accent/10 py-2 text-xs font-semibold text-accent disabled:opacity-50"
-          >
-            {strategyLoading ? (
-              <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <SparklesIcon className="h-3.5 w-3.5" />
-            )}
-            {strategy ? "دریافت مجدد استراتژی" : "دریافت استراتژی"}
-          </button>
-          {strategyError && <p className="mt-2 text-xs text-warning">{strategyError}</p>}
-          {strategy && <GoalStrategyCard strategy={strategy} />}
+          {strategy ? (
+            <GoalStrategyCard
+              strategy={strategy}
+              regenerating={strategyLoading}
+              error={strategyError}
+              onRegenerate={onGenerateStrategy}
+            />
+          ) : strategyLoading ? (
+            <StrategyLoading />
+          ) : (
+            <>
+              {strategyError && (
+                <p className="mb-2 rounded-lg bg-warning/10 p-2 text-xs text-warning">{strategyError}</p>
+              )}
+              {/* text-primary-soft rather than text-accent: #ffd400 text on
+                  its own 10% tint is unreadable in the light theme. */}
+              <button
+                type="button"
+                onClick={onGenerateStrategy}
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-primary/15 py-2.5 text-xs font-semibold text-primary-soft"
+              >
+                <SparklesIcon className="h-3.5 w-3.5" />
+                {strategyError ? "تلاش دوباره" : "دریافت استراتژی"}
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -536,6 +696,15 @@ export function GoalsManager({ goals }: { goals: Goal[] }) {
           هدف جدید
         </button>
       </div>
+
+      {/* Dedicated route (app/app/savings/page.tsx) - same "entry point is a
+          link from a related existing page, not a bottom-nav slot"
+          convention as app/app/transfer/page.tsx's own entry link, in
+          components/accounts/accounts-manager.tsx's header. */}
+      <Link href="/app/savings" className="flex items-center gap-1.5 text-xs font-medium text-accent">
+        <PiggyBankIcon className="h-3.5 w-3.5" />
+        پس‌انداز
+      </Link>
 
       {deleteError && <p className="rounded-xl bg-warning/10 p-3 text-xs text-warning">{deleteError}</p>}
 

@@ -11,7 +11,9 @@ import { listGoalsWithFeasibility } from "@/lib/data/goals";
 import { ActivityHeatmap } from "@/components/reports/ActivityHeatmap";
 import { TransactionFilterBar } from "@/components/transactions/transaction-filter-bar";
 import { TransactionListItem } from "@/components/transactions/transaction-list-item";
+import { TransferListItem } from "@/components/transactions/transfer-list-item";
 import { PendingTransactionList } from "@/components/transactions/pending-transaction-list";
+import { groupTransferPairs } from "@/lib/transactions/group-transfer-pairs";
 import { EnrichmentPoller } from "@/components/transactions/enrichment-poller";
 import { PaginationControls } from "@/components/admin/pagination-controls";
 import { AssetsManager } from "@/components/assets/assets-manager";
@@ -87,11 +89,19 @@ export default async function DashboardPage({ searchParams }: PageProps) {
 
     const { transactions, page, totalPages } = result;
     const hasFilter = Boolean(type) || categoryId !== undefined;
-    const hasPendingEnrichment = transactions.some((t) => t.enrichmentStatus === "pending");
+    const pendingEnrichmentIds = transactions
+      .filter((t) => t.enrichmentStatus === "pending")
+      .map((t) => t.id);
+    // Phase A3 (docs/roadmap-status.md savings roadmap): merges any
+    // transferGroupId pair within this already-paginated page into one row -
+    // see lib/transactions/group-transfer-pairs.ts's own comment for why
+    // this runs here, on the page `listTransactions` already returned,
+    // rather than inside that data function or inside TransactionListItem.
+    const rows = groupTransferPairs(transactions);
 
     content = (
       <div className="space-y-4">
-        <EnrichmentPoller hasPending={hasPendingEnrichment} />
+        <EnrichmentPoller pendingIds={pendingEnrichmentIds} />
 
         <Suspense fallback={<div className="h-10" />}>
           <TransactionFilterBar categories={categories} />
@@ -122,18 +132,33 @@ export default async function DashboardPage({ searchParams }: PageProps) {
         ) : (
           <>
             <div className="rounded-2xl border border-border bg-surface px-4">
-              {transactions.map((t, i) => (
-                <div key={t.id} className={i > 0 ? "border-t border-border" : ""}>
-                  <TransactionListItem
-                    id={t.id}
-                    description={t.description}
-                    rawInput={t.rawInput}
-                    date={t.date}
-                    amount={t.amount}
-                    type={t.type}
-                    category={t.category}
-                    enrichmentStatus={t.enrichmentStatus}
-                  />
+              {rows.map((row, i) => (
+                <div
+                  key={row.kind === "transfer" ? row.transferGroupId : row.id}
+                  className={i > 0 ? "border-t border-border" : ""}
+                >
+                  {row.kind === "transfer" ? (
+                    <TransferListItem
+                      transferGroupId={row.transferGroupId}
+                      fromAccountName={row.fromAccount.name}
+                      toAccountName={row.toAccount.name}
+                      amount={row.amount}
+                      date={row.date}
+                    />
+                  ) : (
+                    <TransactionListItem
+                      id={row.id}
+                      description={row.description}
+                      rawInput={row.rawInput}
+                      date={row.date}
+                      amount={row.amount}
+                      type={row.type}
+                      category={row.category}
+                      enrichmentStatus={row.enrichmentStatus}
+                      suggestedCategoryName={row.suggestedCategoryName}
+                      suggestedCategoryIcon={row.suggestedCategoryIcon}
+                    />
+                  )}
                 </div>
               ))}
             </div>
@@ -149,49 +174,54 @@ export default async function DashboardPage({ searchParams }: PageProps) {
     );
   }
 
+  // Two visual groups: the activity overview (secondary, read-only), then
+  // the tab switcher + its content (the actual workspace) - the wider gap
+  // between them is what separates the two, not extra chrome.
   return (
-    <div className="space-y-4 px-4 pb-8 pt-6">
-      <header>
-        <h1 className="text-lg font-bold text-foreground">داشبورد</h1>
-      </header>
+    <div className="space-y-6 px-4 pb-8 pt-6">
+      <div className="space-y-4">
+        <header>
+          <h1 className="text-lg font-bold text-foreground">داشبورد</h1>
+        </header>
 
-      {heatmap.activeDays === 0 ? (
-        <EmptyState
-          icon={<ChartIcon className="h-6 w-6" />}
-          title="هنوز فعالیتی برای نمایش نیست"
-          description="با ثبت اولین تراکنش، نقشه فعالیت روزانه شما اینجا نمایش داده می‌شود."
-          action={{ href: "/app/add", label: "افزودن تراکنش" }}
-        />
-      ) : (
-        <ActivityHeatmap heatmap={heatmap} />
-      )}
+        {heatmap.activeDays === 0 ? (
+          <EmptyState
+            icon={<ChartIcon className="h-6 w-6" />}
+            title="هنوز فعالیتی برای نمایش نیست"
+            description="با ثبت اولین تراکنش، نقشه فعالیت روزانه شما اینجا نمایش داده می‌شود."
+            action={{ href: "/app/add", label: "افزودن تراکنش" }}
+          />
+        ) : (
+          <ActivityHeatmap heatmap={heatmap} />
+        )}
+      </div>
 
-      <nav className="grid grid-cols-3 gap-2">
-        {TABS.map(({ value, label, Icon }) => {
-          const active = value === tab;
-          const href = value === "transactions" ? "/app/dashboard" : `/app/dashboard?tab=${value}`;
-          return (
-            <Link
-              key={value}
-              href={href}
-              className={`flex flex-col items-center gap-2 rounded-2xl border p-3 text-center transition-colors ${
-                active ? "border-primary bg-primary-bg" : "border-border bg-surface"
-              }`}
-            >
-              <span
-                className={`flex h-9 w-9 items-center justify-center rounded-full ${
-                  active ? "bg-primary text-on-primary" : "bg-background text-muted"
+      <div className="space-y-4">
+        {/* One segmented control (track + sliding-style active pill), the same
+            visual language as components/layout/bottom-nav.tsx, rather than
+            three separate cards that read as content, not navigation. */}
+        <nav className="grid grid-cols-3 gap-1 rounded-2xl border border-border bg-surface p-1">
+          {TABS.map(({ value, label, Icon }) => {
+            const active = value === tab;
+            const href = value === "transactions" ? "/app/dashboard" : `/app/dashboard?tab=${value}`;
+            return (
+              <Link
+                key={value}
+                href={href}
+                aria-current={active ? "page" : undefined}
+                className={`flex items-center justify-center gap-1.5 rounded-xl px-2 py-2.5 text-sm transition-colors ${
+                  active ? "bg-primary font-semibold text-on-primary shadow-sm shadow-primary/20" : "font-medium text-muted hover:text-foreground"
                 }`}
               >
-                <Icon className="h-5 w-5" strokeWidth={active ? 2 : 1.5} />
-              </span>
-              <span className={`text-xs font-medium ${active ? "text-foreground" : "text-muted"}`}>{label}</span>
-            </Link>
-          );
-        })}
-      </nav>
+                <Icon className="h-4.5 w-4.5 shrink-0" strokeWidth={active ? 2 : 1.6} />
+                <span className="truncate">{label}</span>
+              </Link>
+            );
+          })}
+        </nav>
 
-      {content}
+        {content}
+      </div>
     </div>
   );
 }

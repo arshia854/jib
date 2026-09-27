@@ -154,6 +154,45 @@ describe("getSession - invalid User.role data-integrity regression", () => {
   );
 });
 
+// Turso latency fix (docs/roadmap-status.md): getActiveUser() now reads the
+// User row through getCachedUser() (React's cache(), see that function's own
+// doc comment in lib/auth/session.ts) instead of running its own independent
+// `prisma.user.findUnique`. This proves that change didn't weaken the "a
+// blocked user is rejected on their very next request" guarantee this file's
+// own doc comment on getActiveUser already documents - each getSession()
+// call below stands in for a separate incoming request and must reflect
+// whatever blockedAt currently holds at call time, not a value read on an
+// earlier call.
+describe("getSession - blocked user rejected on next request (Turso latency fix regression coverage)", () => {
+  let userId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({ data: { phoneNumber: `TEST-SESSION-BLOCKED-${Date.now()}` } });
+    userId = user.id;
+  }, 20000);
+
+  afterAll(async () => {
+    await prisma.user.deleteMany({ where: { id: userId } });
+    await prisma.$disconnect();
+  }, 20000);
+
+  beforeEach(() => {
+    vi.mocked(auth).mockReset();
+  });
+
+  it("accepts the session before the user is blocked, then rejects the very next call once blocked", async () => {
+    vi.mocked(auth).mockResolvedValue({ userId: String(userId), onboarded: true } as never);
+
+    const before = await getSession();
+    expect(before).toEqual({ userId, onboarded: true, role: "user" });
+
+    await prisma.user.update({ where: { id: userId }, data: { blockedAt: new Date() } });
+
+    const after = await getSession();
+    expect(after).toBeNull();
+  });
+});
+
 // Confirms the mechanism from the migration itself, not just the app-level
 // helper - a CHECK constraint that only the app layer enforced would still
 // leave a direct/manual DB write free to corrupt the column.

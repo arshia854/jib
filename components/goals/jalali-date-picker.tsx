@@ -73,9 +73,61 @@ interface JalaliDatePickerProps {
   onChange: (value: string) => void;
   /** Days before this are dimmed and unselectable. Future-only validation itself stays in goals-manager.tsx. */
   minDate?: Date;
+  /**
+   * Days after this are dimmed and unselectable - the mirror of minDate, for
+   * a date that can't be in the future (assets-manager.tsx's purchase date).
+   */
+  maxDate?: Date;
+  /**
+   * Overrides the trigger button's classes - lets callers with their own
+   * inline layout (e.g. add-transaction-form.tsx's input/preview stages)
+   * match their surrounding fields' look instead of inheriting
+   * goals-manager.tsx's bottom-sheet-form styling. Defaults to exactly the
+   * classes goals-manager.tsx already relies on, so that usage is
+   * byte-for-byte unaffected by this prop's existence.
+   */
+  triggerClassName?: string;
+  /**
+   * Whether the "N days until/past the deadline" countdown line renders
+   * inside the calendar. Defaults to `true`, which preserves
+   * goals-manager.tsx's current behavior with zero changes needed there -
+   * that line is meaningless for a plain transaction date (there's no
+   * deadline), so add-transaction-form.tsx passes `false`.
+   */
+  showDeadlineCountdown?: boolean;
+  /**
+   * Overrides the quick-select row at the bottom of the calendar. Defaults
+   * to the goal-oriented "۱/۳/۶ ماه" buttons (unchanged for
+   * goals-manager.tsx). Each option's `getDate` receives "today" and
+   * returns the Date to jump to - a plain calendar-day offset for
+   * add-transaction-form.tsx's "امروز/دیروز/پریروز", as opposed to the
+   * default options' Jalali-month arithmetic.
+   */
+  quickSelectOptions?: { label: string; getDate: (today: Date) => Date }[];
+  /**
+   * `'compact'` shrinks the calendar's padding/gaps/font sizes for inline
+   * embedding in a tighter layout (add-transaction-form.tsx) while keeping
+   * the same colors, Saturday-first grid, and selected-day highlight.
+   * Defaults to `'default'`, which changes nothing from the calendar's
+   * current footprint.
+   */
+  density?: "default" | "compact";
 }
 
-export function JalaliDatePicker({ value, onChange, minDate }: JalaliDatePickerProps) {
+const DEFAULT_TRIGGER_CLASSNAME =
+  "mt-1 w-full rounded-xl border border-border bg-background p-3 text-start text-sm tabular-fa outline-none focus:border-accent";
+
+export function JalaliDatePicker({
+  value,
+  onChange,
+  minDate,
+  maxDate,
+  triggerClassName,
+  showDeadlineCountdown = true,
+  quickSelectOptions,
+  density = "default",
+}: JalaliDatePickerProps) {
+  const compact = density === "compact";
   const selected = parseDateInputValue(value);
   const [open, setOpen] = useState(false);
   const initialJalaali = toJalaali(selected);
@@ -101,7 +153,10 @@ export function JalaliDatePicker({ value, onChange, minDate }: JalaliDatePickerP
   }
 
   function isDisabled(date: Date): boolean {
-    return !!minDate && startOfDay(date) < startOfDay(minDate);
+    return (
+      (!!minDate && startOfDay(date) < startOfDay(minDate)) ||
+      (!!maxDate && startOfDay(date) > startOfDay(maxDate))
+    );
   }
 
   function selectDay(jd: number) {
@@ -127,6 +182,15 @@ export function JalaliDatePicker({ value, onChange, minDate }: JalaliDatePickerP
     setOpen(false);
   }
 
+  function selectQuickDate(getDate: (today: Date) => Date) {
+    const date = getDate(new Date());
+    const jalaali = toJalaali(date);
+    onChange(toDateInputValue(date));
+    setViewYear(jalaali.jy);
+    setViewMonth(jalaali.jm);
+    setOpen(false);
+  }
+
   const monthLabel = jalaaliMonthKeyToFullLabel(`${viewYear}-${pad2(viewMonth)}`);
   const daysInMonth = jalaaliMonthLength(viewYear, viewMonth);
   const firstOfMonthG = toGregorian(viewYear, viewMonth, 1);
@@ -142,48 +206,63 @@ export function JalaliDatePicker({ value, onChange, minDate }: JalaliDatePickerP
       <button
         type="button"
         onClick={togglePanel}
-        className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-start text-sm tabular-fa outline-none focus:border-accent"
+        className={triggerClassName ?? DEFAULT_TRIGGER_CLASSNAME}
       >
         {formatJalaaliDate(selected)}
       </button>
 
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute z-20 mt-2 w-full rounded-2xl border border-border bg-surface p-3 shadow-lg">
-            <p className="text-center text-xs text-muted">
-              {daysToDeadline >= 0
-                ? `${formatNumber(daysToDeadline)} روز تا موعود`
-                : `${formatNumber(Math.abs(daysToDeadline))} روز از موعود گذشته`}
-            </p>
+          <div
+            className={`absolute z-20 mt-2 w-full rounded-2xl border border-border bg-surface shadow-lg ${
+              compact ? "p-2" : "p-3"
+            }`}
+          >
+            {showDeadlineCountdown && (
+              <p className="text-center text-xs text-muted">
+                {daysToDeadline >= 0
+                  ? `${formatNumber(daysToDeadline)} روز تا موعود`
+                  : `${formatNumber(Math.abs(daysToDeadline))} روز از موعود گذشته`}
+              </p>
+            )}
 
-            <div className="mt-3 flex items-center justify-between">
+            <div
+              className={`flex items-center justify-between ${
+                showDeadlineCountdown ? (compact ? "mt-2" : "mt-3") : ""
+              }`}
+            >
               <button
                 type="button"
                 onClick={() => goToMonth(-1)}
                 aria-label="ماه قبل"
-                className="rounded-full p-1.5 text-muted hover:bg-background"
+                className={`rounded-full text-muted hover:bg-background ${compact ? "p-1" : "p-1.5"}`}
               >
                 <BackIcon className="h-4 w-4 rotate-180" />
               </button>
-              <span className="text-sm font-semibold text-foreground">{monthLabel}</span>
+              <span className={`font-semibold text-foreground ${compact ? "text-xs" : "text-sm"}`}>
+                {monthLabel}
+              </span>
               <button
                 type="button"
                 onClick={() => goToMonth(1)}
                 aria-label="ماه بعد"
-                className="rounded-full p-1.5 text-muted hover:bg-background"
+                className={`rounded-full text-muted hover:bg-background ${compact ? "p-1" : "p-1.5"}`}
               >
                 <BackIcon className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="mt-3 grid grid-cols-7 gap-1 text-center text-xs text-muted">
+            <div
+              className={`grid grid-cols-7 text-center text-xs text-muted ${
+                compact ? "mt-2 gap-0.5" : "mt-3 gap-1"
+              }`}
+            >
               {WEEKDAY_LABELS.map((label, i) => (
                 <span key={i}>{label}</span>
               ))}
             </div>
 
-            <div className="mt-1 grid grid-cols-7 gap-1">
+            <div className={`mt-1 grid grid-cols-7 ${compact ? "gap-0.5" : "gap-1"}`}>
               {Array.from({ length: leadingBlanks }).map((_, i) => (
                 <span key={`blank-${i}`} />
               ))}
@@ -199,7 +278,7 @@ export function JalaliDatePicker({ value, onChange, minDate }: JalaliDatePickerP
                     type="button"
                     disabled={disabled}
                     onClick={() => selectDay(jd)}
-                    className={`rounded-lg py-1.5 text-xs tabular-fa ${
+                    className={`rounded-lg text-xs tabular-fa ${compact ? "py-1" : "py-1.5"} ${
                       isSelected
                         ? "bg-primary text-on-primary"
                         : disabled
@@ -213,17 +292,34 @@ export function JalaliDatePicker({ value, onChange, minDate }: JalaliDatePickerP
               })}
             </div>
 
-            <div className="mt-3 flex gap-2 border-t border-border pt-3">
-              {QUICK_SELECT_OPTIONS.map((option) => (
-                <button
-                  key={option.months}
-                  type="button"
-                  onClick={() => selectQuickOption(option.months)}
-                  className="flex-1 rounded-xl bg-background py-2 text-xs font-medium text-muted hover:text-accent"
-                >
-                  {option.label}
-                </button>
-              ))}
+            <div
+              className={`flex gap-2 border-t border-border ${compact ? "mt-2 pt-2" : "mt-3 pt-3"}`}
+            >
+              {quickSelectOptions
+                ? quickSelectOptions.map((option) => (
+                    <button
+                      key={option.label}
+                      type="button"
+                      onClick={() => selectQuickDate(option.getDate)}
+                      className={`flex-1 rounded-xl bg-background text-xs font-medium text-muted hover:text-accent ${
+                        compact ? "py-1.5" : "py-2"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))
+                : QUICK_SELECT_OPTIONS.map((option) => (
+                    <button
+                      key={option.months}
+                      type="button"
+                      onClick={() => selectQuickOption(option.months)}
+                      className={`flex-1 rounded-xl bg-background text-xs font-medium text-muted hover:text-accent ${
+                        compact ? "py-1.5" : "py-2"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
             </div>
           </div>
         </>

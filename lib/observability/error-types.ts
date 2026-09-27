@@ -22,6 +22,12 @@ export const ERROR_TYPES = {
   DB_ERROR: "DB_ERROR",
   SMS_ERROR: "SMS_ERROR",
   API_ERROR: "API_ERROR",
+  // Distinct from API_ERROR on purpose (lib/prices/get-live-prices.ts):
+  // fires at most once per quota-exhaustion cooldown window, not once per
+  // failed retry, so it needs its own tag - grouping it under the generic
+  // API_ERROR bucket would bury a "the whole nerkh.io integration is dead
+  // until the cooldown lifts" event among ordinary transient failures.
+  QUOTA_EXCEEDED_ERROR: "QUOTA_EXCEEDED_ERROR",
 } as const;
 
 export type ErrorType = (typeof ERROR_TYPES)[keyof typeof ERROR_TYPES];

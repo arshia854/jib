@@ -1,7 +1,7 @@
 import { toJalaali } from "jalaali-js";
 import { prisma } from "@/lib/prisma";
 import { getJalaaliMonthRange } from "@/lib/format";
-import { getTotalBalance } from "@/lib/data/accounts";
+import { getTotalBalance, getSavingsBalance } from "@/lib/data/accounts";
 
 type PrismaClient = typeof prisma;
 
@@ -54,20 +54,26 @@ export interface OverallTrend {
   percentChange: number;
 }
 
-// Phase 10 - a single current-month transaction whose amount is a defined
+// Phase 10 - a single current-period transaction whose amount is a defined
 // multiple (UNUSUAL_TRANSACTION_MULTIPLIER) of the average of that
-// category's *other* transactions this month. Deterministic and
-// zero-extra-query (computed from currentMonth's already-fetched
-// transactions) - see computeUnusualTransactions's own doc comment for why
-// the comparison window is deliberately just the current month.
+// category's *other* transactions across the whole
+// RECURRING_EXPENSE_LOOKBACK_MONTHS-period lookback window - see
+// computeUnusualTransactions's own doc comment for why the baseline is
+// historical rather than current-period-only.
 export interface UnusualTransaction {
   id: number;
   date: Date;
   category: string;
+  // Category.isEssential for this transaction's category - an essential
+  // cost that spiked usually isn't actionable, so consumers rank/phrase it
+  // differently from a discretionary one (see
+  // lib/reports/narrative-report.ts's resolveInsight and
+  // components/reports/UnusualTransactionsCard.tsx).
+  isEssential: boolean;
   description: string | null;
   amount: number;
-  // Average of the category's other transactions this month (the baseline
-  // `amount` was compared against), rounded.
+  // Average of the category's other transactions across the lookback window
+  // (the baseline `amount` was compared against), rounded.
   categoryAverage: number;
   // amount / categoryAverage, rounded to one decimal.
   multiple: number;
@@ -103,7 +109,14 @@ export interface CashFlowMonth {
 }
 
 export interface SpendingSummary {
+  // The true grand total across every account, savings included - unlike
+  // lib/data/dashboard.ts's `totalBalance`, which is spendable-only
+  // (savings excluded). Same field name, intentionally different meaning.
   totalBalance: number;
+  // totalBalance - savingsBalance: what's actually spendable.
+  availableBalance: number;
+  // Combined balance of the user's `type: "savings"` accounts.
+  savingsBalance: number;
   currentMonth: MonthSummary;
   previousMonth: MonthSummary;
   // Percent change per category, only for categories present (with expense
@@ -139,15 +152,27 @@ const RECENT_TRANSACTIONS_TAKE = 10;
 const TOP_MERCHANTS_TAKE = 5;
 const TOP_DISCRETIONARY_CATEGORIES_TAKE = 5;
 
-// A current-month transaction at least this many times its category's
-// average (of that category's *other* transactions this month) is flagged
-// as unusual. 3x is a common, easily-explainable rule-of-thumb multiple for
-// this kind of outlier flagging (not derived from this app's own data - no
-// calibration data exists, same caveat Phase 8's confidence model
-// documents for its own thresholds) - kept as a named constant rather than
-// inline so the "why 3, not some other number" question has one answer to
-// update, not several scattered ones.
+// A current-period transaction at least this many times its category's
+// average (of that category's *other* transactions across the lookback
+// window) is flagged as unusual. 3x is a common, easily-explainable
+// rule-of-thumb multiple for this kind of outlier flagging (not derived
+// from this app's own data - no calibration data exists, same caveat Phase
+// 8's confidence model documents for its own thresholds) - kept as a named
+// constant rather than inline so the "why 3, not some other number"
+// question has one answer to update, not several scattered ones.
 const UNUSUAL_TRANSACTION_MULTIPLIER = 3;
+
+// How many *other* transactions a category needs across the whole lookback
+// window before any average is computed for it at all. Below this, the
+// "average" is one or two numbers that happen to sit next to a big one,
+// which produces confidently-wrong multiples: a category that naturally has
+// one lump-sum transaction per period (rent) plus a single unrelated small
+// one would otherwise report that small number as the category's "average"
+// and the rent as ~34x it. 3 is the smallest sample where a single
+// atypical member can't single-handedly define the baseline - deliberately
+// a low bar (this is an attention-flag, not an inference), but a real one,
+// and named here so "why 3, not some other number" has one place to change.
+const UNUSUAL_TRANSACTION_MIN_BASELINE_SAMPLES = 3;
 
 // "Recurring" = present in at least this many of the last
 // RECURRING_EXPENSE_LOOKBACK_MONTHS months (current + the 2 before it).
@@ -183,7 +208,11 @@ type MonthTransaction = {
 // The subset of a Transaction row computeUnusualTransactions needs -
 // MonthTransaction above plus id/date, which summarizeMonth/topMerchants
 // never needed but an unusual-transaction result must reference to be
-// actionable (which transaction, and when).
+// actionable (which transaction, and when). Shared by every bucket that
+// function takes, prior periods included - a prior-period row is only ever
+// read for its amount/category, but keeping one shape for all buckets
+// keeps the "which bucket is which" rule (index, not type) the only thing
+// a caller has to get right.
 type UnusualTransactionCandidate = MonthTransaction & { id: number; date: Date };
 
 // The subset of a Transaction row computeRecurringExpenses/groupByDescription
@@ -285,51 +314,77 @@ export function computeSavingsRate(income: number, expense: number): number | un
 }
 
 /**
- * Flags a current-month expense transaction whose amount is at least
- * UNUSUAL_TRANSACTION_MULTIPLIER times the average of that *same category's
- * other* transactions this month. Deliberately scoped to the current month
- * only (not a longer historical average) - it's a zero-extra-query pure
- * function over data getSpendingSummary already fetches for currentMonth,
- * matching this phase's "pure function over already-fetched data"
- * constraint, at the acknowledged cost of only catching within-month
- * outliers, not "unusual vs. your normal months" (see the roadmap entry's
- * Remaining Risks for the tradeoff this makes explicit).
+ * Flags a *current-period* expense transaction whose amount is at least
+ * UNUSUAL_TRANSACTION_MULTIPLIER times the average of that same category's
+ * *other* transactions across the whole lookback window.
  *
- * A category needs at least one *other* transaction this month to compute
- * a baseline against - a category with only one transaction has nothing to
- * be "unusual" relative to yet, so it's skipped rather than compared
- * against itself.
+ * `periodExpenseTransactions` is bucketed most-recent-first (current
+ * period, then each prior period, up to
+ * RECURRING_EXPENSE_LOOKBACK_MONTHS) - the exact same multi-bucket input
+ * convention computeRecurringExpenses below takes, so both can be handed
+ * the same already-fetched buckets. Only bucket 0 (the current period) is
+ * ever flagged; every bucket, that one included, feeds the baseline
+ * average. Buckets are expected to be expense-only, but a non-expense row
+ * is skipped rather than trusted, so passing an unfiltered period is safe.
+ *
+ * This used to compare against the current period *only*, which was
+ * statistically fragile for exactly the categories it matters most for: a
+ * category that naturally holds one lump-sum transaction per period (rent)
+ * plus one unrelated small one would compute its "average" from that single
+ * small number and report the rent as a ~34x outlier every single period.
+ * A real multi-period baseline costs the extra buckets (both callers
+ * already fetch them for computeRecurringExpenses) and makes "unusual"
+ * mean unusual *for this category over time*, which is what every consumer
+ * of this function already tells the user it means.
+ *
+ * A category needs at least UNUSUAL_TRANSACTION_MIN_BASELINE_SAMPLES other
+ * transactions in that combined pool before any average is computed for it
+ * - below that it's skipped entirely (no flag, no noisy ratio) rather than
+ * compared against a baseline too small to mean anything.
  */
-export function computeUnusualTransactions(transactions: UnusualTransactionCandidate[]): UnusualTransaction[] {
-  const byCategory = new Map<string, UnusualTransactionCandidate[]>();
-  for (const t of transactions) {
-    if (t.type !== "expense") continue;
-    const list = byCategory.get(t.category.name);
-    if (list) list.push(t);
-    else byCategory.set(t.category.name, [t]);
+export function computeUnusualTransactions(
+  periodExpenseTransactions: UnusualTransactionCandidate[][]
+): UnusualTransaction[] {
+  // Baseline pool per category, across every bucket - a category's "normal"
+  // is what it looks like over the whole window, so the current period
+  // counts toward it too (each transaction is then excluded from its own
+  // baseline below, by identity).
+  const poolByCategory = new Map<string, UnusualTransactionCandidate[]>();
+  for (const bucket of periodExpenseTransactions) {
+    for (const t of bucket) {
+      if (t.type !== "expense") continue;
+      const list = poolByCategory.get(t.category.name);
+      if (list) list.push(t);
+      else poolByCategory.set(t.category.name, [t]);
+    }
   }
 
+  const currentPeriod = periodExpenseTransactions[0] ?? [];
   const results: UnusualTransaction[] = [];
-  for (const [categoryName, categoryTransactions] of byCategory) {
-    if (categoryTransactions.length < 2) continue;
+  for (const t of currentPeriod) {
+    if (t.type !== "expense") continue;
 
-    for (const t of categoryTransactions) {
-      const others = categoryTransactions.filter((o) => o !== t);
-      const othersAverage = others.reduce((sum, o) => sum + o.amount, 0) / others.length;
-      if (othersAverage <= 0) continue;
+    const others = (poolByCategory.get(t.category.name) ?? []).filter((o) => o !== t);
+    // Category-level skip in per-transaction form: every current-period
+    // transaction in a given category sees the same pool minus itself, so
+    // this either skips all of that category's transactions or none.
+    if (others.length < UNUSUAL_TRANSACTION_MIN_BASELINE_SAMPLES) continue;
 
-      const multiple = t.amount / othersAverage;
-      if (multiple >= UNUSUAL_TRANSACTION_MULTIPLIER) {
-        results.push({
-          id: t.id,
-          date: t.date,
-          category: categoryName,
-          description: t.description,
-          amount: t.amount,
-          categoryAverage: Math.round(othersAverage),
-          multiple: Math.round(multiple * 10) / 10,
-        });
-      }
+    const othersAverage = others.reduce((sum, o) => sum + o.amount, 0) / others.length;
+    if (othersAverage <= 0) continue;
+
+    const multiple = t.amount / othersAverage;
+    if (multiple >= UNUSUAL_TRANSACTION_MULTIPLIER) {
+      results.push({
+        id: t.id,
+        date: t.date,
+        category: t.category.name,
+        isEssential: t.category.isEssential,
+        description: t.description,
+        amount: t.amount,
+        categoryAverage: Math.round(othersAverage),
+        multiple: Math.round(multiple * 10) / 10,
+      });
     }
   }
 
@@ -571,7 +626,14 @@ export async function getSpendingSummary(userId: number, client: PrismaClient = 
   // RECURRING_EXPENSE_LOOKBACK_MONTHS (3) = current + previous + this one.
   const monthTwoBackRange = getJalaaliMonthRange(new Date(previousRange.start.getTime() - 1));
 
-  const [currentTransactions, cachedPreviousMonth, totalBalance, recentTransactions, lookbackExpenseTransactions] =
+  const [
+    currentTransactions,
+    cachedPreviousMonth,
+    totalBalance,
+    savingsBalance,
+    recentTransactions,
+    lookbackExpenseTransactions,
+  ] =
     await Promise.all([
       client.transaction.findMany({
         // A transfer between the user's own accounts (Category.isTransfer)
@@ -600,6 +662,10 @@ export async function getSpendingSummary(userId: number, client: PrismaClient = 
       // (lib/data/accounts.ts) for the bounded-aggregate replacement and
       // the measured before/after.
       getTotalBalance(userId, client),
+      // Same bounded-aggregate query the dashboard uses for its savings
+      // line - backs availableBalance/savingsBalance below so the chat
+      // assistant sees the split, not just the grand total.
+      getSavingsBalance(userId, client),
       client.transaction.findMany({
         where: { userId },
         orderBy: { date: "desc" },
@@ -611,6 +677,10 @@ export async function getSpendingSummary(userId: number, client: PrismaClient = 
       // descriptions, so a normalized-description-level view of the prior
       // 2 months needs its own raw fetch; spans both months in one query
       // (split by date below) rather than two separate round-trips.
+      // id/type/category are selected on top of what recurringExpenses
+      // itself needs so unusualTransactions' historical baseline can reuse
+      // these exact same rows (see monthlyExpenseGroups below) instead of
+      // issuing a second, near-identical query over the same window.
       client.transaction.findMany({
         where: {
           userId,
@@ -618,7 +688,14 @@ export async function getSpendingSummary(userId: number, client: PrismaClient = 
           date: { gte: monthTwoBackRange.start, lt: previousRange.end },
           category: { isTransfer: false },
         },
-        select: { date: true, amount: true, description: true },
+        select: {
+          id: true,
+          date: true,
+          amount: true,
+          type: true,
+          description: true,
+          category: { select: { name: true, isEssential: true } },
+        },
       }),
     ]);
 
@@ -659,16 +736,23 @@ export async function getSpendingSummary(userId: number, client: PrismaClient = 
   // The three-way fetch/split above (current, previous, monthTwoBack) is
   // this function's own hand-written realization of "the last
   // RECURRING_EXPENSE_LOOKBACK_MONTHS months" - this keeps them in sync
-  // (computeRecurringExpenses' monthsChecked is only meaningful if the
-  // array it receives actually matches the constant) rather than letting
-  // the two silently drift if one is ever changed without the other.
+  // (computeRecurringExpenses' monthsChecked, and computeUnusualTransactions'
+  // baseline window, are only meaningful if the array they receive actually
+  // matches the constant) rather than letting them silently drift if one is
+  // ever changed without the other.
   if (monthlyExpenseGroups.length !== RECURRING_EXPENSE_LOOKBACK_MONTHS) {
     throw new Error("recurring-expense lookback window mismatch - update the fetch above to match");
   }
   const recurringExpenses = computeRecurringExpenses(monthlyExpenseGroups);
+  // Same buckets, same most-recent-first order both functions document -
+  // computeUnusualTransactions flags only bucket 0 (the current month) and
+  // uses all three for each category's baseline average.
+  const unusualTransactions = computeUnusualTransactions(monthlyExpenseGroups);
 
   return {
     totalBalance,
+    availableBalance: totalBalance - savingsBalance,
+    savingsBalance,
     currentMonth,
     previousMonth,
     categoryTrends: computeCategoryTrends(currentMonth, previousMonth),
@@ -685,7 +769,7 @@ export async function getSpendingSummary(userId: number, client: PrismaClient = 
     incomeChange: computeOverallChange(currentMonth.income, previousMonth.income),
     expenseChange: computeOverallChange(currentMonth.expense, previousMonth.expense),
     savingsRate: computeSavingsRate(currentMonth.income, currentMonth.expense),
-    unusualTransactions: computeUnusualTransactions(currentTransactions),
+    unusualTransactions,
     recurringExpenses,
     cashFlowTrend,
   };

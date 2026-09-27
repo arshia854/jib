@@ -12,14 +12,23 @@ vi.mock("@/lib/nvidia-ai", () => ({
   AI_PROVIDER: "nvidia-nim",
 }));
 
+// Pass-through spy: real behavior unchanged, just lets the provider-error
+// test below confirm the raw error text still reaches reportError.
+vi.mock("@/lib/observability/report-error", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/observability/report-error")>();
+  return { ...actual, reportError: vi.fn(actual.reportError) };
+});
+
 import { getSession } from "@/lib/auth/session";
 import { chatCompletion, streamChatCompletion } from "@/lib/nvidia-ai";
+import { reportError } from "@/lib/observability/report-error";
 import { POST } from "@/app/api/chat/route";
 import { MAX_CHAT_MESSAGE_LENGTH } from "@/lib/limits";
 
 const mockedGetSession = vi.mocked(getSession);
 const mockedChatCompletion = vi.mocked(chatCompletion);
 const mockedStreamChatCompletion = vi.mocked(streamChatCompletion);
+const mockedReportError = vi.mocked(reportError);
 
 // Every send is scoped to a conversation now - the id is a required body
 // field, so it's threaded through this helper rather than left to each
@@ -110,7 +119,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     expect(data.transaction.type).toBe("expense");
     expect(data.transaction.needsConfirmation).toBe(false);
     expect(typeof data.message).toBe("string");
-    expect(data.message).toContain("می‌خواید ثبتش کنم؟");
+    expect(data.message).toContain("می‌خوای ثبتش کنم؟");
 
     // No DB write happens before explicit user confirmation - the chat
     // route only ever surfaces a suggestion, it never calls
@@ -136,9 +145,10 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("text/plain");
     expect(mockedStreamChatCompletion).toHaveBeenCalledTimes(1);
-    // Intent detection is the only chatCompletion call in this path -
-    // parseTransactionWithAI is never reached at all.
-    expect(mockedChatCompletion).toHaveBeenCalledTimes(1);
+    // The message has no amount signal, so detectTransactionIntent's
+    // hasAmountSignal pre-filter skips the AI call entirely - the mocked
+    // resolved value above is unused.
+    expect(mockedChatCompletion).not.toHaveBeenCalled();
   });
 
   it("falls back to normal streamed chat (with a clarifying-question nudge) when extraction can't resolve amount/category confidently, and still writes nothing", async () => {
@@ -148,7 +158,7 @@ describe("POST /api/chat - suggest_transaction flow", () => {
     mockedStreamChatCompletion.mockResolvedValueOnce(textStream("دقیقاً چقدر بود و برای چی؟"));
 
     const countBefore = await prisma.transaction.count({ where: { userId } });
-    const res = await POST(makeRequest("یه چیزی خریدم یادم نیست چقدر بود", conversationId));
+    const res = await POST(makeRequest("۵۰۰ تومن یه چیزی خریدم یادم نیست چی بود", conversationId));
     const countAfter = await prisma.transaction.count({ where: { userId } });
 
     expect(res.headers.get("Content-Type")).toContain("text/plain");
@@ -212,12 +222,20 @@ describe("POST /api/chat - suggest_transaction flow", () => {
   it("returns 502 with a Persian error message when streamChatCompletion fails, and reports the failure", async () => {
     mockedChatCompletion.mockResolvedValueOnce('{"isPastUnloggedTransaction": false}');
     mockedStreamChatCompletion.mockRejectedValueOnce(new Error("NVIDIA NIM: connection refused"));
+    mockedReportError.mockClear();
 
     const res = await POST(makeRequest("این ماه چقدر خرج کردم؟", conversationId));
 
     expect(res.status).toBe(502);
     const data = await res.json();
-    expect(typeof data.error).toBe("string");
+    // Fixed client-facing message - the raw provider error text must not
+    // reach the client...
+    expect(data.error).toBe("ارتباط با هوش مصنوعی برقرار نشد، دوباره تلاش کن.");
+    expect(data.error).not.toContain("connection refused");
+    // ...but is still what gets reported server-side.
+    expect(mockedReportError).toHaveBeenCalledWith(
+      expect.objectContaining({ route: "api/chat", message: "NVIDIA NIM: connection refused" })
+    );
   });
 });
 

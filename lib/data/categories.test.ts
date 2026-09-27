@@ -1,6 +1,15 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { prisma } from "@/lib/prisma";
-import { updateCategory, deleteCategory, CategoryNotFoundError, CategoryInUseError } from "@/lib/data/categories";
+import {
+  updateCategory,
+  deleteCategory,
+  resolveOrCreateCategoryFromSuggestion,
+  CategoryNotFoundError,
+  CategoryInUseError,
+  InvalidParentCategoryError,
+  CategoryCreationRateLimitedError,
+} from "@/lib/data/categories";
+import { resolveNewCategoryIcon } from "@/lib/categories";
 
 // Phase 3.2 regression coverage: proves the { id, userId } ownership check
 // on updateCategory/deleteCategory actually blocks cross-user access. No
@@ -181,4 +190,147 @@ describe("deleteCategory - in-use protection (Restrict)", () => {
     },
     15000
   );
+});
+
+// Pulled out of app/api/categories/route.ts's source: "ai-suggestion"
+// branch (see lib/data/categories.ts's own comment on why) so both that
+// route and POST /api/transactions/[id]/suggested-category's "accept"
+// action share one resolution path. That route's own test file
+// (app/api/categories/route.test.ts) already exercises this thoroughly
+// end-to-end over HTTP - these tests cover the function's own contract
+// directly instead of duplicating that coverage.
+describe("resolveOrCreateCategoryFromSuggestion", () => {
+  let userId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-RESOLVE-CATEGORY-SUGGESTION-${Date.now()}` },
+    });
+    userId = user.id;
+  });
+
+  afterAll(async () => {
+    // Children first: Category.parent uses onDelete: Restrict (the
+    // "resolves a valid same-type parentName" test below creates one).
+    await prisma.category.deleteMany({ where: { userId, parentId: { not: null } } });
+    await prisma.category.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$disconnect();
+  });
+
+  // Deliberately unrelated single-word-ish names across this whole describe
+  // block (same precedent as app/api/categories/route.test.ts's own
+  // FILLER_CATEGORY_NAMES comment) - a shared suffix across test category
+  // names would otherwise risk tripping findSimilarCategory's own >= 0.5
+  // token-overlap fallback against an unrelated category from a different
+  // test in this block, which is a real failure mode this suite hit before
+  // this rename (see git history).
+  it("creates a genuinely new category with a forced (not client-supplied) icon", async () => {
+    const name = "زعفران";
+    const result = await resolveOrCreateCategoryFromSuggestion(userId, { name, parentName: null, type: "expense" });
+
+    expect(result.resolvedExisting).toBe(false);
+    expect(result.category.name).toBe(name);
+    expect(result.category.icon).toBe(resolveNewCategoryIcon(name));
+    expect(result.category.color).toBe("#64748B");
+  });
+
+  it("resolves to an existing exact-name match instead of creating a duplicate", async () => {
+    const existing = await prisma.category.create({
+      data: { userId, name: "کوهنوردی", icon: "🛒", color: "#10B981", type: "expense" },
+    });
+    const countBefore = await prisma.category.count({ where: { userId } });
+
+    const result = await resolveOrCreateCategoryFromSuggestion(userId, {
+      name: existing.name,
+      parentName: null,
+      type: "expense",
+    });
+
+    expect(result.resolvedExisting).toBe(true);
+    expect(result.category.id).toBe(existing.id);
+    expect(await prisma.category.count({ where: { userId } })).toBe(countBefore);
+  });
+
+  // Without excludeArchived here, "پس‌انداز" token-overlaps the archived
+  // "واریز به حساب پس‌انداز" at ratio 1.0 (normalizeText turns the
+  // half-space into a plain space, so both carry the tokens پس/انداز) and
+  // would resolve onto it - landing the accepted suggestion's transaction on
+  // a retired category.
+  it("never resolves onto an archived category, creating a new one instead", async () => {
+    const archived = await prisma.category.create({
+      data: { userId, name: "واریز به حساب پس‌انداز", icon: "💰", color: "#10B981", type: "expense", isArchived: true },
+    });
+
+    const result = await resolveOrCreateCategoryFromSuggestion(userId, {
+      name: "پس‌انداز",
+      parentName: null,
+      type: "expense",
+    });
+
+    expect(result.resolvedExisting).toBe(false);
+    expect(result.category.id).not.toBe(archived.id);
+    expect(result.category.name).toBe("پس‌انداز");
+  });
+
+  it("resolves a valid same-type parentName to the parent's id", async () => {
+    const parent = await prisma.category.create({
+      data: { userId, name: "دوچرخه‌سواری", icon: "🧾", color: "#3B82F6", type: "expense" },
+    });
+
+    const result = await resolveOrCreateCategoryFromSuggestion(userId, {
+      name: "قایقرانی",
+      parentName: parent.name,
+      type: "expense",
+    });
+
+    expect(result.category.parentId).toBe(parent.id);
+  });
+
+  it("throws InvalidParentCategoryError when parentName does not exist", async () => {
+    await expect(
+      resolveOrCreateCategoryFromSuggestion(userId, {
+        name: "تیراندازی",
+        parentName: "والدی که وجود ندارد",
+        type: "expense",
+      })
+    ).rejects.toBeInstanceOf(InvalidParentCategoryError);
+  });
+
+  it("throws InvalidParentCategoryError when parentName exists but with a different type", async () => {
+    const parent = await prisma.category.create({
+      data: { userId, name: "دوومیدانی", icon: "💰", color: "#10B981", type: "income" },
+    });
+
+    await expect(
+      resolveOrCreateCategoryFromSuggestion(userId, {
+        name: "اسکیت",
+        parentName: parent.name,
+        type: "expense",
+      })
+    ).rejects.toBeInstanceOf(InvalidParentCategoryError);
+  });
+
+  it("throws CategoryCreationRateLimitedError once MAX_CATEGORIES_PER_24H is reached", async () => {
+    const rateLimitedUser = await prisma.user.create({
+      data: { phoneNumber: `TEST-RESOLVE-CATEGORY-RATE-LIMIT-${Date.now()}` },
+    });
+    const fillerNames = ["زرد ۲", "بنفش ۲", "نارنجی ۲", "خاکستری ۲", "صورتی ۲", "فیروزه‌ای ۲", "زیتونی ۲", "کرم ۲", "یاسی ۲", "سرمه‌ای ۲"];
+    for (const name of fillerNames) {
+      await prisma.category.create({
+        data: { userId: rateLimitedUser.id, name, icon: "🧪", color: "#64748B", type: "expense" },
+      });
+    }
+
+    await expect(
+      resolveOrCreateCategoryFromSuggestion(rateLimitedUser.id, {
+        name: "دسته یازدهم resolveOrCreate",
+        parentName: null,
+        type: "expense",
+      })
+    ).rejects.toBeInstanceOf(CategoryCreationRateLimitedError);
+
+    await prisma.category.deleteMany({ where: { userId: rateLimitedUser.id } });
+    await prisma.user.delete({ where: { id: rateLimitedUser.id } });
+  });
 });

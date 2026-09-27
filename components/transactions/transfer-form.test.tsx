@@ -66,6 +66,60 @@ describe("TransferForm - happy path submit", () => {
   });
 });
 
+describe("TransferForm - prefill props", () => {
+  const threeAccounts = [...accounts, { id: 3, name: "بانک", type: "bank" }];
+
+  function selects() {
+    const [from, to] = screen.getAllByRole("combobox") as HTMLSelectElement[];
+    return { from, to };
+  }
+
+  it("seeds initialFromAccountId and initialToAccountId", () => {
+    render(<TransferForm accounts={threeAccounts} initialFromAccountId={3} initialToAccountId={2} />);
+
+    const { from, to } = selects();
+    expect(from.value).toBe("3");
+    expect(to.value).toBe("2");
+  });
+
+  it("seeds initialAmount and initialNote, and submits them", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 201, json: async () => ({ transferGroupId: "g1" }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TransferForm accounts={accounts} initialAmount={250000} initialNote="پیاده‌سازی استراتژی دلخواه" />);
+
+    expect((screen.getByPlaceholderText("۰") as HTMLInputElement).value).toBe("۲۵۰٬۰۰۰");
+    expect((screen.getByDisplayValue("پیاده‌سازی استراتژی دلخواه") as HTMLInputElement).type).toBe("text");
+
+    fireEvent.click(screen.getByRole("button", { name: /ثبت انتقال/ }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
+      fromAccountId: 1,
+      toAccountId: 2,
+      amount: 250000,
+      note: "پیاده‌سازی استراتژی دلخواه",
+    });
+  });
+
+  it("silently falls back to the default accounts when the prefilled ids don't exist, without crashing", () => {
+    render(<TransferForm accounts={threeAccounts} initialFromAccountId={999} initialToAccountId={-4} />);
+
+    const { from, to } = selects();
+    expect(from.value).toBe("1");
+    expect(to.value).toBe("2");
+    expect(screen.queryByText(/نامعتبر/)).toBeNull();
+  });
+
+  it("falls back per side: a valid id is kept while an invalid one on the other side takes its default", () => {
+    render(<TransferForm accounts={threeAccounts} initialFromAccountId={3} initialToAccountId={999} />);
+
+    const { from, to } = selects();
+    expect(from.value).toBe("3");
+    expect(to.value).toBe("2");
+  });
+});
+
 describe("TransferForm - same-account validation", () => {
   // The mutual from/to exclusion filter (each select drops whichever
   // account is currently chosen on the *other* side) means a real two-

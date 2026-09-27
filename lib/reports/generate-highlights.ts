@@ -1,5 +1,5 @@
 import type { CategoryComparison, MonthlyComparisonResult } from "@/lib/reports/monthly-comparison";
-import { formatToman } from "@/lib/format";
+import { formatToman, formatNumber } from "@/lib/format";
 
 export type HighlightType = "positive" | "warning" | "info";
 
@@ -45,7 +45,14 @@ function overallSavingsCandidate(result: MonthlyComparisonResult, periodLabel: s
     magnitude: percent,
     highlight: {
       type: "positive",
-      message: `عالی! هزینه‌های شما ${percent}٪ ${periodLabel} کاهش یافته است.`,
+      // v1.1 expression bank (docs/jib-persona.md), "Good month / under budget" row - opens with
+      // the "حسابی جمع و جور بودی" idiom (period-neutral as written, no literal "این ماه" to
+      // adapt away), then the concrete percent, per the bank's "idiom first, number second" rule.
+      // `periodLabel` here is this file's own "نسبت به X قبل" comparison phrasing (see
+      // DEFAULT_PERIOD_LABEL below/the periodLabel test) - unlike narrative-report.ts's
+      // self-referential "این دوره", it's kept exactly where the old message put it so a caller
+      // passing a custom label still sees it land correctly in the number clause.
+      message: `حسابی جمع و جور بودی این دوره - هزینه‌هات ${periodLabel} ${formatNumber(percent)}٪ کم شده.`,
     },
   };
 }
@@ -108,7 +115,15 @@ function discretionaryWarningCandidate(result: MonthlyComparisonResult, periodLa
     highlight: {
       type: "warning",
       category: best.category,
-      message: `هزینه «${best.category}» ${periodLabel} ${percent}٪ افزایش یافته — کمی مراقب باشید.`,
+      // v1.1 expression bank, "Overspending vs. own average" row - deliberately a DIFFERENT
+      // opener ("ول‌خرجی کردی") than narrative-report.ts's resolveInsight, which already covers
+      // this same situation with "پول از دستت مثل آب سُر خورد"/"دست و دلت واقعاً باز بوده" - a
+      // user who sees both the narrative and highlights sections on one report shouldn't read the
+      // same line twice. No "کمی مراقب باشید" tacked on like the old copy: that was an unearned,
+      // vague suggestion (no concrete action follows from a single percent), and the persona doc
+      // calls that out as worse than no suggestion at all - the idiom + number already carry the
+      // warning tone on their own.
+      message: `این دوره حسابی ول‌خرجی کردی روی «${best.category}» - هزینه‌ش ${periodLabel} ${formatNumber(percent)}٪ بالا رفته.`,
     },
   };
 }
@@ -135,7 +150,15 @@ function essentialIncreaseCandidate(categories: CategoryComparison[], periodLabe
     highlight: {
       type: "info",
       category: worst.category,
-      message: `هزینه ضروری «${worst.category}» ${periodLabel} ${percent}٪ افزایش یافته است.`,
+      // No expression-bank idiom here on purpose: every "Recurring/predictable spend noted" bank
+      // row ("ثابت شده تو برنامه‌ت" etc.) describes STEADINESS, which would contradict a cost that
+      // just grew - forcing one on would be exactly the لوس failure mode (idiom fighting the
+      // fact). Per this task's instruction, stays close to the DNA sentence's spirit instead: a
+      // fact-first, non-judgmental sentence (rule 1, "قضاوت نکن؛ توصیف کن"), with one light
+      // reassuring clause - an essential cost isn't something to feel bad about or be told to cut,
+      // so the sentence says that plainly rather than leaving a bare, cold number that could read
+      // as a warning it isn't.
+      message: `هزینه ضروری «${worst.category}» ${periodLabel} ${formatNumber(percent)}٪ بیشتر شده - طبیعیه، از اون‌جور خرجاست که دست خودت نیست کمش کنی.`,
     },
   };
 }
@@ -155,7 +178,11 @@ function categorySavingsCandidate(categories: CategoryComparison[], periodLabel:
     highlight: {
       type: "positive",
       category: best.category,
-      message: `صرفه‌جویی خوب در «${best.category}»؛ ${periodLabel} ${percent}٪ کمتر خرج کرده‌اید.`,
+      // v1.1 expression bank, same "Good month / under budget" row as overallSavingsCandidate -
+      // deliberately a different opener ("دستت رو محکم گرفتی") than that function's "حسابی جمع و
+      // جور بودی" so the two positive highlights don't repeat the same line when both fire on the
+      // same report (see "returns exactly 3 highlights when one from each rule qualifies" below).
+      message: `دستت رو محکم گرفتی روی «${best.category}» - هزینه‌ش ${periodLabel} ${formatNumber(percent)}٪ کم شده.`,
     },
   };
 }
@@ -181,7 +208,12 @@ function discretionaryTotalCandidate(result: MonthlyComparisonResult): Candidate
     highlight: {
       type: "warning",
       amount: discretionaryTotal,
-      message: `${formatToman(discretionaryTotal)} از هزینه‌های این دوره غیرضروری بوده و قابل کاهش است.`,
+      // v1.1 expression bank, "Savings opportunity" row - picks a different opener ("یه فرصت
+      // طلایی اینجا داری") than narrative-report.ts's resolveOpportunity, which already covers
+      // this same "reducible discretionary total" framing with "یه‌جای خالی برای پس‌انداز پیدا
+      // کردم" - same reason as discretionaryWarningCandidate above, avoid two identical-sounding
+      // lines on one report.
+      message: `یه فرصت طلایی اینجا داری - ${formatToman(discretionaryTotal)} از خرجای این دوره غیرضروری بوده و می‌تونی کمش کنی.`,
     },
   };
 }

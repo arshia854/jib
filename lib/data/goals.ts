@@ -1,6 +1,12 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { getGoalFeasibilityContext, computeGoalFeasibility, type GoalFeasibility } from "@/lib/goals/feasibility";
+import {
+  getGoalFeasibilityContext,
+  getGoalBalanceInputs,
+  computeGoalFeasibility,
+  type GoalFeasibility,
+} from "@/lib/goals/feasibility";
+import { assertAccountOwnership } from "@/lib/data/accounts";
 
 type PrismaClient = typeof prisma;
 
@@ -27,7 +33,16 @@ export interface GoalWithFeasibility {
   status: string;
   createdAt: Date;
   updatedAt: Date;
+  savingsAccountId: number | null;
   feasibility: GoalFeasibility;
+  // getGoalBalanceInputs' (lib/goals/feasibility.ts) own two return values -
+  // already computed per goal below to build `feasibility`, surfaced here as
+  // siblings (not nested inside feasibility) so a caller (the savings page's
+  // read-only goal-allocation view) can show "how much of this goal is
+  // already covered" without recomputing this goal's own alreadySaved/
+  // availableBalance split itself.
+  alreadySaved: number;
+  availableBalance: number;
 }
 
 /**
@@ -40,7 +55,9 @@ export interface GoalWithFeasibility {
  * re-running an identical query once per row - not the kind of batching the
  * task's own "N+1 is acceptable, don't over-engineer a batch query" note
  * warns against skipping (that note is about computeGoalFeasibility itself,
- * which genuinely does need to run once per goal and does, below).
+ * which genuinely does need to run once per goal and does, below - and,
+ * since Phase B1, so does getGoalBalanceInputs for a goal with its own
+ * savingsAccountId).
  *
  * `status` has no natural DB sort order ("abandoned" < "achieved" <
  * "active" alphabetically, the opposite of "active first"), so the active/
@@ -59,33 +76,55 @@ export async function listGoalsWithFeasibility(
 
   const sorted = [...goals].sort((a, b) => Number(a.status !== "active") - Number(b.status !== "active"));
 
-  // context.availableBalancePerActiveGoal is already the user's whole
-  // current balance split evenly across their active goals (see that
-  // field's own doc comment on lib/goals/feasibility.ts's
-  // GoalFeasibilityContext for why, and why the split itself lives there
-  // rather than here) - an already-achieved/abandoned goal isn't competing
-  // for that pool, so it gets 0 instead of a share.
-  return sorted.map((goal) => ({
-    ...goal,
-    feasibility: computeGoalFeasibility({
-      targetAmount: goal.targetAmount,
-      initialAmount: goal.initialAmount,
-      // Phase 1 has no tracked-progress source beyond initialAmount - every
-      // caller passes 0 (see lib/goals/feasibility.ts's own doc comment on
-      // this input, and why it's still a separate parameter).
-      alreadySaved: 0,
-      availableBalance: goal.status === "active" ? context.availableBalancePerActiveGoal : 0,
-      deadline: goal.deadline,
-      actualMonthlyAverage: context.actualMonthlyAverage,
-      incomeRegularity: context.incomeRegularity,
-    }),
-  }));
+  // getGoalBalanceInputs (lib/goals/feasibility.ts) resolves each goal's own
+  // alreadySaved/availableBalance split - its own dedicated account balance
+  // for a goal with a savingsAccountId, or its share of
+  // context.availableBalancePerActiveGoal (0 for an achieved/abandoned
+  // goal) otherwise. Awaited per goal (one extra query per *linked* goal
+  // only) rather than batched - same acceptable N+1 as computeGoalFeasibility
+  // itself, per this function's own doc comment above.
+  return Promise.all(
+    sorted.map(async (goal) => {
+      const { alreadySaved, availableBalance } = await getGoalBalanceInputs(userId, goal, context, client);
+      return {
+        ...goal,
+        feasibility: computeGoalFeasibility({
+          targetAmount: goal.targetAmount,
+          initialAmount: goal.initialAmount,
+          alreadySaved,
+          availableBalance,
+          deadline: goal.deadline,
+          actualMonthlyAverage: context.actualMonthlyAverage,
+          incomeRegularity: context.incomeRegularity,
+        }),
+        alreadySaved,
+        availableBalance,
+      };
+    })
+  );
 }
 
 export async function createGoal(
   userId: number,
-  data: { name: string; category: string; targetAmount: number; initialAmount?: number; deadline: Date }
+  data: {
+    name: string;
+    category: string;
+    targetAmount: number;
+    initialAmount?: number;
+    deadline: Date;
+    // Phase B1 (savings roadmap): optional link to one of the user's own
+    // FinanceAccounts (prisma/schema.prisma's Goal.savingsAccountId).
+    // Validated below via assertAccountOwnership before it's ever written -
+    // same ownership check lib/data/accounts.ts's own updateAccount/
+    // deleteAccount already apply to a FinanceAccount id, reused here rather
+    // than re-implemented.
+    savingsAccountId?: number | null;
+  }
 ) {
+  if (data.savingsAccountId != null) {
+    await assertAccountOwnership(userId, data.savingsAccountId);
+  }
+
   return prisma.goal.create({
     data: {
       name: data.name,
@@ -93,6 +132,7 @@ export async function createGoal(
       targetAmount: data.targetAmount,
       initialAmount: data.initialAmount ?? 0,
       deadline: data.deadline,
+      savingsAccountId: data.savingsAccountId ?? null,
       userId,
     },
   });
@@ -118,11 +158,27 @@ export async function getGoal(userId: number, id: number) {
 export async function updateGoal(
   userId: number,
   id: number,
-  data: { name?: string; targetAmount?: number; deadline?: Date; status?: string; initialAmount?: number }
+  data: {
+    name?: string;
+    targetAmount?: number;
+    deadline?: Date;
+    status?: string;
+    initialAmount?: number;
+    // `undefined` (key omitted) means "leave the link as-is"; `null` means
+    // "explicitly clear it, revert this goal to shared-pool apportionment" -
+    // same optional-vs-null-vs-omitted distinction the API route already
+    // has to preserve through JSON, and the same reason createGoal's own
+    // savingsAccountId is `number | null | undefined` rather than just
+    // `number | undefined`.
+    savingsAccountId?: number | null;
+  }
 ) {
   const existing = await prisma.goal.findFirst({ where: { id, userId } });
   if (!existing) {
     throw new GoalNotFoundError("هدف یافت نشد.");
+  }
+  if (data.savingsAccountId !== undefined && data.savingsAccountId !== null) {
+    await assertAccountOwnership(userId, data.savingsAccountId);
   }
   return prisma.goal.update({ where: { id }, data });
 }

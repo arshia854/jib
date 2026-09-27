@@ -76,6 +76,25 @@ describe("redact", () => {
     expect(redact(input)).toEqual({ token: "[REDACTED]" });
   });
 
+  it("does not redact a numeric field under a sensitive-looking key (token usage counts)", () => {
+    expect(redact({ promptTokens: 120, completionTokens: 45, totalTokens: 165 })).toEqual({
+      promptTokens: 120,
+      completionTokens: 45,
+      totalTokens: 165,
+    });
+    expect(redact({ usage: { promptTokens: 120, completionTokens: 45, totalTokens: 165 } })).toEqual({
+      usage: { promptTokens: 120, completionTokens: 45, totalTokens: 165 },
+    });
+  });
+
+  it("still fully redacts a string value under a sensitive key alongside numeric token counts", () => {
+    expect(redact({ apiToken: "sk-abc123", promptTokens: 10 })).toEqual({
+      apiToken: "[REDACTED]",
+      promptTokens: 10,
+    });
+    expect(redact({ password: "hunter2" })).toEqual({ password: "[REDACTED]" });
+  });
+
   it("does not mutate the original input", () => {
     const input = { password: "x", nested: { token: "y" } };
     const copy = JSON.parse(JSON.stringify(input));

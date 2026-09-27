@@ -90,7 +90,16 @@ function redactValue(value: unknown, ancestors: Set<object>): unknown {
 
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      result[key] = isSensitiveKey(key) ? REDACTED : redactValue(val, ancestors);
+      // A key matching SENSITIVE_KEYWORDS is flattened to REDACTED unless
+      // its value is a number - every real secret/token/password this
+      // codebase has (see the .env.example list above) is always a string,
+      // so there's no legitimate case where a *sensitive* value is numeric.
+      // A number under such a key (promptTokens/completionTokens/
+      // totalTokens from AI usage objects, e.g. lib/nvidia-ai.ts) is just a
+      // count that happens to share the word "token" with its key name, so
+      // it falls through to normal recursion (a no-op for numbers) instead
+      // of being masked.
+      result[key] = isSensitiveKey(key) && typeof val !== "number" ? REDACTED : redactValue(val, ancestors);
     }
     return result;
   } finally {

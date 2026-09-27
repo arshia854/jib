@@ -110,6 +110,67 @@ describe("POST /api/goals - validation", () => {
   });
 });
 
+describe("POST /api/goals - savingsAccountId (Phase B1 savings roadmap)", () => {
+  let userId: number;
+  let accountId: number;
+  let otherUserAccountId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-GOALS-ROUTE-SAVINGS-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    userId = user.id;
+    mockedGetSession.mockResolvedValue(asSession(userId));
+
+    const account = await prisma.financeAccount.create({
+      data: { userId, name: "پس‌انداز تست روت", type: "savings", initialBalance: 0 },
+    });
+    accountId = account.id;
+
+    const otherUser = await prisma.user.create({
+      data: { phoneNumber: `TEST-GOALS-ROUTE-SAVINGS-OTHER-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    const otherAccount = await prisma.financeAccount.create({
+      data: { userId: otherUser.id, name: "حساب کاربر دیگر", type: "savings", initialBalance: 0 },
+    });
+    otherUserAccountId = otherAccount.id;
+  });
+
+  afterAll(async () => {
+    await prisma.goal.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+  });
+
+  it("creates a goal linked to the caller's own account (201)", async () => {
+    const res = await POST(
+      makeRequest({
+        name: "هدف مرتبط",
+        category: "device",
+        targetAmount: 1_000_000,
+        deadline: daysFromNow(30),
+        savingsAccountId: accountId,
+      })
+    );
+    expect(res.status).toBe(201);
+    const data = await res.json();
+    expect(data.goal.savingsAccountId).toBe(accountId);
+  });
+
+  it("rejects a savingsAccountId that doesn't belong to the caller (404)", async () => {
+    const res = await POST(
+      makeRequest({
+        name: "تلاش نامعتبر",
+        category: "device",
+        targetAmount: 1_000_000,
+        deadline: daysFromNow(30),
+        savingsAccountId: otherUserAccountId,
+      })
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("GET /api/goals", () => {
   let userId: number;
 

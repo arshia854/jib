@@ -1,10 +1,13 @@
 import "server-only";
+import { cache } from "react";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { auth, unstable_update } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { reportError } from "@/lib/observability/report-error";
 import { ERROR_TYPES } from "@/lib/observability/error-types";
+import { logger } from "@/lib/observability/logger"; // TEMP-LATENCY
+import { getRequestId } from "@/lib/observability/request-context"; // TEMP-LATENCY
 
 // Legacy cookie from the pre-NextAuth custom session system. Kept
 // read-only (get) plus one narrow re-sign path (setOnboarded below) so
@@ -100,6 +103,31 @@ export interface Session {
   role: UserRole;
 }
 
+// Turso latency fix (docs/roadmap-status.md): a single /app render used to
+// run three independent `prisma.user.findUnique({ where: { id } })` reads
+// for the same userId - one inside getActiveUser below (via getSession),
+// one in getCurrentUser, one in getDashboardData - up to 3 round-trips for
+// data that can't have changed between them within one render. React's
+// cache() (see node_modules/next/dist/docs/01-app/02-guides/
+// caching-without-cache-components.md's "Deduplicating requests" section)
+// memoizes a function's result per set of arguments, but ONLY within a
+// single request/render pass in Next's own server runtime - confirmed
+// against this installed React (19.2.4): outside that runtime (e.g. this
+// file's own test suite, under plain Vitest/Node resolution - see
+// vitest.config.ts's own comment on the "react-server" export condition
+// not being set there), `cache()` resolves to a plain passthrough with no
+// memoization at all, so every test call still hits the DB fresh. In
+// production it does NOT span requests, and does NOT span proxy.ts's own
+// getSession() call and the later page render as one pass - Proxy "is
+// meant to be invoked separately of your render code" (see
+// node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/
+// proxy.md) and runs before any React rendering happens, so proxy.ts's own
+// getActiveUser (via its own getSession() call) always gets a fresh cache
+// scope, never one shared with a subsequent page render. A blocked or
+// deleted user is therefore still caught on their very next request exactly
+// as before this change - nothing here weakens that freshness guarantee.
+export const getCachedUser = cache((id: number) => prisma.user.findUnique({ where: { id } }));
+
 // Both the NextAuth JWT strategy (no adapter/DB round-trip once the token is
 // signed - see auth.ts's jwt/session callbacks) and the legacy cookie (only
 // ever cryptographically verified) can produce a session for a userId that
@@ -111,10 +139,7 @@ export interface Session {
 // "no session" at all, instead of only finding out when some later write
 // trips a foreign key constraint (deleted) or an admin-only check (blocked).
 async function getActiveUser(userId: number): Promise<{ id: number; role: UserRole } | null> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, role: true, blockedAt: true },
-  });
+  const user = await getCachedUser(userId);
   if (!user || user.blockedAt) return null;
   if (!isValidRole(user.role)) {
     // The DB-level CHECK constraint (see isValidRole's doc comment) should
@@ -141,17 +166,49 @@ async function getActiveUser(userId: number): Promise<{ id: number; role: UserRo
 }
 
 export async function getSession(): Promise<Session | null> {
+  const authStartedAt = Date.now(); // TEMP-LATENCY
   const nextAuthSession = await auth();
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "auth/session", // TEMP-LATENCY
+      step: "auth", // TEMP-LATENCY
+      duration: Date.now() - authStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "getSession step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
   if (nextAuthSession?.userId) {
     const userId = Number(nextAuthSession.userId);
+    const getActiveUserStartedAt = Date.now(); // TEMP-LATENCY
     const activeUser = await getActiveUser(userId);
+    logger.info( // TEMP-LATENCY
+      { // TEMP-LATENCY
+        requestId: getRequestId(), // TEMP-LATENCY
+        route: "auth/session", // TEMP-LATENCY
+        userId, // TEMP-LATENCY
+        step: "getActiveUser", // TEMP-LATENCY
+        duration: Date.now() - getActiveUserStartedAt, // TEMP-LATENCY
+      }, // TEMP-LATENCY
+      "getSession step timing" // TEMP-LATENCY
+    ); // TEMP-LATENCY
     if (!activeUser) return null;
     return { userId, onboarded: nextAuthSession.onboarded, role: activeUser.role };
   }
 
   const legacySession = await getLegacySession();
   if (!legacySession) return null;
+  const legacyGetActiveUserStartedAt = Date.now(); // TEMP-LATENCY
   const activeUser = await getActiveUser(legacySession.userId);
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "auth/session", // TEMP-LATENCY
+      userId: legacySession.userId, // TEMP-LATENCY
+      step: "getActiveUser", // TEMP-LATENCY
+      duration: Date.now() - legacyGetActiveUserStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "getSession step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
   if (!activeUser) return null;
   return { ...legacySession, role: activeUser.role };
 }
@@ -210,5 +267,17 @@ export async function setOnboarded(): Promise<void> {
 export async function getCurrentUser() {
   const session = await getSession();
   if (!session) return null;
-  return prisma.user.findUnique({ where: { id: session.userId } });
+  const getCachedUserStartedAt = Date.now(); // TEMP-LATENCY
+  const user = await getCachedUser(session.userId); // TEMP-LATENCY
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "auth/session", // TEMP-LATENCY
+      userId: session.userId, // TEMP-LATENCY
+      step: "getCurrentUser.getCachedUser", // TEMP-LATENCY
+      duration: Date.now() - getCachedUserStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "getSession step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
+  return user; // TEMP-LATENCY
 }

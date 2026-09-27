@@ -560,11 +560,25 @@ describe("computeSavingsRate", () => {
 
 describe("computeUnusualTransactions", () => {
   const base = { type: "expense", category: { name: "خوراک و رستوران", isEssential: false } };
+  const rent = { type: "expense", category: { name: "اجاره خونه", isEssential: true } };
 
-  it("flags a transaction at or above the multiplier vs. the category's other transactions this month", () => {
+  // Buckets are most-recent-first (current period, then each prior one),
+  // and every bucket shares the current-period row shape - see
+  // computeUnusualTransactions' own doc comment. Prior-period rows only
+  // ever get read for amount/category, so this keeps their id/date/
+  // description boilerplate out of each test's way.
+  function prior(category: typeof base, id: number, amount: number) {
+    return { ...category, id, date: new Date("2025-12-05"), amount, description: "تراکنش دوره قبل" };
+  }
+
+  it("flags a transaction at or above the multiplier vs. the category's other transactions across the lookback window", () => {
     const result = computeUnusualTransactions([
-      { ...base, id: 1, date: new Date("2026-01-05"), amount: 30000, description: "سوپرمارکت" },
-      { ...base, id: 2, date: new Date("2026-01-10"), amount: 300000, description: "رستوران گران" },
+      [
+        { ...base, id: 1, date: new Date("2026-01-05"), amount: 30000, description: "سوپرمارکت" },
+        { ...base, id: 2, date: new Date("2026-01-10"), amount: 300000, description: "رستوران گران" },
+      ],
+      [prior(base, 3, 30000)],
+      [prior(base, 4, 30000)],
     ]);
 
     expect(result).toHaveLength(1);
@@ -573,25 +587,131 @@ describe("computeUnusualTransactions", () => {
 
   it("does not flag a transaction below the multiplier", () => {
     const result = computeUnusualTransactions([
-      { ...base, id: 1, date: new Date("2026-01-05"), amount: 30000, description: "سوپرمارکت" },
-      { ...base, id: 2, date: new Date("2026-01-10"), amount: 60000, description: "خرید معمولی" },
+      [
+        { ...base, id: 1, date: new Date("2026-01-05"), amount: 30000, description: "سوپرمارکت" },
+        { ...base, id: 2, date: new Date("2026-01-10"), amount: 60000, description: "خرید معمولی" },
+      ],
+      [prior(base, 3, 30000)],
+      [prior(base, 4, 30000)],
     ]);
 
     expect(result).toEqual([]);
   });
 
-  it("skips a category with only one transaction this month (no baseline to compare against)", () => {
+  it("skips a category with fewer than the minimum baseline samples, however large the multiple would look", () => {
+    // The real case this threshold exists for: a category that naturally
+    // holds one lump-sum transaction per period, plus a single small
+    // unrelated one. Averaged against just those two others (150000/140000
+    // -> ~145000), the rent would report as a ~34x "outlier" every single
+    // period - a confidently-wrong number, so nothing is reported at all.
     const result = computeUnusualTransactions([
-      { ...base, id: 1, date: new Date("2026-01-05"), amount: 5000000, description: "تنها تراکنش این دسته" },
+      [
+        { ...rent, id: 1, date: new Date("2026-01-01"), amount: 5000000, description: "اجاره خونه" },
+        { ...rent, id: 2, date: new Date("2026-01-03"), amount: 150000, description: "شارژ ساختمان" },
+      ],
+      [prior(rent, 3, 140000)],
+      [],
     ]);
 
     expect(result).toEqual([]);
+  });
+
+  it("computes the average once the pool reaches the minimum sample size", () => {
+    // Exactly the previous fixture plus one more baseline transaction - the
+    // pool for id 1 goes from 2 others to 3, the threshold's boundary.
+    const result = computeUnusualTransactions([
+      [
+        { ...rent, id: 1, date: new Date("2026-01-01"), amount: 5000000, description: "اجاره خونه" },
+        { ...rent, id: 2, date: new Date("2026-01-03"), amount: 150000, description: "شارژ ساختمان" },
+      ],
+      [prior(rent, 3, 140000)],
+      [prior(rent, 4, 160000)],
+    ]);
+
+    expect(result.map((r) => r.id)).toEqual([1]);
+    expect(result[0]).toMatchObject({ categoryAverage: 150000, multiple: 33.3 });
+  });
+
+  it("averages the category's history, not just this period - a same-period-only baseline would flag this", () => {
+    // Same lump-sum-plus-small-item shape as above, but now with real
+    // history: this period alone would average the 5,000,000 rent against
+    // the single 100,000 item (50x, flagged); against the category's actual
+    // recent periods it's an ordinary rent payment.
+    const result = computeUnusualTransactions([
+      [
+        { ...rent, id: 1, date: new Date("2026-01-01"), amount: 5000000, description: "اجاره خونه" },
+        { ...rent, id: 2, date: new Date("2026-01-03"), amount: 100000, description: "شارژ ساختمان" },
+      ],
+      [prior(rent, 3, 4800000)],
+      [prior(rent, 4, 5200000)],
+    ]);
+
+    expect(result).toEqual([]);
+  });
+
+  it("flags a lone current-period transaction against the category's history", () => {
+    // The mirror image of the case above: only one transaction in this
+    // category this period, so the old same-period-only baseline had
+    // nothing to compare it against and always skipped it.
+    const result = computeUnusualTransactions([
+      [{ ...base, id: 1, date: new Date("2026-01-10"), amount: 300000, description: "رستوران گران" }],
+      [prior(base, 2, 10000), prior(base, 3, 10000)],
+      [prior(base, 4, 10000)],
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ id: 1, categoryAverage: 10000, multiple: 30 });
+  });
+
+  it("only flags current-period transactions, never a prior period's own outlier", () => {
+    const result = computeUnusualTransactions([
+      [{ ...base, id: 1, date: new Date("2026-01-10"), amount: 10000, description: "خرید عادی" }],
+      [prior(base, 2, 500000), prior(base, 3, 10000)],
+      [prior(base, 4, 10000)],
+    ]);
+
+    expect(result).toEqual([]);
+  });
+
+  it("carries the category's isEssential through onto each flagged transaction", () => {
+    const result = computeUnusualTransactions([
+      [
+        { ...rent, id: 1, date: new Date("2026-01-01"), amount: 900000, description: "قبض سنگین" },
+        { ...base, id: 2, date: new Date("2026-01-02"), amount: 900000, description: "رستوران گران" },
+      ],
+      [prior(rent, 3, 100000), prior(base, 4, 10000)],
+      [prior(rent, 5, 100000), prior(base, 6, 10000)],
+    ]);
+
+    // Both categories have only 2 others in the pool from the prior periods
+    // - the third comes from the other current-period transaction, which
+    // belongs to a different category, so neither qualifies.
+    expect(result).toEqual([]);
+
+    const withHistory = computeUnusualTransactions([
+      [
+        { ...rent, id: 1, date: new Date("2026-01-01"), amount: 900000, description: "قبض سنگین" },
+        { ...base, id: 2, date: new Date("2026-01-02"), amount: 900000, description: "رستوران گران" },
+      ],
+      [prior(rent, 3, 100000), prior(base, 4, 10000)],
+      [prior(rent, 5, 100000), prior(base, 6, 10000)],
+      [prior(rent, 7, 100000), prior(base, 8, 10000)],
+    ]);
+
+    expect(withHistory.find((r) => r.id === 1)).toMatchObject({ category: "اجاره خونه", isEssential: true });
+    expect(withHistory.find((r) => r.id === 2)).toMatchObject({ category: "خوراک و رستوران", isEssential: false });
   });
 
   it("ignores income transactions entirely", () => {
+    const salary = { type: "income", category: { name: "حقوق", isEssential: true } };
+
     const result = computeUnusualTransactions([
-      { type: "income", category: { name: "حقوق", isEssential: true }, id: 1, date: new Date("2026-01-01"), amount: 1000000, description: "حقوق" },
-      { type: "income", category: { name: "حقوق", isEssential: true }, id: 2, date: new Date("2026-01-15"), amount: 50000000, description: "پاداش" },
+      [
+        { ...salary, id: 1, date: new Date("2026-01-01"), amount: 1000000, description: "حقوق" },
+        { ...salary, id: 2, date: new Date("2026-01-15"), amount: 50000000, description: "پاداش" },
+      ],
+      [prior(salary, 3, 1000000), prior(salary, 4, 1000000)],
+      [prior(salary, 5, 1000000)],
     ]);
 
     expect(result).toEqual([]);
@@ -600,20 +720,22 @@ describe("computeUnusualTransactions", () => {
   it("sorts multiple flagged transactions descending by multiple", () => {
     // Two independent categories, each with its own baseline + outlier, so
     // each outlier's "others average" isn't skewed by the other category's
-    // outlier (unlike putting all 4 in one category, where computing each
+    // outlier (unlike putting them all in one category, where computing each
     // transaction's average against *every* other transaction in that same
     // category would make the two outliers pull each other's baseline up).
-    const foodCategory = { type: "expense", category: { name: "خوراک و رستوران", isEssential: false } };
-    const transportCategory = { type: "expense", category: { name: "حمل‌ونقل", isEssential: false } };
+    const transport = { type: "expense", category: { name: "حمل‌ونقل", isEssential: false } };
 
     const result = computeUnusualTransactions([
-      { ...foodCategory, id: 1, date: new Date("2026-01-01"), amount: 10000, description: "پایه خوراک" },
-      { ...foodCategory, id: 2, date: new Date("2026-01-10"), amount: 50000, description: "۵ برابر" }, // 5x the baseline
-      { ...transportCategory, id: 3, date: new Date("2026-01-01"), amount: 10000, description: "پایه حمل‌ونقل" },
-      { ...transportCategory, id: 4, date: new Date("2026-01-20"), amount: 100000, description: "۱۰ برابر" }, // 10x the baseline
+      [
+        { ...base, id: 1, date: new Date("2026-01-10"), amount: 50000, description: "۵ برابر" }, // 5x its baseline
+        { ...transport, id: 2, date: new Date("2026-01-20"), amount: 100000, description: "۱۰ برابر" }, // 10x its baseline
+      ],
+      [prior(base, 3, 10000), prior(transport, 4, 10000)],
+      [prior(base, 5, 10000), prior(transport, 6, 10000)],
+      [prior(base, 7, 10000), prior(transport, 8, 10000)],
     ]);
 
-    expect(result.map((r) => r.id)).toEqual([4, 2]);
+    expect(result.map((r) => r.id)).toEqual([2, 1]);
   });
 });
 
@@ -761,6 +883,23 @@ describe("getSpendingSummary - Phase 10 fields", () => {
     expect(flagged).toBeDefined();
     expect(flagged!.amount).toBe(400000);
     expect(flagged!.category).toBe("خوراک تست فاز۱۰");
+    // The fixture's category has no explicit isEssential -> defaults to true
+    // (prisma/schema.prisma's Category.isEssential).
+    expect(flagged!.isEssential).toBe(true);
+  });
+
+  it("builds the unusual-transaction baseline from all 3 lookback months, not just the current one", async () => {
+    const result = await getSpendingSummary(userId);
+
+    const flagged = result.unusualTransactions.find((t) => t.description === "شام مهمانی بزرگ")!;
+    // Every other transaction in this category across the whole window:
+    // 40000 + 150000 (current) + 30000 + 150000 (previous) + 150000
+    // (monthTwoBack) = 520000 / 5 = 104000. A current-month-only baseline
+    // would be (40000 + 150000) / 2 = 95000 instead - so this asserts the
+    // prior months' rows really do reach the pool through the combined
+    // lookback query.
+    expect(flagged.categoryAverage).toBe(104000);
+    expect(flagged.multiple).toBe(3.8);
   });
 
   it("finds the recurring expense across all 3 lookback months, reaching monthTwoBack through the combined query", async () => {
@@ -868,5 +1007,84 @@ describe("getSpendingSummary - totalBalance matches old full-load calculation", 
     // 15000 (expense) = 1200000.
     expect(expected).toBe(1200000);
     expect(result.totalBalance).toBe(expected);
+  });
+});
+
+// availableBalance/savingsBalance are additive next to the (unchanged)
+// grand-total totalBalance - unlike lib/data/dashboard.ts's totalBalance,
+// which is spendable-only. See the comment on SpendingSummary.totalBalance.
+describe("getSpendingSummary - availableBalance/savingsBalance", () => {
+  let withSavingsUserId: number;
+  let noSavingsUserId: number;
+
+  beforeAll(async () => {
+    const [withSavings, noSavings] = await Promise.all([
+      prisma.user.create({ data: { phoneNumber: `TEST-SPENDING-SUMMARY-SAVINGS-${Date.now()}` } }),
+      prisma.user.create({ data: { phoneNumber: `TEST-SPENDING-SUMMARY-NO-SAVINGS-${Date.now()}` } }),
+    ]);
+    withSavingsUserId = withSavings.id;
+    noSavingsUserId = noSavings.id;
+
+    const [cashAccount, savingsAccount, plainAccount] = await Promise.all([
+      prisma.financeAccount.create({
+        data: { userId: withSavingsUserId, name: "نقدی", type: "cash", initialBalance: 400000 },
+      }),
+      prisma.financeAccount.create({
+        data: { userId: withSavingsUserId, name: "پس‌انداز", type: "savings", initialBalance: 1500000 },
+      }),
+      prisma.financeAccount.create({
+        data: { userId: noSavingsUserId, name: "بانکی", type: "bank", initialBalance: 700000 },
+      }),
+    ]);
+
+    const [withSavingsExpense, withSavingsIncome, noSavingsExpense] = await Promise.all([
+      prisma.category.create({
+        data: { userId: withSavingsUserId, name: "هزینه تست پس‌انداز خلاصه", icon: "🧾", color: "#102010", type: "expense" },
+      }),
+      prisma.category.create({
+        data: { userId: withSavingsUserId, name: "درآمد تست پس‌انداز خلاصه", icon: "💵", color: "#102020", type: "income" },
+      }),
+      prisma.category.create({
+        data: { userId: noSavingsUserId, name: "هزینه تست بدون پس‌انداز خلاصه", icon: "🧾", color: "#102030", type: "expense" },
+      }),
+    ]);
+
+    await Promise.all([
+      // cash: 400000 + 200000 = 600000
+      prisma.transaction.create({
+        data: { userId: withSavingsUserId, accountId: cashAccount.id, categoryId: withSavingsIncome.id, amount: 200000, type: "income", rawInput: "تست", date: dateInMonth(currentRange, 1) },
+      }),
+      // savings: 1500000 - 100000 = 1400000
+      prisma.transaction.create({
+        data: { userId: withSavingsUserId, accountId: savingsAccount.id, categoryId: withSavingsExpense.id, amount: 100000, type: "expense", rawInput: "تست", date: dateInMonth(currentRange, 2) },
+      }),
+      // bank: 700000 - 50000 = 650000
+      prisma.transaction.create({
+        data: { userId: noSavingsUserId, accountId: plainAccount.id, categoryId: noSavingsExpense.id, amount: 50000, type: "expense", rawInput: "تست", date: dateInMonth(currentRange, 1) },
+      }),
+    ]);
+  }, 20000);
+
+  afterAll(async () => {
+    for (const userId of [withSavingsUserId, noSavingsUserId]) {
+      await cleanup(userId);
+    }
+  }, 20000);
+
+  it("splits the grand total into availableBalance and savingsBalance, leaving totalBalance as the true grand total", async () => {
+    const result = await getSpendingSummary(withSavingsUserId);
+
+    expect(result.totalBalance).toBe(2000000);
+    expect(result.savingsBalance).toBe(1400000);
+    expect(result.availableBalance).toBe(600000);
+    expect(result.availableBalance + result.savingsBalance).toBe(result.totalBalance);
+  });
+
+  it("with no savings account, availableBalance equals totalBalance and savingsBalance is 0", async () => {
+    const result = await getSpendingSummary(noSavingsUserId);
+
+    expect(result.totalBalance).toBe(650000);
+    expect(result.savingsBalance).toBe(0);
+    expect(result.availableBalance).toBe(result.totalBalance);
   });
 });

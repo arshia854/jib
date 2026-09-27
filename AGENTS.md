@@ -112,6 +112,36 @@ recorded in `_prisma_migrations` gets corrected in place after the fact, so
 its stored checksum needs to catch up to the new file bytes; it reuses the
 same checksum logic rather than duplicating it.
 
+# Read-only access to the live database (Turso) still requires approval
+
+The approval requirement in step 7 above is written in terms of writes,
+but it isn't only about writes: **explicit in-conversation approval is
+required before running any command against the live database, reads
+included, not just writes/migrations.** This was underscored by a real
+incident — a read-only audit script was run directly against the live
+Turso DB without pausing for a go-ahead first. The query itself was
+harmless (`SELECT`-only, zero rows changed), but the process was wrong
+regardless: running anything against production, read or write, should
+never be a unilateral agent decision, no matter how confident the agent
+is that it's safe. A future read could be expensive, could target the
+wrong table, or could be pointed at the wrong environment by mistake —
+"it was just a SELECT" guards against none of those.
+
+Default behavior when a task calls for inspecting live data — an audit
+script, a diagnostic query, checking row counts, anything read-only — is
+to write the script or query, explain exactly what it will do and why
+it's safe, and then **stop and wait for explicit approval** before
+running it against the live DB. Never run it proactively just because it
+happens to be read-only.
+
+The one exception: a command already named and pre-approved in this file
+for a given workflow (e.g. the offline `migrate diff` step, or a script's
+own documented dry-run mode) doesn't need re-approval each time — that
+approval was already given by adopting the protocol it's part of.
+Anything outside an already-approved workflow needs its own explicit
+go-ahead. If it's genuinely unclear whether something counts as "already
+approved" or needs fresh approval, default to asking.
+
 # Backing up the live database (Turso)
 
 **As of 2026-08-19, no backup of the live Turso database — automated or

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "mcp__Claude_Code_Remote__add_repo",
-      "Bash(pkill -f \"next dev\")"
+      "Bash(pkill -f \"next dev\")",
+      "Bash(npx eslint *)",
+      "Bash(npx tsc *)"
     ]
   }
 }

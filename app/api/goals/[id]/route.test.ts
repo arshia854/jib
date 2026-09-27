@@ -135,3 +135,69 @@ describe("PATCH/DELETE /api/goals/[id]", () => {
     expect(deleted).toBeNull();
   });
 });
+
+describe("PATCH /api/goals/[id] - savingsAccountId (Phase B1 savings roadmap)", () => {
+  let userId: number;
+  let accountId: number;
+  let otherAccountId: number;
+  let goalId: number;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { phoneNumber: `TEST-GOALS-ID-ROUTE-SAVINGS-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    userId = user.id;
+    mockedGetSession.mockResolvedValue(asSession(userId));
+
+    const account = await prisma.financeAccount.create({
+      data: { userId, name: "پس‌انداز تست روت آیدی", type: "savings", initialBalance: 0 },
+    });
+    accountId = account.id;
+
+    const otherUser = await prisma.user.create({
+      data: { phoneNumber: `TEST-GOALS-ID-ROUTE-SAVINGS-OTHER-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    const otherAccount = await prisma.financeAccount.create({
+      data: { userId: otherUser.id, name: "حساب کاربر دیگر", type: "savings", initialBalance: 0 },
+    });
+    otherAccountId = otherAccount.id;
+
+    const goal = await prisma.goal.create({
+      data: { userId, name: "هدف برای لینک", category: "device", targetAmount: 5_000_000, deadline: daysFromNow(60) },
+    });
+    goalId = goal.id;
+  });
+
+  afterAll(async () => {
+    await prisma.goal.deleteMany({ where: { userId } });
+    await prisma.financeAccount.deleteMany({ where: { userId } });
+    await prisma.user.delete({ where: { id: userId } });
+  });
+
+  it("links the goal to the caller's own account (200)", async () => {
+    const res = await PATCH(makePatchRequest({ savingsAccountId: accountId }), {
+      params: Promise.resolve({ id: String(goalId) }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.goal.savingsAccountId).toBe(accountId);
+  });
+
+  it("rejects a savingsAccountId that doesn't belong to the caller (404), leaving the existing link untouched", async () => {
+    const res = await PATCH(makePatchRequest({ savingsAccountId: otherAccountId }), {
+      params: Promise.resolve({ id: String(goalId) }),
+    });
+    expect(res.status).toBe(404);
+    const untouched = await prisma.goal.findUnique({ where: { id: goalId } });
+    expect(untouched?.savingsAccountId).toBe(accountId);
+  });
+
+  it("explicitly clears the link by passing savingsAccountId: null (200)", async () => {
+    const res = await PATCH(makePatchRequest({ savingsAccountId: null }), {
+      params: Promise.resolve({ id: String(goalId) }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.goal.savingsAccountId).toBeNull();
+  });
+});

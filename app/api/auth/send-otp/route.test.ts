@@ -21,17 +21,17 @@ vi.mock("next/headers", () => ({
 }));
 
 // Only sendOtpSms is overridden (and only for the specific test that needs
-// a forced failure) - everything else (generateOtpCode, createOtpToken,
+// a forced failure) - everything else (generateOtpCode, createOtpChallenge,
 // OTP_COOKIE, OTP_TTL_SECONDS, and sendOtpSms's own already-tested dev-mock
 // fallback in lib/auth/otp.test.ts) stays real, so this suite tests the
 // route's own logic (validation, rate limiting, cookie writing, failure
-// handling) against real OTP token creation, not a hand-rolled substitute.
+// handling) against real OTP challenge creation, not a hand-rolled substitute.
 vi.mock("@/lib/auth/otp", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth/otp")>();
   return { ...actual, sendOtpSms: vi.fn(actual.sendOtpSms) };
 });
 
-import { sendOtpSms, verifyOtpToken, OTP_COOKIE } from "@/lib/auth/otp";
+import { sendOtpSms, getOtpChallengePhone, verifyOtpChallenge, OTP_COOKIE, MAX_ATTEMPTS } from "@/lib/auth/otp";
 import { POST } from "@/app/api/auth/send-otp/route";
 
 const mockedSendOtpSms = vi.mocked(sendOtpSms);
@@ -79,9 +79,23 @@ describe("POST /api/auth/send-otp", () => {
     expect(typeof data.expiresIn).toBe("number");
 
     expect(cookieJar.has(OTP_COOKIE)).toBe(true);
-    const payload = await verifyOtpToken(cookieJar.get(OTP_COOKIE)!);
-    expect(payload?.phone).toBe(phone);
-    expect(payload?.attempts).toBe(0);
+    const challengeId = cookieJar.get(OTP_COOKIE)!;
+    const sentCode = mockedSendOtpSms.mock.calls[0][1];
+
+    // The cookie must not leak the code in any form - it's just an
+    // opaque id (the old signed-JWT cookie carried the code in its
+    // base64url payload, readable by the requester).
+    expect(challengeId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(challengeId).not.toContain(sentCode);
+    expect(Buffer.from(challengeId, "base64url").toString("latin1")).not.toContain(sentCode);
+
+    expect(getOtpChallengePhone(challengeId)).toBe(phone);
+    // attempts starts at 0 server-side: first wrong code leaves MAX - 1.
+    expect(verifyOtpChallenge(challengeId, "000000")).toEqual({
+      status: "wrong_code",
+      remainingAttempts: MAX_ATTEMPTS - 1,
+    });
+    expect(verifyOtpChallenge(challengeId, sentCode)).toEqual({ status: "ok", phone });
   });
 
   it("SMS provider failure: returns 502, sets no cookie, and records an ErrorLog row (no phone number in the message)", async () => {

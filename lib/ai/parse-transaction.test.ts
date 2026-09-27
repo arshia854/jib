@@ -492,6 +492,73 @@ describe("parseTransactionWithAI", () => {
     });
   });
 
+  // "واریز به حساب پس‌انداز" was removed from prisma/default-categories.ts
+  // but still exists (flagged Category.isArchived - see
+  // prisma/archive-retired-categories.ts) in an existing user's own Category
+  // table from before that removal - these fixtures simulate exactly that
+  // user, passing the archived row in the `categories` list the same way
+  // lib/data/categories.ts's toCategoryOptions would for such a user.
+  describe("archived category exclusion (واریز به حساب پس‌انداز)", () => {
+    const CATEGORIES_WITH_DEPRECATED_SAVINGS: CategoryOption[] = [
+      ...CATEGORIES_FULL,
+      { name: "پس‌انداز و سرمایه‌گذاری", type: "expense" },
+      { name: "واریز به حساب پس‌انداز", type: "expense", parentName: "پس‌انداز و سرمایه‌گذاری", isArchived: true },
+      { name: "خرید طلا و ارز", type: "expense", parentName: "پس‌انداز و سرمایه‌گذاری" },
+    ];
+
+    it("never includes the deprecated category name in the prompt's category list", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 500,
+          type: "expense",
+          description: "پس‌انداز",
+          date: "2026-07-30",
+          category: "پس‌انداز و سرمایه‌گذاری",
+          subcategory: "خرید طلا و ارز",
+          confidence: 0.95,
+          reason: "خرید طلا برای سرمایه‌گذاری",
+        })
+      );
+
+      await parseTransactionWithAI(NO_MAPPING_USER_ID, "طلا خریدم برای سرمایه‌گذاری", CATEGORIES_WITH_DEPRECATED_SAVINGS);
+
+      const [messages] = vi.mocked(chatCompletion).mock.calls[0];
+      const systemPrompt = messages[0].content;
+      expect(systemPrompt).not.toContain("واریز به حساب پس‌انداز");
+      // The parent and its other (non-deprecated) child are still real,
+      // allowed categories - only the deprecated child is stripped out.
+      expect(systemPrompt).toContain("پس‌انداز و سرمایه‌گذاری");
+      expect(systemPrompt).toContain("خرید طلا و ارز");
+    });
+
+    it("never resolves to the deprecated category even when a high-confidence AI response names it, falling back to just the parent", async () => {
+      vi.mocked(chatCompletion).mockResolvedValue(
+        JSON.stringify({
+          amount: 500,
+          type: "expense",
+          description: "واریز پس‌انداز",
+          date: "2026-07-30",
+          category: "پس‌انداز و سرمایه‌گذاری",
+          subcategory: "واریز به حساب پس‌انداز",
+          confidence: 0.95,
+          reason: "واریز به حساب پس‌انداز",
+        })
+      );
+
+      const result = await parseTransactionWithAI(
+        NO_MAPPING_USER_ID,
+        "صد تومن ریختم تو حساب پس‌اندازم",
+        CATEGORIES_WITH_DEPRECATED_SAVINGS
+      );
+
+      // The subcategory the AI named is treated as if it doesn't exist, so
+      // findValidatedLeafCategory falls back to the (still-real) parent
+      // rather than the fully-invalid-category fallback bucket.
+      expect(result.category).toBe("پس‌انداز و سرمایه‌گذاری");
+      expect(result.category).not.toBe("واریز به حساب پس‌انداز");
+    });
+  });
+
   describe("newCategorySuggestion (last-resort new-category suggestion)", () => {
     // "دخانیات" ("tobacco") deliberately has no existing category/subcategory
     // in CATEGORIES_FULL, mirroring the last-resort scenario the قوانین

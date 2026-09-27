@@ -2,15 +2,22 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { PlusIcon, EditIcon, TrashIcon, XIcon, CheckIcon, SpinnerIcon, ChartIcon, RefreshIcon } from "@/components/icons";
+import { PlusIcon, TrashIcon, XIcon, CheckIcon, SpinnerIcon, ChartIcon, RefreshIcon, AlertIcon } from "@/components/icons";
 import { EmptyState } from "@/components/empty-state";
 import { ASSET_TYPES, getAssetTypeIcon, getAssetTypeLabel, getAssetTypeOption, type AssetType } from "@/lib/assets";
-import { formatToman, formatNumber, formatDecimal } from "@/lib/format";
-import { toLatinDigits } from "@/lib/normalize";
-import { AssetsHeroCard } from "./assets-hero-card";
-import { LivePriceTicker, type TickerEntry } from "./live-price-ticker";
-import { QuickPriceCalculator } from "./quick-price-calculator";
-import { AssetsProfitLossChart } from "./assets-profit-loss-chart";
+import { toJalaali } from "jalaali-js";
+import {
+  formatToman,
+  formatNumber,
+  formatDecimal,
+  formatCompactToman,
+  formatJalaaliDate,
+  formatJalaaliDateShort,
+} from "@/lib/format";
+import { AmountInput } from "@/components/ui/amount-input";
+import { JalaliDatePicker } from "@/components/goals/jalali-date-picker";
+import { AssetsHeroCard, type AllocationSlice } from "./assets-hero-card";
+import { LivePricesCard, type TickerEntry } from "./live-prices-card";
 import { ProfitLossBadge } from "./profit-loss-badge";
 
 interface Asset {
@@ -43,10 +50,21 @@ interface FormState {
   type: AssetType;
   name: string;
   quantity: string;
+  // "quantity" (type it directly, default) vs "amount" (type a total toman
+  // amount and let it be divided by purchasePricePerUnit) - only offered for
+  // a *new* asset of a live-priced type, see showAmountEntry below.
+  entryMode: "quantity" | "amount";
+  totalAmount: string;
   purchasePricePerUnit: string;
   purchaseDate: string;
   currentPricePerUnit: string;
   note: string;
+  // Only meaningful for form.type === "gold" - lets the quantity input
+  // accept milligrams while storage/API/validation always stay in grams
+  // (see handleSave's conversion). Defaults to "gram" and resets to it
+  // whenever gold isn't the selected type, so it never silently applies to
+  // another type's quantity.
+  quantityUnit: "gram" | "milligram";
 }
 
 // GET /api/assets/live-prices response shape (app/api/assets/live-prices/route.ts).
@@ -81,10 +99,13 @@ function emptyForm(): FormState {
     type: "gold",
     name: "",
     quantity: "",
+    entryMode: "quantity",
+    totalAmount: "",
     purchasePricePerUnit: "",
     purchaseDate: todayInputValue(),
     currentPricePerUnit: "",
     note: "",
+    quantityUnit: "gram",
   };
 }
 
@@ -102,18 +123,68 @@ function MoneyInput({
   return (
     <>
       <label className="mt-4 block text-xs text-muted">{label}</label>
-      <input
-        type="text"
-        inputMode="numeric"
-        value={value ? formatNumber(Number(value)) : ""}
-        onChange={(e) => onChange(toLatinDigits(e.target.value).replace(/[^0-9]/g, ""))}
-        className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm tabular-fa outline-none focus:border-accent"
-      />
+      <AmountInput value={Number(value) || 0} onChange={(next) => onChange(next ? String(next) : "")} />
     </>
   );
 }
 
-// Builds LivePriceTicker/QuickPriceCalculator's shared entries: one tile per
+// A purchase date is almost always today or recent - same shape as
+// add-transaction-form.tsx's TRANSACTION_QUICK_SELECT_OPTIONS.
+const PURCHASE_DATE_QUICK_SELECT_OPTIONS = [
+  { label: "امروز", getDate: (today: Date) => today },
+  {
+    label: "دیروز",
+    getDate: (today: Date) => new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1),
+  },
+  {
+    label: "هفته پیش",
+    getDate: (today: Date) => new Date(today.getFullYear(), today.getMonth(), today.getDate() - 7),
+  },
+];
+
+// Same `currentValue ?? costBasis` fallback listAssetsWithValue uses for
+// totalValue (lib/data/assets.ts), so per-type sums and the hero's headline
+// total always agree even while live prices are unavailable.
+function valueForTotals(asset: Asset): number {
+  return asset.currentValue ?? asset.costBasis;
+}
+
+function valueByType(assets: Asset[]): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const asset of assets) totals.set(asset.type, (totals.get(asset.type) ?? 0) + valueForTotals(asset));
+  return totals;
+}
+
+// Hero card's "ترکیب سبد" bar: one slice per asset type, largest first.
+function deriveAllocation(assets: Asset[]): AllocationSlice[] {
+  return [...valueByType(assets)]
+    .map(([type, value]) => ({ type, value, label: type === "custom" ? "سایر" : getAssetTypeLabel(type) }))
+    .sort((a, b) => b.value - a.value);
+}
+
+// Holdings list order: types by their total value (the same order as the
+// hero's allocation legend), keeping every lot of one type together - a
+// flat value sort would split e.g. two gold lots apart around a dollar one.
+// Within a type the server's own order (purchaseDate desc) is kept, since
+// Array.prototype.sort is stable.
+function orderHoldings(assets: Asset[]): Asset[] {
+  const totals = valueByType(assets);
+  return [...assets].sort((a, b) => (totals.get(b.type) ?? 0) - (totals.get(a.type) ?? 0));
+}
+
+// Holdings-row date: "۹ مرداد" for this Jalali year, "۲۴ اسفند ۱۴۰۴" for an
+// older one - the year only earns its width when it's not the current one,
+// and dropping it keeps the row's subtitle from truncating at 360px.
+function formatPurchaseDate(date: Date | string): string {
+  const isThisYear = toJalaali(new Date(date)).jy === toJalaali(new Date()).jy;
+  return isThisYear ? formatJalaaliDateShort(date) : formatJalaaliDate(date);
+}
+
+function assetDisplayName(asset: Asset): string {
+  return asset.type === "custom" ? (asset.name ?? getAssetTypeLabel(asset.type)) : getAssetTypeLabel(asset.type);
+}
+
+// Builds LivePricesCard's entries: one tile per
 // live-priced type (طلا/دلار/بیت‌کوین) the user actually holds, reusing
 // listAssetsWithValue's already-computed currentValue instead of a second
 // fetch - every lot of the same type shares one live price (one shared
@@ -144,8 +215,11 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
   const [form, setForm] = useState<FormState | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<number | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Delete lives inside the edit sheet (not as a one-tap icon on every row,
+  // which used to delete immediately with no confirmation) - two steps,
+  // same confirm-then-delete idea as goals-manager.tsx's GoalCard.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [livePrices, setLivePrices] = useState<LivePricesResponse | null>(null);
   const [livePricesLoading, setLivePricesLoading] = useState(false);
 
@@ -173,6 +247,7 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
   function openCreate() {
     setForm(emptyForm());
     setError(null);
+    setConfirmingDelete(false);
     // Fetched fresh per "add" tap (not once for the whole page) - prices
     // move and the create form can stay open a while. Only ever used to
     // prefill/offer a value for purchasePricePerUnit below, never blocks
@@ -190,7 +265,13 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
   }
 
   function selectType(type: AssetType) {
-    setForm((f) => (f ? { ...f, type } : f));
+    // entryMode resets to "quantity" on every type switch - staying in
+    // "amount" mode with a stale computed quantity from the previous type
+    // (different unit, different price) would be confusing. quantityUnit
+    // resets to "gram" the same way - it only applies to gold, so switching
+    // away from (or back to) gold should never carry a stale "milligram"
+    // selection with it.
+    setForm((f) => (f ? { ...f, type, entryMode: "quantity", quantityUnit: "gram" } : f));
     if (livePrices) prefillFromLivePrice(livePrices, type);
   }
 
@@ -210,12 +291,21 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
       type: asset.type as AssetType,
       name: asset.name ?? "",
       quantity: String(asset.quantity),
+      // Edit is create-only-excluded for this feature, same as the live-price
+      // prefill above - always the raw stored quantity, never the calculator.
+      entryMode: "quantity",
+      totalAmount: "",
+      // Editing always starts from the stored gram value shown as grams -
+      // never assume/reconstruct a milligram entry the asset may have
+      // originally been typed in.
+      quantityUnit: "gram",
       purchasePricePerUnit: String(asset.purchasePricePerUnit),
       purchaseDate: toInputDate(asset.purchaseDate),
       currentPricePerUnit: asset.currentPricePerUnit !== null ? String(asset.currentPricePerUnit) : "",
       note: asset.note ?? "",
     });
     setError(null);
+    setConfirmingDelete(false);
   }
 
   async function handleSave() {
@@ -226,15 +316,38 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
       setError("برای دارایی دستی، نام الزامی است.");
       return;
     }
-    const quantity = Number(form.quantity);
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-      setError("مقدار دارایی نامعتبر است.");
-      return;
-    }
-    const purchasePricePerUnit = Number(form.purchasePricePerUnit);
-    if (!Number.isFinite(purchasePricePerUnit) || purchasePricePerUnit <= 0) {
-      setError("قیمت خرید نامعتبر است.");
-      return;
+    let quantity: number;
+    let purchasePricePerUnit: number;
+    if (form.entryMode === "amount") {
+      // Price is needed by the calculator itself, so it's validated first
+      // here (unlike "quantity" mode below, which checks quantity first).
+      purchasePricePerUnit = Number(form.purchasePricePerUnit);
+      if (!Number.isFinite(purchasePricePerUnit) || purchasePricePerUnit <= 0) {
+        setError("قیمت خرید نامعتبر است.");
+        return;
+      }
+      const totalAmount = Number(form.totalAmount);
+      quantity = Number.isFinite(totalAmount) && totalAmount > 0 ? totalAmount / purchasePricePerUnit : NaN;
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        setError("مقدار دارایی نامعتبر است.");
+        return;
+      }
+    } else {
+      quantity = Number(form.quantity);
+      // Storage/API/validation always operate in grams - milligram is only
+      // ever a display/entry convenience on this field itself.
+      if (form.type === "gold" && form.quantityUnit === "milligram") {
+        quantity = quantity / 1000;
+      }
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        setError("مقدار دارایی نامعتبر است.");
+        return;
+      }
+      purchasePricePerUnit = Number(form.purchasePricePerUnit);
+      if (!Number.isFinite(purchasePricePerUnit) || purchasePricePerUnit <= 0) {
+        setError("قیمت خرید نامعتبر است.");
+        return;
+      }
     }
 
     setSaving(true);
@@ -269,18 +382,20 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
     }
   }
 
-  async function handleDelete(id: number) {
-    setDeletingId(id);
-    setDeleteError(null);
+  async function handleDelete() {
+    if (!form || form.id === null) return;
+    setDeleting(true);
+    setError(null);
     try {
-      const res = await fetch(`/api/assets/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/assets/${form.id}`, { method: "DELETE" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "خطا در حذف.");
+      setForm(null);
       router.refresh();
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : "خطای ناشناخته");
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
     } finally {
-      setDeletingId(null);
+      setDeleting(false);
     }
   }
 
@@ -289,11 +404,30 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
   // effect above for why edit is excluded.
   const liveField = form && form.id === null ? LIVE_PRICE_FIELD[form.type] : undefined;
   const livePriceValue = liveField && livePrices && !livePrices.unavailable ? livePrices[liveField] : undefined;
+  // Total-amount-to-quantity calculator: new asset + live-priced type only,
+  // same scope as the live-price prefill (liveField above).
+  const showAmountEntry = !!(form && form.id === null && getAssetTypeOption(form.type)?.isLivePriced);
+  const purchasePriceNumber = form ? Number(form.purchasePricePerUnit) : NaN;
+  const hasValidPurchasePrice =
+    !!form && form.purchasePricePerUnit !== "" && Number.isFinite(purchasePriceNumber) && purchasePriceNumber > 0;
+  // "مبلغ کل خرید" preview under the price field, quantity mode only (amount
+  // mode already shows its own computed quantity). Mirrors handleSave's
+  // milligram-to-gram conversion so it previews exactly what gets saved.
+  const typedQuantity = form
+    ? Number(form.quantity) / (form.type === "gold" && form.quantityUnit === "milligram" ? 1000 : 1)
+    : NaN;
+  const purchaseTotalPreview =
+    form && form.entryMode === "quantity" && hasValidPurchasePrice && Number.isFinite(typedQuantity) && typedQuantity > 0
+      ? typedQuantity * purchasePriceNumber
+      : null;
+  const busy = saving || deleting;
+  const stalePrices = summary.priceStale && !summary.priceUnavailable;
+  const holdings = orderHoldings(summary.assets);
 
   return (
-    <div className="space-y-6 px-4 pb-8 pt-6">
-      <header className="flex items-center justify-between">
-        <h1 className="text-lg font-bold text-foreground">دارایی‌ها</h1>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-foreground">سبد دارایی</h2>
         <button
           onClick={openCreate}
           className="flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-on-primary shadow-sm shadow-primary/20 transition-transform active:scale-95"
@@ -301,104 +435,118 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
           <PlusIcon className="h-4 w-4" />
           افزودن دارایی
         </button>
-      </header>
-
-      <AssetsHeroCard
-        totalValue={summary.totalValue}
-        totalCostBasis={summary.totalCostBasis}
-        totalProfitLossToman={summary.totalProfitLossToman}
-        totalProfitLossPercent={summary.totalProfitLossPercent}
-      />
-
-      {summary.priceUnavailable && (
-        <p className="rounded-xl bg-warning/10 p-3 text-xs text-warning">
-          قیمت لحظه‌ای طلا/دلار/بیت‌کوین در دسترس نیست؛ سود و زیان این دارایی‌ها موقتاً قابل محاسبه نیست.
-        </p>
-      )}
-      {!summary.priceUnavailable && summary.priceStale && (
-        <p className="rounded-xl bg-background p-3 text-xs text-muted">قیمت‌ها ممکن است کاملاً به‌روز نباشند.</p>
-      )}
-      {deleteError && <p className="rounded-xl bg-warning/10 p-3 text-xs text-warning">{deleteError}</p>}
-
-      <LivePriceTicker entries={tickerEntries} />
-      <QuickPriceCalculator entries={tickerEntries} />
+      </div>
 
       {summary.assets.length === 0 ? (
         <EmptyState
           icon={<ChartIcon className="h-6 w-6" />}
           title="هنوز دارایی‌ای ثبت نکرده‌اید"
-          description="با دکمه «افزودن دارایی» بالا، طلا، دلار، بیت‌کوین یا هر دارایی دیگری که دارید را اضافه کنید تا سود و زیانش را دنبال کنید."
+          description="طلا، دلار، بیت‌کوین یا هر دارایی دیگری که دارید را اضافه کنید تا ارزش لحظه‌ای و سود و زیانش را دنبال کنید."
+          action={{ label: "افزودن اولین دارایی", onClick: openCreate }}
         />
       ) : (
         <>
-          <AssetsProfitLossChart assets={summary.assets} />
-          <div className="rounded-2xl border border-border bg-surface px-4">
-          {summary.assets.map((asset, i) => {
-            const option = getAssetTypeOption(asset.type);
-            return (
-              <div key={asset.id} className={`py-3 ${i > 0 ? "border-t border-border" : ""}`}>
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-background text-base">
-                    {getAssetTypeIcon(asset.type)}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-foreground">
-                      {asset.type === "custom" ? asset.name : getAssetTypeLabel(asset.type)}
-                    </p>
-                    <p className="text-xs text-muted tabular-fa">
-                      {formatDecimal(asset.quantity, 6)} {option?.unitLabel}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => openEdit(asset)}
-                    aria-label="ویرایش"
-                    className="shrink-0 rounded-full p-2 text-muted hover:bg-background hover:text-accent"
-                  >
-                    <EditIcon className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => handleDelete(asset.id)}
-                    disabled={deletingId === asset.id}
-                    aria-label="حذف"
-                    className="shrink-0 rounded-full p-2 text-muted hover:bg-background hover:text-warning disabled:opacity-50"
-                  >
-                    {deletingId === asset.id ? (
-                      <SpinnerIcon className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <TrashIcon className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-                <div className="mt-2 flex items-center justify-between pr-[52px]">
-                  <span className="text-xs text-muted">ارزش فعلی</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold tabular-fa text-foreground">
-                      {asset.currentValue !== null ? formatToman(asset.currentValue) : "—"}
-                    </span>
-                    {asset.profitLossToman !== null && asset.profitLossPercent !== null && (
-                      <ProfitLossBadge toman={asset.profitLossToman} percent={asset.profitLossPercent} />
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-          </div>
+          <AssetsHeroCard
+            totalValue={summary.totalValue}
+            totalCostBasis={summary.totalCostBasis}
+            totalProfitLossToman={summary.totalProfitLossToman}
+            totalProfitLossPercent={summary.totalProfitLossPercent}
+            allocation={deriveAllocation(summary.assets)}
+            priceStale={stalePrices}
+            priceUnavailable={summary.priceUnavailable}
+          />
+
+          {summary.priceUnavailable && (
+            <p className="flex items-start gap-2 rounded-xl bg-warning/10 p-3 text-xs text-warning">
+              <AlertIcon className="mt-px h-4 w-4 shrink-0" />
+              قیمت لحظه‌ای طلا/دلار/بیت‌کوین در دسترس نیست؛ سود و زیان این دارایی‌ها موقتاً قابل محاسبه نیست.
+            </p>
+          )}
+
+          <section className="space-y-2">
+            <div className="flex items-baseline justify-between gap-2 px-1">
+              <h3 className="text-sm font-bold text-foreground">دارایی‌های من</h3>
+              <span className="text-[11px] text-muted">برای ویرایش، روی هر مورد بزنید</span>
+            </div>
+            <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
+              {holdings.map((asset) => {
+                const unitLabel = getAssetTypeOption(asset.type)?.unitLabel || "واحد";
+                const hasProfitLoss = asset.profitLossToman !== null && asset.profitLossPercent !== null;
+                const isProfit = (asset.profitLossToman ?? 0) >= 0;
+                return (
+                  <li key={asset.id}>
+                    <button
+                      type="button"
+                      onClick={() => openEdit(asset)}
+                      className="flex w-full items-center gap-3 py-3.5 text-start transition-opacity active:opacity-60"
+                    >
+                      <span className="sr-only">ویرایش </span>
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-background text-base">
+                        {getAssetTypeIcon(asset.type)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-foreground">
+                          {assetDisplayName(asset)}
+                        </span>
+                        <span className="mt-0.5 block truncate text-xs text-muted tabular-fa">
+                          {formatDecimal(asset.quantity, 6)} {unitLabel}
+                        </span>
+                        {/* Purchase date is what tells two lots of the same
+                            type apart (e.g. two gold rows) at a glance - its
+                            own line, so it isn't the part that truncates at
+                            360px. */}
+                        <span className="mt-0.5 block truncate text-[11px] text-muted tabular-fa">
+                          خرید {formatPurchaseDate(asset.purchaseDate)}
+                        </span>
+                        {asset.note && (
+                          <span className="mt-0.5 block truncate text-[11px] text-muted">{asset.note}</span>
+                        )}
+                      </span>
+                      <span className="shrink-0 text-end">
+                        <span className="block text-sm font-semibold tabular-fa text-foreground">
+                          {asset.currentValue !== null ? formatNumber(asset.currentValue) : "—"}{" "}
+                          <span className="text-[11px] font-normal text-muted">تومان</span>
+                        </span>
+                        {hasProfitLoss ? (
+                          <span className="mt-1 flex items-center justify-end gap-1.5">
+                            <span className={`text-[11px] tabular-fa ${isProfit ? "text-success" : "text-warning"}`}>
+                              {formatCompactToman(Math.abs(asset.profitLossToman!))} {isProfit ? "سود" : "زیان"}
+                            </span>
+                            <ProfitLossBadge toman={asset.profitLossToman!} percent={asset.profitLossPercent!} />
+                          </span>
+                        ) : (
+                          <span className="mt-1 block text-[11px] text-muted">قیمت نامشخص</span>
+                        )}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+
+          <LivePricesCard entries={tickerEntries} stale={stalePrices} />
         </>
       )}
 
       {form && (
         <div
           className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm"
-          onClick={() => !saving && setForm(null)}
+          onClick={() => !busy && setForm(null)}
         >
           <div
-            className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-surface p-5 pb-8"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="asset-form-title"
+            className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-surface px-5 pb-[max(2rem,env(safe-area-inset-bottom))] pt-3"
             onClick={(e) => e.stopPropagation()}
           >
+            <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-border" />
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-base font-bold text-foreground">{form.id ? "ویرایش دارایی" : "دارایی جدید"}</h2>
-              <button onClick={() => setForm(null)} disabled={saving} aria-label="بستن">
+              <h2 id="asset-form-title" className="text-base font-bold text-foreground">
+                {form.id ? "ویرایش دارایی" : "دارایی جدید"}
+              </h2>
+              <button onClick={() => setForm(null)} disabled={busy} aria-label="بستن">
                 <XIcon className="h-5 w-5 text-muted" />
               </button>
             </div>
@@ -433,17 +581,98 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
               </>
             )}
 
-            <label className="mt-4 block text-xs text-muted">
-              مقدار {isFormCustom ? "" : `(${getAssetTypeOption(form.type)?.unitLabel})`}
-            </label>
-            <input
-              type="number"
-              step="any"
-              inputMode="decimal"
-              value={form.quantity}
-              onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-              className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm tabular-fa outline-none focus:border-accent"
-            />
+            {showAmountEntry && (
+              <div className="mt-4 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, entryMode: "quantity" })}
+                  className={`rounded-xl px-3 py-1.5 text-xs font-medium ${
+                    form.entryMode === "quantity" ? "bg-primary text-on-primary" : "bg-background text-muted"
+                  }`}
+                >
+                  مقدار
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, entryMode: "amount" })}
+                  className={`rounded-xl px-3 py-1.5 text-xs font-medium ${
+                    form.entryMode === "amount" ? "bg-primary text-on-primary" : "bg-background text-muted"
+                  }`}
+                >
+                  مبلغ کل
+                </button>
+              </div>
+            )}
+
+            {showAmountEntry && form.entryMode === "amount" ? (
+              <>
+                <MoneyInput
+                  label="مبلغ کل (تومان)"
+                  value={form.totalAmount}
+                  onChange={(digits) => setForm({ ...form, totalAmount: digits })}
+                />
+                <p className="mt-2 text-xs text-muted tabular-fa">
+                  {hasValidPurchasePrice
+                    ? (() => {
+                        const computedGrams = (Number(form.totalAmount) || 0) / Number(form.purchasePricePerUnit);
+                        // For gold in milligram mode, the calculator result mirrors
+                        // the field it feeds - grams computed here are converted to
+                        // milligrams for display, same unit the quantity input
+                        // itself is in.
+                        const isGoldMilligram = form.type === "gold" && form.quantityUnit === "milligram";
+                        const displayQuantity = isGoldMilligram ? computedGrams * 1000 : computedGrams;
+                        const unitLabel = isGoldMilligram ? "میلی‌گرم" : getAssetTypeOption(form.type)?.unitLabel;
+                        return `= ${formatDecimal(displayQuantity, 6)} ${unitLabel}`;
+                      })()
+                    : "برای محاسبه، اول قیمت خرید را وارد کنید"}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="mt-4 flex items-center justify-between">
+                  <label className="block text-xs text-muted">
+                    مقدار{" "}
+                    {isFormCustom
+                      ? ""
+                      : `(${
+                          form.type === "gold" && form.quantityUnit === "milligram"
+                            ? "میلی‌گرم"
+                            : getAssetTypeOption(form.type)?.unitLabel
+                        })`}
+                  </label>
+                  {form.type === "gold" && (
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form, quantityUnit: "gram" })}
+                        className={`rounded-lg px-2 py-0.5 text-xs font-medium ${
+                          form.quantityUnit === "gram" ? "bg-primary text-on-primary" : "bg-background text-muted"
+                        }`}
+                      >
+                        گرم
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form, quantityUnit: "milligram" })}
+                        className={`rounded-lg px-2 py-0.5 text-xs font-medium ${
+                          form.quantityUnit === "milligram" ? "bg-primary text-on-primary" : "bg-background text-muted"
+                        }`}
+                      >
+                        میلی‌گرم
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <input
+                  type="number"
+                  step="any"
+                  inputMode="decimal"
+                  value={form.quantity}
+                  onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm tabular-fa outline-none focus:border-accent"
+                />
+              </>
+            )}
 
             <MoneyInput
               label="قیمت خرید (تومان، به ازای هر واحد)"
@@ -457,17 +686,33 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
                   در حال دریافت قیمت لحظه‌ای...
                 </p>
               ) : typeof livePriceValue === "number" ? (
-                <button
-                  type="button"
-                  onClick={applyLivePrice}
-                  className="mt-2 flex items-center gap-1.5 rounded-full bg-accent/15 px-3 py-1.5 text-xs font-medium text-primary-darker"
-                >
-                  <RefreshIcon className="h-3.5 w-3.5" />
-                  قیمت لحظه‌ای: {formatToman(livePriceValue)} — استفاده شود
-                </button>
+                purchasePriceNumber === Math.round(livePriceValue) ? (
+                  // Already equal to today's price (the auto-prefill, or the
+                  // chip below was just tapped) - offering to "use" it again
+                  // would be a no-op button.
+                  <p className="mt-2 flex items-center gap-1.5 text-xs text-muted">
+                    <CheckIcon className="h-3.5 w-3.5 text-success" />
+                    قیمت لحظه‌ای امروز وارد شده است
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={applyLivePrice}
+                    className="mt-2 flex items-center gap-1.5 rounded-full bg-accent/15 px-3 py-1.5 text-xs font-medium text-primary-darker"
+                  >
+                    <RefreshIcon className="h-3.5 w-3.5" />
+                    قیمت لحظه‌ای: {formatToman(livePriceValue)} — استفاده شود
+                  </button>
+                )
               ) : (
                 <p className="mt-2 text-xs text-muted">قیمت لحظه‌ای در دسترس نیست؛ قیمت را دستی وارد کنید.</p>
               ))}
+            {purchaseTotalPreview !== null && (
+              <p className="mt-2 text-xs text-muted">
+                مبلغ کل خرید:{" "}
+                <span className="font-semibold tabular-fa text-foreground">{formatToman(purchaseTotalPreview)}</span>
+              </p>
+            )}
 
             {isFormCustom && (
               <MoneyInput
@@ -478,11 +723,12 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
             )}
 
             <label className="mt-4 block text-xs text-muted">تاریخ خرید</label>
-            <input
-              type="date"
+            <JalaliDatePicker
               value={form.purchaseDate}
-              onChange={(e) => setForm({ ...form, purchaseDate: e.target.value })}
-              className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm tabular-fa outline-none focus:border-accent"
+              onChange={(purchaseDate) => setForm({ ...form, purchaseDate })}
+              maxDate={new Date()}
+              showDeadlineCountdown={false}
+              quickSelectOptions={PURCHASE_DATE_QUICK_SELECT_OPTIONS}
             />
 
             <label className="mt-4 block text-xs text-muted">یادداشت (اختیاری)</label>
@@ -490,6 +736,7 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
               value={form.note}
               onChange={(e) => setForm({ ...form, note: e.target.value })}
               rows={2}
+              placeholder="مثلاً محل نگهداری یا کارگزاری"
               className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm outline-none focus:border-accent"
             />
 
@@ -497,12 +744,48 @@ export function AssetsManager({ summary }: { summary: AssetsSummary }) {
 
             <button
               onClick={handleSave}
-              disabled={saving}
+              disabled={busy}
               className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-on-primary disabled:opacity-50"
             >
               {saving ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : <CheckIcon className="h-4 w-4" />}
               ذخیره
             </button>
+
+            {form.id !== null &&
+              (confirmingDelete ? (
+                <div className="mt-3 rounded-2xl border border-warning/30 bg-warning/5 p-3">
+                  <p className="text-xs text-foreground">این دارایی برای همیشه حذف شود؟</p>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDelete}
+                      disabled={busy}
+                      className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-warning py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+                    >
+                      {deleting ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : <TrashIcon className="h-4 w-4" />}
+                      بله، حذف شود
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingDelete(false)}
+                      disabled={busy}
+                      className="flex-1 rounded-xl border border-border py-2.5 text-sm text-muted"
+                    >
+                      انصراف
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingDelete(true)}
+                  disabled={busy}
+                  className="mt-2 flex w-full items-center justify-center gap-2 rounded-2xl py-3 text-sm font-medium text-warning hover:bg-warning/10 disabled:opacity-50"
+                >
+                  <TrashIcon className="h-4 w-4" />
+                  حذف دارایی
+                </button>
+              ))}
           </div>
         </div>
       )}

@@ -24,6 +24,18 @@ export interface CategoryOption {
   icon: string;
   color: string;
   type: string;
+  // Category.isArchived - hidden from the pickers for a new selection (see
+  // isSelectableCategory below). Optional so older/offline-queued shapes
+  // without it read as "not archived".
+  isArchived?: boolean;
+}
+
+// Whether `c` belongs in a transaction form's category <select>: matching
+// type, and not archived - unless it's the value already selected (an edit
+// of an existing transaction filed under a since-archived category must
+// still render that category, not silently swap it for the first option).
+export function isSelectableCategory(c: CategoryOption, type: string | undefined, currentValue: string | undefined) {
+  return c.type === type && (!c.isArchived || c.name === currentValue);
 }
 
 // Shown whenever the add-transaction textarea's automatic live-preview
@@ -31,7 +43,7 @@ export interface CategoryOption {
 // TRANSACTION_PARSE_USER_RULE (lib/rate-limit.ts) - same copy everywhere
 // this can happen, not a reworded per-surface duplicate.
 export const PARSE_RATE_LIMIT_MESSAGE =
-  "پیش‌نمایش خودکار به‌دلیل تعداد زیاد درخواست موقتاً متوقف شد؛ کمی صبر کن، خودش دوباره فعال می‌شود.";
+  "چون تعداد درخواست‌ها زیاد شده، پیش‌نمایش خودکار موقتاً متوقف شده؛ کمی صبر کن، خودش دوباره فعال می‌شود.";
 
 // Shared by the single-transaction flow's inline live-preview card and full
 // preview stage, and by each row of batch mode's condensed preview -
@@ -61,7 +73,7 @@ export function getMissingBankAccountLabel(
 export function getConfirmationHintText(parsed: ParsedTransaction): string {
   if (parsed.source === "bank-sms") return "چی خریدی؟ کمکم کن درست دسته‌بندی‌ش کنم 🙂";
   if (parsed.categorizationConfidence === "low") return "دسته‌بندی را مطمئن نیستم، لطفاً خودت انتخاب کن";
-  return "دسته‌بندی پیشنهادی است، لطفاً بررسی کنید";
+  return "دسته‌بندی پیشنهادی است، لطفاً خودت بررسی کن";
 }
 
 // Shown whenever lib/ai/parse-transaction.ts detected the text as buying a
@@ -107,10 +119,10 @@ export async function submitCreateBankAccount(name: string): Promise<{ account: 
       body: JSON.stringify({ name, type: "bank", initialBalance: 0 }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "خطا در ساخت حساب.");
+    if (!res.ok) throw new Error(data.error || "حساب ساخته نشد، دوباره تلاش کن.");
     return { account: data.account };
   } catch (err) {
-    return { error: err instanceof Error ? err.message : "خطای ناشناخته رخ داد." };
+    return { error: err instanceof Error ? err.message : "یه مشکلی پیش اومد، دوباره تلاش کن." };
   }
 }
 
@@ -131,10 +143,10 @@ export async function submitCreateCategory(
       }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "خطا در ساخت دسته‌بندی.");
+    if (!res.ok) throw new Error(data.error || "دسته‌بندی ساخته نشد، دوباره تلاش کن.");
     return { category: data.category };
   } catch (err) {
-    return { error: err instanceof Error ? err.message : "خطای ناشناخته رخ داد." };
+    return { error: err instanceof Error ? err.message : "یه مشکلی پیش اومد، دوباره تلاش کن." };
   }
 }
 
@@ -153,6 +165,9 @@ export interface CreateTransactionPayload {
   idempotencyKey: string;
   source?: "assistant-suggestion";
   quick?: true;
+  // Quick submit only: the date was picked by hand, so background
+  // enrichment must keep it (see POST /api/transactions).
+  dateIsManual?: true;
   assetPurchase?: {
     type: AssetPurchaseSuggestion["type"];
     quantity: number;
@@ -204,7 +219,7 @@ export async function submitCreateTransaction(payload: CreateTransactionPayload)
 
   try {
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "خطا در ذخیره تراکنش.");
+    if (!res.ok) throw new Error(data.error || "تراکنش ذخیره نشد، دوباره تلاش کن.");
     // Server-confirmed create - the queued row's job is done. Best-effort:
     // a failed cleanup here isn't user-visible (the pending list only shows
     // non-"synced" rows) and would just be a harmless no-op the next time
@@ -218,6 +233,6 @@ export async function submitCreateTransaction(payload: CreateTransactionPayload)
     // of leaving a ghost "failed" entry for something already surfaced to
     // the caller as an error.
     deleteQueuedTransaction(payload.idempotencyKey).catch(() => {});
-    return { status: "error", message: err instanceof Error ? err.message : "خطای ناشناخته رخ داد." };
+    return { status: "error", message: err instanceof Error ? err.message : "یه مشکلی پیش اومد، دوباره تلاش کن." };
   }
 }

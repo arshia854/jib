@@ -18,8 +18,8 @@ describe("extractAmount", () => {
     expect(extractAmount("۵۰۰ ریال")).toBe(50);
   });
 
-  it("bails on spelled-out numbers", () => {
-    expect(extractAmount("پنجاه تومن")).toBeNull();
+  it("resolves spelled-out numbers via normalizePersianNumberWords, same as the digit equivalent", () => {
+    expect(extractAmount("پنجاه تومن")).toBe(extractAmount("۵۰ تومن"));
   });
 
   it("bails when multiple numbers appear", () => {
@@ -113,6 +113,46 @@ describe("extractAmount", () => {
 
     it("bails when the pair isn't the entire text", () => {
       expect(extractAmount("قیمت ۱ و ۱۰۰ تومن")).toBeNull();
+    });
+  });
+
+  describe("spelled-out Persian number words (normalized to digits before the existing pipeline)", () => {
+    it('resolves "سی تومن سیگار" (thirty toman cigarettes) via the bare-number x1000 rule', () => {
+      expect(extractAmount("سی تومن سیگار")).toBe(30000);
+    });
+
+    it('resolves "دویست هزار تومن" via the هزار scale word rule', () => {
+      expect(extractAmount("دویست هزار تومن")).toBe(200000);
+    });
+
+    it('resolves "صد و پنجاه" (150) via the bare-number x1000 rule', () => {
+      expect(extractAmount("صد و پنجاه")).toBe(150000);
+    });
+
+    it("ordinary digit-based behavior is unaffected: bare digit magnitude rule", () => {
+      expect(extractAmount("۸۰")).toBe(80000);
+    });
+
+    it("ordinary digit-based behavior is unaffected: still bails on multiple numbers", () => {
+      expect(extractAmount("۲ تا ۵۰ تومنی")).toBeNull();
+    });
+  });
+
+  describe("no space between a number and the following unit word", () => {
+    it('resolves "۱۰۰هزارتومن" the same as "۱۰۰ هزار تومن"', () => {
+      expect(extractAmount("۱۰۰هزارتومن")).toBe(extractAmount("۱۰۰ هزار تومن"));
+    });
+
+    it('resolves "۸۰تومن" the same as "۸۰ تومن"', () => {
+      expect(extractAmount("۸۰تومن")).toBe(extractAmount("۸۰ تومن"));
+    });
+
+    it('resolves "ناهار۸۰خوردم" the same as "ناهار ۸۰ خوردم"', () => {
+      expect(extractAmount("ناهار۸۰خوردم")).toBe(extractAmount("ناهار ۸۰ خوردم"));
+    });
+
+    it("still bails when two separate glued number+word groups appear in one string", () => {
+      expect(extractAmount("۲تومن و ۵۰تومن")).toBeNull();
     });
   });
 });

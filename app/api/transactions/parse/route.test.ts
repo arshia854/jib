@@ -111,13 +111,39 @@ describe("POST /api/transactions/parse - AI provider failure", () => {
 
     expect(res.status).toBe(502);
     const data = await res.json();
-    expect(typeof data.error).toBe("string");
+    // Fixed client-facing message - the raw provider error text must not
+    // reach the client...
+    expect(data.error).toBe("متن پردازش نشد. لطفاً دوباره تلاش کنید.");
+    expect(data.error).not.toContain("connection refused");
 
+    // ...but is still what gets logged server-side.
     const row = await prisma.errorLog.findFirst({
       where: { route: "transactions/parse", userId },
       orderBy: { id: "desc" },
     });
     expect(row).not.toBeNull();
+    expect(row!.message).toContain("connection refused");
+  });
+
+  // UserFacingParseError (lib/ai/parse-transaction.ts) is the one error type
+  // whose message is written for the user, so it's the one passed through
+  // verbatim instead of the generic message above.
+  it("passes a UserFacingParseError's message through: AI returned non-JSON text", async () => {
+    mockedChatCompletion.mockResolvedValueOnce("این اصلاً JSON نیست");
+
+    const res = await POST(makeRequest({ text: "امروز یک چیزی خریدم ولی یادم نیست چی بود" }));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toBe("متوجه متن تراکنش نشدم. لطفاً واضح‌تر بنویسید.");
+  });
+
+  it("passes a UserFacingParseError's message through: AI JSON failed shape validation", async () => {
+    mockedChatCompletion.mockResolvedValueOnce('{"amount": -5}');
+
+    const res = await POST(makeRequest({ text: "امروز یک چیزی خریدم ولی یادم نیست چی بود" }));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toBe("پاسخ هوش مصنوعی ساختار نامعتبری داشت. دوباره تلاش کنید.");
   });
 });
 

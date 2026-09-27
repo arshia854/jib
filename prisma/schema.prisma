@@ -8,17 +8,17 @@ datasource db {
 }
 
 model User {
-  id            Int       @id @default(autoincrement())
+  id                  Int       @id @default(autoincrement())
   // Optional now that email/Google-only users may not have a phone.
-  phoneNumber   String?   @unique
-  email         String?   @unique
-  emailVerified DateTime?
+  phoneNumber         String?   @unique
+  email               String?   @unique
+  emailVerified       DateTime?
   // bcrypt hash, set only for users who registered via email + password.
-  passwordHash  String?
+  passwordHash        String?
   // Google avatar - populated by the OAuth profile on sign-in.
-  image         String?
-  name          String?
-  age           Int?
+  image               String?
+  name                String?
+  age                 Int?
   // "user" | "admin". Plain string (not a Prisma enum) to match every other
   // type-like field in this schema (FinanceAccount.type, Category.type,
   // Transaction.type) - this installed Prisma version (7.9.1) also has no
@@ -30,13 +30,13 @@ model User {
   // - necessarily hand-written, not `migrate diff` output, since there's
   // nothing about this line for it to diff) and at the application level by
   // lib/auth/session.ts's isValidRole().
-  role          String    @default("user")
+  role                String    @default("user")
   // Set to block a user; enforced in lib/auth/session.ts's getSession() so a
   // blocked user is signed out (session treated as null) on their next
   // request, same as a deleted user.
-  blockedAt     DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  blockedAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
   // Settings toggle (opt-in, default off) - when true, the dashboard
   // (app/app/page.tsx, via lib/data/dashboard.ts) also shows the user's
   // totalBalance converted into equivalent grams of 18k gold / USD, using
@@ -44,7 +44,7 @@ model User {
   // Purely a display preference - never affects any stored amount, and
   // getLivePrices() is only ever called for a user who has this on, so
   // opting out costs nothing against brsapi.ir's daily free-tier quota.
-  showBalanceInAssets Boolean @default(false)
+  showBalanceInAssets Boolean   @default(false)
 
   financeAccounts      FinanceAccount[]
   categories           Category[]
@@ -60,6 +60,9 @@ model User {
   facts                UserFact[]
   assets               Asset[]
   goals                Goal[]
+  savingsStrategies    SavingsStrategy[]
+  pushSubscriptions    PushSubscription[]
+  notificationLogs     NotificationLog[]
 }
 
 // NextAuth/Auth.js OAuth provider link table (required shape + field names
@@ -100,6 +103,7 @@ model FinanceAccount {
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   transactions Transaction[]
+  goals        Goal[]
 
   @@index([userId])
 }
@@ -117,6 +121,14 @@ model Category {
   // newly-created category with no explicit classification isn't silently
   // counted as wasteful spending.
   isEssential Boolean  @default(true)
+  // Retired from *new*-transaction selection only - hidden from the AI
+  // prompt/resolution (lib/ai/parse-transaction.ts), new-category dedup
+  // (lib/data/categories.ts) and the add-transaction pickers, but still a
+  // normal row otherwise: existing Transaction/MerchantMapping rows keep
+  // pointing at it (both FKs are onDelete: Restrict) and keep displaying
+  // its real name. Archiving a top-level category also retires its
+  // children (see excludeArchived in lib/categories.ts).
+  isArchived  Boolean  @default(false)
   createdAt   DateTime @default(now())
 
   userId Int
@@ -134,12 +146,12 @@ model Category {
 }
 
 model Transaction {
-  id               Int      @id @default(autoincrement())
-  amount           Int
-  type             String
-  description      String?
-  rawInput         String
-  date             DateTime @default(now())
+  id                          Int      @id @default(autoincrement())
+  amount                      Int
+  type                        String
+  description                 String?
+  rawInput                    String
+  date                        DateTime @default(now())
   // Provenance of how this transaction was created. Null for the app's
   // original manual-entry/AI-parse-preview flow (POST /api/transactions
   // without a source, the only path that existed before this field) -
@@ -150,7 +162,7 @@ model Transaction {
   // confirm action and its "ویرایش کن" -> AddTransactionForm handoff, both
   // going through the same createTransaction() call - see
   // lib/data/transactions.ts).
-  source           String?
+  source                      String?
   // SEC-10 (docs/roadmap-status.md): optional client-generated idempotency
   // key for POST /api/transactions - a repeat create request carrying a
   // key already used by this same user returns the existing row instead of
@@ -161,7 +173,7 @@ model Transaction {
   // skips the idempotency check entirely). Not backfilled on existing rows
   // for the same reason `source` above wasn't: null already means "no key
   // was used," so a bulk write here would be a needless live-DB mutation.
-  idempotencyKey   String?
+  idempotencyKey              String?
   // Background AI-enrichment state for a "quick submit" transaction (see
   // lib/workflows/enrich-transaction.ts). Null for every transaction created
   // through the normal AI-preview-then-confirm flow, which is already fully
@@ -176,7 +188,33 @@ model Transaction {
   // applyTransactionEnrichment), or as soon as the user manually edits the
   // transaction first (see updateTransaction) - a slow-finishing background
   // job must never clobber a manual correction.
-  enrichmentStatus String?
+  enrichmentStatus            String?
+  // The AI's brand-new-category proposal (lib/ai/parse-transaction.ts's
+  // SuggestedCategoryWithIcon) from a "quick submit" transaction's
+  // background enrichment (lib/workflows/enrich-transaction.ts), for the
+  // cases where applyTransactionEnrichment could not resolve it to an
+  // existing category - mirrors SuggestedCategoryWithIcon field-for-field
+  // (suggestedCategoryName -> name, suggestedCategoryParentName ->
+  // parentName, suggestedCategoryReason -> reason, suggestedCategoryIcon ->
+  // icon). All four are always set together, or all left null - there is
+  // no partial state. Null for every transaction created through the
+  // normal AI-preview-then-confirm flow (the user already saw and resolved
+  // this exact suggestion via that flow's own "بسازمش؟" button before the
+  // row was ever created), and for a quick-submit transaction whose
+  // background parse either found no suggestion or matched one to an
+  // existing category outright.
+  //
+  // Cleared back to null once the user accepts (POST
+  // /api/transactions/[id]/suggested-category with {action: "accept"}) or
+  // dismisses ({action: "dismiss"}) the suggestion, or as soon as
+  // updateTransaction runs - the same "a manual edit wins" reasoning
+  // already documented on enrichmentStatus above: a user who has already
+  // hand-corrected this transaction's category has implicitly resolved
+  // whatever the AI would have suggested, so the banner must not linger.
+  suggestedCategoryName       String?
+  suggestedCategoryParentName String?
+  suggestedCategoryReason     String?
+  suggestedCategoryIcon       String?
   // Links the two rows (one expense, one income) that together make up a
   // single internal transfer between the user's own FinanceAccounts - e.g.
   // moving money from a checking account to a savings account is one
@@ -186,9 +224,9 @@ model Transaction {
   // spending/income. Null for every regular income/expense Transaction -
   // the vast majority of rows, and the only value that existed before this
   // field was added.
-  transferGroupId  String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  transferGroupId             String?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
 
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -394,6 +432,10 @@ model DefaultCategory {
   // lib/data/onboarding.ts) - same meaning/default as Category.isEssential
   // above.
   isEssential Boolean  @default(true)
+  // Skipped by onboarding (lib/data/onboarding.ts) - same meaning as
+  // Category.isArchived above. Not copied onto the user's own Category rows:
+  // an archived default is simply never seeded.
+  isArchived  Boolean  @default(false)
   createdAt   DateTime @default(now())
 
   parentId Int?
@@ -508,7 +550,22 @@ model Goal {
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // Phase B1 (savings roadmap): optional link to one of the user's own
+  // FinanceAccounts, whose real tracked balance then drives this goal's
+  // alreadySaved/availableBalance (lib/goals/feasibility.ts's
+  // getGoalFeasibilityContext / lib/data/goals.ts's listGoalsWithFeasibility)
+  // instead of a shared, evenly-split availableBalancePerActiveGoal. Nullable
+  // - most goals still have no dedicated account - and SetNull (not Cascade
+  // or Restrict) on delete, same "the weaker side goes away quietly, the
+  // stronger side survives" shape as ErrorLog.userId above: deleting the
+  // linked FinanceAccount unlinks the goal (it falls back to shared-pool
+  // apportionment) rather than deleting the goal itself or blocking the
+  // account deletion.
+  savingsAccountId Int?
+  savingsAccount   FinanceAccount? @relation(fields: [savingsAccountId], references: [id], onDelete: SetNull)
+
   @@index([userId])
+  @@index([savingsAccountId])
 }
 
 // Shared (not per-user - market prices don't depend on who's asking) cache
@@ -524,4 +581,115 @@ model LivePriceCache {
   usdPricePerUnit      BigInt
   bitcoinPricePerUnit  BigInt
   fetchedAt            DateTime
+
+  // Set (to a future time) when the most recent fetch attempt hit
+  // nerkh.io's quota-exhausted response (QuotaExceededError, see
+  // lib/prices/get-live-prices.ts). While this is non-null and in the
+  // future, getLivePrices skips the network fetch entirely and serves this
+  // row with `stale: true` instead of re-attempting (and re-failing)
+  // against an already-exhausted quota every CACHE_TTL_MS cycle. Cleared
+  // (left null) again the next time a fetch is attempted after expiry -
+  // there's no separate "cooldown active" boolean, this column is both.
+  quotaExceededUntil DateTime?
+}
+
+// Schema-only groundwork for the savings-formulas feature (first phase -
+// no API route or UI reads/writes this yet). Deliberately decoupled from
+// Transaction and Goal for now: unlike Goal.savingsAccountId (Phase B) or
+// the transfer pair on Transaction (Phase A), this model has no relation to
+// either - a SavingsStrategy is just a standalone record of which formula
+// the user picked, until a later phase wires it into actual money movement.
+model SavingsStrategy {
+  id Int @id @default(autoincrement())
+
+  // "fifty_thirty_twenty" | "pay_yourself_first" | "leftover" | "roundup" |
+  // "custom" - same plain-string-enum convention as every other type-like
+  // field in this schema (User.role, FinanceAccount.type, Category.type,
+  // Asset.type, Goal.category/status).
+  formulaType String
+
+  // Percent (0-100) for a percent-based formula (e.g.
+  // "fifty_thirty_twenty"). Exactly one of targetPercent/targetAmount is
+  // set, matching whichever formulaType this is - a percent-based formula
+  // sets this and leaves targetAmount null, an amount-based one is the
+  // reverse.
+  targetPercent Float?
+
+  // Toman, for a fixed-amount formula (e.g. "pay_yourself_first"). Same Int
+  // precedent as Goal.targetAmount/Transaction.amount elsewhere in this
+  // schema. Exactly one of targetPercent/targetAmount is set - see
+  // targetPercent above.
+  targetAmount Int?
+
+  // "active" | "paused" | "abandoned" - same plain-string-enum convention
+  // as Goal.status. Defaults to "active" since every strategy starts out
+  // that way.
+  status String @default("active")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// One Web Push subscription (a single browser/device registration) for a
+// user - the endpoint/keys shape the Web Push protocol itself defines
+// (PushSubscription.toJSON() on the client), persisted so the server can
+// push to it later. A user can have several of these at once (one per
+// browser/device they've enabled notifications on); `endpoint` is unique on
+// its own (not scoped to userId) since it's already a globally unique URL
+// assigned by the browser's push service, and re-subscribing the same
+// device must not create a duplicate row.
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Backs both the in-app notification center (read/unread state) and
+// push-delivery logging (dedupe/audit) for a single notification sent to a
+// user - one row per notification regardless of whether it was actually
+// delivered via push.
+model NotificationLog {
+  id Int @id @default(autoincrement())
+
+  // "income_savings_suggestion" | "nightly_reminder" - same plain-string-enum
+  // convention as every other type-like field in this schema (User.role,
+  // FinanceAccount.type, Category.type, Asset.type, Goal.category/status,
+  // SavingsStrategy.formulaType/status).
+  type String
+
+  title String
+  body  String
+
+  // Whether the user has seen/dismissed this in the in-app notification
+  // center. Defaults to false since every notification starts unread.
+  read Boolean @default(false)
+
+  // Whether this notification was (also) delivered via a Web Push message,
+  // as opposed to only ever appearing in the in-app notification center.
+  // Defaults to false since a row is written regardless of push-delivery
+  // outcome - see this model's own doc comment above.
+  sentViaPush Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Serves the unread-count/unread-list read in the in-app notification
+  // center (`where: { userId, read: false }`).
+  @@index([userId, read])
+  // Serves the notification center's "most recent first" list read.
+  @@index([userId, createdAt])
 }

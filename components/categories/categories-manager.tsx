@@ -12,6 +12,9 @@ interface Category {
   color: string;
   type: string;
   transactionCount: number;
+  // Category.isArchived - still listed here (its history is real), just
+  // marked, since it no longer appears in the add-transaction pickers.
+  isArchived: boolean;
 }
 
 const COLOR_PRESETS = [
@@ -247,7 +250,9 @@ function CategorySection({ title, categories, onAdd, onEdit, onDelete, deletingI
               </div>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-foreground">{category.name}</p>
-                <p className="text-xs text-muted">{category.transactionCount} تراکنش</p>
+                <p className="text-xs text-muted">
+                  {category.transactionCount} تراکنش{category.isArchived ? " · بایگانی‌شده" : ""}
+                </p>
               </div>
               <button
                 onClick={() => onEdit(category)}

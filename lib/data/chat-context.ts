@@ -98,13 +98,18 @@ function formatOverallChangeLine(label: string, trend: OverallTrend | undefined)
   return `- ${label}: ${sign}${fa(trend.percentChange)}٪`;
 }
 
+// categoryAverage is a multi-period average (the category's other
+// transactions across the last RECURRING_EXPENSE_LOOKBACK_MONTHS months -
+// see computeUnusualTransactions), so the line says "۳ ماه اخیر" rather
+// than leaving the LLM to assume it's this month's own average and tell
+// the user something false about where the number came from.
 function formatUnusualTransactionLines(transactions: UnusualTransaction[]): string {
   if (transactions.length === 0) return "تراکنش غیرعادی‌ای شناسایی نشد";
 
   const top = transactions.slice(0, MAX_UNUSUAL_TRANSACTION_LINES);
   const lines = top.map(
     (t) =>
-      `- ${t.category} | ${fa(t.amount)} تومان (${fa(t.multiple)} برابر میانگین این دسته: ${fa(t.categoryAverage)} تومان)`
+      `- ${t.category} | ${fa(t.amount)} تومان (${fa(t.multiple)} برابر میانگین این دسته در ۳ ماه اخیر: ${fa(t.categoryAverage)} تومان)`
   );
 
   const rest = transactions.length - top.length;
@@ -224,7 +229,9 @@ export async function getFinancialContextSummary(userId: number): Promise<string
   const savingsRateLine =
     summary.savingsRate === undefined ? "نرخ پس‌انداز: داده‌ای برای محاسبه نیست" : `نرخ پس‌انداز این ماه: ${fa(summary.savingsRate)}٪`;
 
-  return `موجودی کل: ${fa(summary.totalBalance)} تومان
+  return `موجودی قابل‌استفاده (بدون احتساب پس‌انداز): ${fa(summary.availableBalance)} تومان
+پس‌انداز: ${fa(summary.savingsBalance)} تومان
+مجموع کل دارایی نقدی: ${fa(summary.totalBalance)} تومان
 خلاصه ${summary.currentMonth.label}: درآمد ${fa(summary.currentMonth.income)} تومان، هزینه ${fa(
     summary.currentMonth.expense
   )} تومان

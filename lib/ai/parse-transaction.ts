@@ -4,11 +4,12 @@ import {
   resolveNewCategoryIcon,
   FALLBACK_EXPENSE_CATEGORY,
   FALLBACK_INCOME_CATEGORY,
+  excludeArchived,
   type CategoryType,
 } from "@/lib/categories";
 import { findMerchant, type MerchantLookupResult, type MerchantMatchSource } from "@/lib/merchant-lookup";
 import { extractAmount } from "@/lib/extract-amount";
-import { extractDate } from "@/lib/extract-date";
+import { extractDate, tehranIsoDate } from "@/lib/extract-date";
 import { parseBankSms, type BankSmsParseResult } from "@/lib/bank/parse-bank-sms";
 import { normalizeText as normalizeBankSmsText } from "@/lib/bank/normalize";
 import type { Bank } from "@/lib/bank/types";
@@ -136,6 +137,9 @@ export interface CategoryOption {
   // validate the AI's (category, subcategory) pair against the real
   // hierarchy, not just check each name exists somewhere.
   parentName?: string;
+  // Category.isArchived - see excludeArchived in lib/categories.ts, which
+  // parseTransactionWithAI applies before anything else reads this list.
+  isArchived?: boolean;
 }
 
 // Raw shape of the optional assetPurchase key in the AI's JSON response -
@@ -209,7 +213,7 @@ function formatCategoryTree(categories: CategoryOption[], type: CategoryType): s
 function buildSystemPrompt(categories: CategoryOption[]): string {
   const expenseTree = formatCategoryTree(categories, "expense");
   const incomeTree = formatCategoryTree(categories, "income");
-  const today = new Date().toISOString().slice(0, 10);
+  const today = tehranIsoDate();
 
   return `شما دستیار استخراج اطلاعات مالی اپلیکیشن «جیب» هستید. کاربر یک جمله فارسی محاوره‌ای درباره یک تراکنش مالی می‌نویسد (مثلاً «۵۰ تومن ناهار خوردم» یا «حقوق ۱۵ میلیون تومن گرفتم»). گاهی متن ممکن است شامل نام فروشنده، توضیح، یا حتی متن یک پیامک بانکی paste‌شده باشد. فقط یک شیء JSON با دقیقاً همین کلیدها برگردان، بدون هیچ متن یا توضیح اضافه و بدون markdown:
 
@@ -539,11 +543,27 @@ function buildBankSmsResult(bankResult: BankSmsParseResult, rawInput: string, ca
   };
 }
 
+// Thrown only for failures whose message was written for the end user (a
+// fixed Persian string, never provider/network text) - the one error type
+// POST /api/transactions/parse is allowed to pass through to the client
+// verbatim. Anything else thrown out of parseTransactionWithAI (raw AI
+// provider errors, DB errors, ...) gets a generic message there instead.
+export class UserFacingParseError extends Error {}
+
 export async function parseTransactionWithAI(
   userId: number,
   rawInput: string,
-  categories: CategoryOption[]
+  allCategories: CategoryOption[]
 ): Promise<ParsedTransaction> {
+  // Filtered once, here, so every use below (the prompt's category list,
+  // merchant-override validation, AI leaf-category validation, new-category
+  // similarity matching) treats an archived category as if it didn't exist
+  // for this user - even though it's still physically in their Category
+  // table, referenced by their existing transactions (see
+  // Category.isArchived in prisma/schema.prisma and excludeArchived in
+  // lib/categories.ts).
+  const categories = excludeArchived(allCategories);
+
   // Bank SMS detection is fully deterministic and purpose-built for this
   // input shape, so it's tried first and, when it resolves, wins outright -
   // skipping both the merchant lookup and the AI call. parseBankSms is
@@ -679,7 +699,7 @@ export async function parseTransactionWithAI(
       error: extractError,
       context: { contentLength: content.length },
     });
-    throw new Error("متوجه متن تراکنش نشدم. لطفاً واضح‌تر بنویسید.");
+    throw new UserFacingParseError("متوجه متن تراکنش نشدم. لطفاً واضح‌تر بنویسید.");
   }
 
   if (!isRawParsedTransaction(parsed) || parsed.amount <= 0) {
@@ -692,7 +712,7 @@ export async function parseTransactionWithAI(
       error: validationError,
       context: { contentLength: content.length },
     });
-    throw new Error("پاسخ هوش مصنوعی ساختار نامعتبری داشت. دوباره تلاش کنید.");
+    throw new UserFacingParseError("پاسخ هوش مصنوعی ساختار نامعتبری داشت. دوباره تلاش کنید.");
   }
 
   const assetResolution = await resolveAssetPurchase(userId, parsed.assetPurchase);
@@ -716,7 +736,7 @@ export async function parseTransactionWithAI(
     date:
       typeof parsed.date === "string" && isValidIsoDateString(parsed.date)
         ? parsed.date
-        : new Date().toISOString().slice(0, 10),
+        : tehranIsoDate(),
     ...(assetResolution.assetSuggestion ? { assetSuggestion: assetResolution.assetSuggestion } : {}),
   };
 

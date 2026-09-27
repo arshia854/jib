@@ -33,11 +33,11 @@ export async function POST(request: NextRequest) {
   }
 
   const existing = await prisma.user.findUnique({ where: { email } });
+  // One identical message regardless of how the existing account signed up
+  // (password vs. Google) - a differing message would let anyone probe not
+  // just whether an email is registered but which sign-in method it uses.
   if (existing) {
-    const message = existing.passwordHash
-      ? "این ایمیل قبلاً ثبت‌نام کرده است."
-      : "این ایمیل قبلاً با روش دیگری (مثلاً گوگل) ثبت‌نام کرده است.";
-    return NextResponse.json({ error: message }, { status: 409 });
+    return NextResponse.json({ error: "این ایمیل قبلاً ثبت‌نام شده است." }, { status: 409 });
   }
 
   const passwordHash = await hashPassword(password);

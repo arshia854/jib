@@ -17,13 +17,20 @@ async function main() {
       // (not just theoretical) while seeding the Subtask 23-top-level
       // category tree on 2026-09-04 - see docs/roadmap-status.md's entry
       // that day for the exact affected rows.
-      update: { icon: category.icon, color: category.color, isEssential: category.isEssential, parentId: null },
+      update: {
+        icon: category.icon,
+        color: category.color,
+        isEssential: category.isEssential,
+        isTransfer: category.isTransfer ?? false,
+        parentId: null,
+      },
       create: {
         name: category.name,
         icon: category.icon,
         color: category.color,
         type: category.type,
         isEssential: category.isEssential,
+        isTransfer: category.isTransfer ?? false,
       },
     });
 

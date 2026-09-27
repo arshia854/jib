@@ -14,7 +14,33 @@ vi.mock("@/lib/observability/logger", () => ({
 
 import { chatCompletion } from "@/lib/nvidia-ai";
 import { logger } from "@/lib/observability/logger";
-import { detectTransactionIntent } from "@/lib/ai/detect-transaction-intent";
+import { detectTransactionIntent, hasAmountSignal } from "@/lib/ai/detect-transaction-intent";
+
+describe("hasAmountSignal", () => {
+  it("detects Persian digits", () => {
+    expect(hasAmountSignal("۲۰۰ تومن خرج کردم")).toBe(true);
+  });
+
+  it("detects English digits", () => {
+    expect(hasAmountSignal("200 تومن خرج کردم")).toBe(true);
+  });
+
+  it("detects «هزار» with no digit", () => {
+    expect(hasAmountSignal("صد هزار تومن خرج کردم")).toBe(true);
+  });
+
+  it("detects «میلیون» with no digit", () => {
+    expect(hasAmountSignal("یک میلیون تومن خرج کردم")).toBe(true);
+  });
+
+  it("detects a bare number with no currency word", () => {
+    expect(hasAmountSignal("۲۰۰")).toBe(true);
+  });
+
+  it("returns false when there is no amount signal at all", () => {
+    expect(hasAmountSignal("سلام، این ماه چقدر خرج کردم؟")).toBe(false);
+  });
+});
 
 describe("detectTransactionIntent", () => {
   beforeEach(() => {
@@ -41,26 +67,32 @@ describe("detectTransactionIntent", () => {
 
   it("fails safe to false on malformed JSON", async () => {
     vi.mocked(chatCompletion).mockResolvedValue("not json at all");
-    const result = await detectTransactionIntent("سلام", 1);
+    const result = await detectTransactionIntent("۲۰۰ تومن", 1);
     expect(result).toEqual({ isPastUnloggedTransaction: false });
   });
 
   it("fails safe to false when the key is missing", async () => {
     vi.mocked(chatCompletion).mockResolvedValue("{}");
-    const result = await detectTransactionIntent("سلام", 1);
+    const result = await detectTransactionIntent("۲۰۰ تومن", 1);
     expect(result).toEqual({ isPastUnloggedTransaction: false });
   });
 
   it("fails safe to false when the upstream call throws", async () => {
     vi.mocked(chatCompletion).mockRejectedValue(new Error("network error"));
-    const result = await detectTransactionIntent("سلام", 1);
+    const result = await detectTransactionIntent("۲۰۰ تومن", 1);
     expect(result).toEqual({ isPastUnloggedTransaction: false });
   });
 
   it("treats any non-true value for the key as false (not just literal false)", async () => {
     vi.mocked(chatCompletion).mockResolvedValue('{"isPastUnloggedTransaction": "yes"}');
-    const result = await detectTransactionIntent("سلام", 1);
+    const result = await detectTransactionIntent("۲۰۰ تومن", 1);
     expect(result).toEqual({ isPastUnloggedTransaction: false });
+  });
+
+  it("skips the AI call entirely when the message has no amount signal", async () => {
+    const result = await detectTransactionIntent("سلام، حالت چطوره؟", 1);
+    expect(result).toEqual({ isPastUnloggedTransaction: false });
+    expect(chatCompletion).not.toHaveBeenCalled();
   });
 
   // Phase 9.4 - detectTransactionIntent() wires chatCompletion's onUsage
@@ -73,7 +105,7 @@ describe("detectTransactionIntent", () => {
       return '{"isPastUnloggedTransaction": false}';
     });
 
-    await detectTransactionIntent("سلام", 1);
+    await detectTransactionIntent("۲۰۰ تومن", 1);
 
     expect(logger.info).toHaveBeenCalledTimes(1);
     const [fields] = vi.mocked(logger.info).mock.calls[0];

@@ -3,7 +3,7 @@ import { toJalaali } from "jalaali-js";
 import { prisma } from "@/lib/prisma";
 import { getJalaaliMonthRange } from "@/lib/format";
 import { summarizeMonth } from "@/lib/analytics/spending-summary";
-import { getTotalBalance } from "@/lib/data/accounts";
+import { getTotalBalance, getAccountBalance } from "@/lib/data/accounts";
 import { getUserFacts } from "@/lib/facts/user-facts";
 
 type PrismaClient = typeof prisma;
@@ -63,6 +63,25 @@ export const FEASIBILITY_ADJUSTMENT_RATIO_IRREGULAR_INCOME = 0.5;
 // short enough to still reflect the user's *current* spending pattern
 // rather than very old history.
 export const GOAL_LOOKBACK_MONTHS = 3;
+
+// Defense-in-depth safety net for computeGoalFeasibility below - NOT a fix
+// for any specific root cause, just a bound on how far a bad upstream
+// number can distort this function's output. availableBalance ultimately
+// comes from getTotalBalance (lib/data/accounts.ts) via
+// getGoalFeasibilityContext, which sums every transaction's amount signed
+// by its `type` column - if that column is ever wrong on a large enough
+// transaction (e.g. a quick-submit transaction whose background AI
+// enrichment permanently failed and left it mistyped - see
+// markEnrichmentFailed's own comment in lib/data/transactions.ts),
+// availableBalance can come in deeply, spuriously negative, which would
+// otherwise inflate remainingAmount/requiredMonthlyAmount without limit.
+// Floored at -1x targetAmount rather than clamped to 0 - a real negative
+// balance should still make a goal look harder, just not unboundedly so;
+// past "the entire goal amount's worth of debt," requiredMonthlyAmount is
+// already deep in "unrealistic" territory regardless of exactly how much
+// further negative the real number goes, so there's nothing meaningful
+// left to gain by letting it distort the figure further.
+export const AVAILABLE_BALANCE_FLOOR_RATIO = -1;
 
 export type FeasibilityStatus = "on_track" | "needs_adjustment" | "unrealistic";
 export type IncomeRegularity = "regular" | "irregular";
@@ -168,7 +187,13 @@ export function computeGoalFeasibility(input: GoalFeasibilityInput): GoalFeasibi
   const hasIncomeSignal = input.actualMonthlyAverage !== null;
   const actualMonthlyAverage = input.actualMonthlyAverage ?? 0;
 
-  const remainingAmount = input.targetAmount - input.initialAmount - input.alreadySaved - input.availableBalance;
+  // See AVAILABLE_BALANCE_FLOOR_RATIO's own comment above - this is a safety
+  // net against a corrupted upstream balance, not normal behavior for a
+  // genuine (small) negative account balance, which passes through
+  // unchanged.
+  const availableBalance = Math.max(input.availableBalance, input.targetAmount * AVAILABLE_BALANCE_FLOOR_RATIO);
+
+  const remainingAmount = input.targetAmount - input.initialAmount - input.alreadySaved - availableBalance;
   const isFullyFunded = remainingAmount <= 0;
 
   const requiredMonthlyAmount = isFullyFunded ? 0 : remainingAmount / monthsRemaining;
@@ -303,23 +328,51 @@ export async function getActualMonthlyAverage(
 
 export interface GoalFeasibilityContext {
   actualMonthlyAverage: number | null;
+  // The user's raw, unscoped getTotalBalance() - NOT reduced for
+  // savingsAccountId earmarking (see availableBalancePerActiveGoal below for
+  // the number that *is* reduced). Kept as the plain total since nothing
+  // reads this field for apportionment purposes on its own.
   totalBalance: number;
   incomeRegularity: IncomeRegularity | null;
-  // Count of the user's currently `status: "active"` goals - the divisor
-  // behind availableBalancePerActiveGoal below.
+  // Count of the user's currently `status: "active"` goals that have NO
+  // savingsAccountId - the divisor behind availableBalancePerActiveGoal
+  // below. Phase B1 (savings roadmap): a goal with its own dedicated
+  // savingsAccountId no longer competes for the shared pool at all (see
+  // that field's own doc comment), so it's excluded from this count the
+  // same way an achieved/abandoned goal already was.
   activeGoalCount: number;
-  // totalBalance split evenly across activeGoalCount - the one apportionment
-  // calculation every caller of this function needs (see
+  // (totalBalance minus every FinanceAccount balance already earmarked to
+  // an active, linked goal) split evenly across activeGoalCount - the one
+  // apportionment calculation every caller of this function needs (see
   // GoalFeasibilityInput's own doc comment on availableBalance for why a
   // per-goal share, not the raw total, is what computeGoalFeasibility
-  // wants). 0 when the user has no active goals. Computed once, here, so
-  // every caller (listGoalsWithFeasibility, the single-goal strategy route)
-  // uses the exact same number for a given active goal rather than each
-  // re-deriving its own - pass 0 instead of this field for a goal that is
-  // itself not active (achieved/abandoned), since such a goal isn't
-  // competing for this pool at all. Still a deliberately simple stand-in
-  // (Phase 1 has no real portfolio-allocation feature), not a claim that
-  // the user's money is actually earmarked this way.
+  // wants). 0 when the user has no unlinked active goals. Computed once,
+  // here, so every caller (listGoalsWithFeasibility, the single-goal
+  // strategy route) uses the exact same number for a given active,
+  // *unlinked* goal rather than each re-deriving its own - pass 0 instead
+  // of this field for a goal that is itself not active (achieved/
+  // abandoned) or that has its own savingsAccountId (see
+  // getGoalBalanceInputs below, which makes that call for every goal
+  // shape). Still a deliberately simple stand-in (no real
+  // portfolio-allocation feature beyond per-goal account linking), not a
+  // claim that the user's remaining unearmarked money is actually
+  // allocated this way.
+  //
+  // Phase B1 (savings roadmap): the pool this splits is no longer the raw
+  // totalBalance. Once a goal is linked to a dedicated savingsAccountId,
+  // that account's money is earmarked for that goal (see
+  // getGoalBalanceInputs) and must stop being offered to every *other*
+  // active goal too - otherwise linking a goal to an account would just
+  // move the double-counting bug instead of fixing it (the same money
+  // would count once via that goal's own alreadySaved AND again via every
+  // other active goal's availableBalancePerActiveGoal share). So this pool
+  // is totalBalance minus the balance of every FinanceAccount linked
+  // (savingsAccountId) to at least one *active* goal, counted once per
+  // distinct account regardless of how many active goals point at it (two
+  // goals can legitimately share one savings account - each of them still
+  // individually reports that account's real balance as its own
+  // alreadySaved; only this shared-pool subtraction must not double-count
+  // the account itself).
   availableBalancePerActiveGoal: number;
 }
 
@@ -335,23 +388,81 @@ export interface GoalFeasibilityContext {
  * computing its own version of the same split. Reuses getTotalBalance
  * (lib/data/accounts.ts) and getUserFacts (lib/facts/user-facts.ts) as-is
  * rather than re-deriving either.
+ *
+ * Phase B1 (savings roadmap) note: this context alone is enough for an
+ * *unlinked* goal, but a goal with its own savingsAccountId also needs
+ * getGoalBalanceInputs (below) applied per-goal on top of this context -
+ * see that function's own doc comment. listGoalsWithFeasibility
+ * (lib/data/goals.ts) does this; app/api/goals/[id]/strategy/route.ts does
+ * NOT yet (out of scope for this phase - flagged, not fixed, since it would
+ * also mean deciding how lib/goals/strategy.ts's own GoalStrategyGoalInput
+ * should represent alreadySaved), so a goal linked to a savingsAccountId
+ * will still get an incorrect (stale, pool-based) availableBalance from
+ * that one route until it's updated the same way.
  */
 export async function getGoalFeasibilityContext(
   userId: number,
   client: PrismaClient = prisma
 ): Promise<GoalFeasibilityContext> {
-  const [actualMonthlyAverage, totalBalance, facts, activeGoalCount] = await Promise.all([
+  const [actualMonthlyAverage, totalBalance, facts, activeGoalCount, activeLinkedGoals] = await Promise.all([
     getActualMonthlyAverage(userId, undefined, client),
     getTotalBalance(userId, client),
     getUserFacts(userId),
-    client.goal.count({ where: { userId, status: "active" } }),
+    // Phase B1: only active goals with NO savingsAccountId compete for the
+    // shared pool - see activeGoalCount's own doc comment above.
+    client.goal.count({ where: { userId, status: "active", savingsAccountId: null } }),
+    // Every active goal that IS linked, so the accounts they earmark can be
+    // subtracted from the shared pool below - fetched as goal rows (not a
+    // distinct account-id query) since a plain findMany is simplest here;
+    // de-duplication of the account ids themselves happens right below.
+    client.goal.findMany({
+      where: { userId, status: "active", savingsAccountId: { not: null } },
+      select: { savingsAccountId: true },
+    }),
   ]);
 
   const regularityValue = facts.find((f) => f.key === "income_regularity")?.value;
   const incomeRegularity: IncomeRegularity | null =
     regularityValue === "regular" || regularityValue === "irregular" ? regularityValue : null;
 
-  const availableBalancePerActiveGoal = activeGoalCount > 0 ? totalBalance / activeGoalCount : 0;
+  // Distinct linked account ids only - two active goals sharing one account
+  // must not subtract that account's balance from the pool twice (see
+  // availableBalancePerActiveGoal's own doc comment above). One
+  // getAccountBalance call per distinct account, not per goal.
+  const distinctLinkedAccountIds = [...new Set(activeLinkedGoals.map((g) => g.savingsAccountId!))];
+  const linkedAccountBalances = await Promise.all(
+    distinctLinkedAccountIds.map((accountId) => getAccountBalance(userId, accountId, client))
+  );
+  const earmarkedBalance = linkedAccountBalances.reduce((sum, balance) => sum + balance, 0);
+
+  const sharedPool = totalBalance - earmarkedBalance;
+  const availableBalancePerActiveGoal = activeGoalCount > 0 ? sharedPool / activeGoalCount : 0;
 
   return { actualMonthlyAverage, totalBalance, incomeRegularity, activeGoalCount, availableBalancePerActiveGoal };
+}
+
+/**
+ * Per-goal alreadySaved/availableBalance split (Phase B1, savings roadmap) -
+ * the one piece of GoalFeasibilityInput apportionment that depends on a
+ * single goal's own fields (savingsAccountId, status), not just the shared
+ * per-user GoalFeasibilityContext above. A goal linked to its own
+ * savingsAccountId draws on that account's real balance directly
+ * (alreadySaved) and gets no share of the shared pool (availableBalance: 0
+ * - see availableBalancePerActiveGoal's own doc comment on why); an unlinked
+ * goal is unchanged from before this phase. Pulled out as its own function
+ * (rather than inlined in listGoalsWithFeasibility) so every caller that
+ * computes one goal's feasibility from a shared GoalFeasibilityContext
+ * applies the exact same rule.
+ */
+export async function getGoalBalanceInputs(
+  userId: number,
+  goal: { status: string; savingsAccountId: number | null },
+  context: GoalFeasibilityContext,
+  client: PrismaClient = prisma
+): Promise<{ alreadySaved: number; availableBalance: number }> {
+  if (goal.savingsAccountId != null) {
+    const alreadySaved = await getAccountBalance(userId, goal.savingsAccountId, client);
+    return { alreadySaved, availableBalance: 0 };
+  }
+  return { alreadySaved: 0, availableBalance: goal.status === "active" ? context.availableBalancePerActiveGoal : 0 };
 }

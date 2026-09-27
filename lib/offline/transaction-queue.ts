@@ -51,6 +51,9 @@ export interface QueuedTransactionPayload {
   // quick-submit made while offline still triggers background AI
   // enrichment once it actually reaches the server.
   quick?: boolean;
+  // Forwarded verbatim alongside `quick`, same reason - a hand-picked date
+  // on an offline quick submit must still survive that enrichment.
+  dateIsManual?: boolean;
 }
 
 export interface QueuedTransaction {

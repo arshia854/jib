@@ -1,4 +1,5 @@
 import { normalizeText, toLatinDigits } from "@/lib/normalize";
+import { normalizePersianNumberWords } from "@/lib/persian-number-words";
 
 const SCALE_WORDS: Record<string, number> = {
   هزار: 1_000,
@@ -55,7 +56,9 @@ const COMBINED_PART_MAX = 999;
 // is the backstop once a case like this is identified as needing
 // rejection.
 export function extractAmount(rawText: string): number | null {
-  const tokens = normalizeText(toLatinDigits(rawText))
+  const tokens = splitDigitLetterBoundaries(
+    normalizeText(toLatinDigits(normalizePersianNumberWords(rawText)))
+  )
     .split(" ")
     .filter(Boolean);
 
@@ -88,6 +91,22 @@ export function extractAmount(rawText: string): number | null {
   // plain تومان/تومن, which no longer opts out of the bare-number
   // magnitude heuristic (see the doc comment above).
   return Math.round(value <= BARE_SINGLE_MAX ? value * 1_000 : value);
+}
+
+// normalizeText already turns punctuation into spaces, so the only glued
+// case left by the time we get here is a digit run directly touching a
+// non-digit, non-space character (in either direction), e.g. "۱۰۰هزارتومن"
+// or "ناهار۸۰". Insert a space at every such boundary so the later
+// .split(" ") tokenizes them the same as if the user had typed the space
+// themselves. Scoped to this file's tokenization only - not a general
+// normalizeText rule, since other call sites (merchant matching, etc.)
+// don't want digit/letter runs split apart.
+function splitDigitLetterBoundaries(text: string): string {
+  return text
+    .replace(/(\d)(?=[^\d\s])/g, "$1 ")
+    .replace(/([^\d\s])(?=\d)/g, "$1 ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // Handles "X و Y" (two numeric tokens joined by a literal "و") and "X.Y"

@@ -1,27 +1,24 @@
 import { Skeleton } from "@/components/skeleton";
 
+// Mirrors app/app/page.tsx's layout (header, balance card, month summary,
+// recent transactions, category breakdown) so nothing jumps when it loads.
 export default function DashboardLoading() {
   return (
-    <div className="space-y-5 px-4 pb-8 pt-6">
+    <div className="space-y-6 px-4 pb-8 pt-6">
       <header className="space-y-2">
-        <Skeleton className="h-3.5 w-24" />
-        <Skeleton className="h-6 w-16" />
+        <Skeleton className="h-3 w-20" />
+        <Skeleton className="h-6 w-28" />
       </header>
-
-      <Skeleton className="h-28 rounded-2xl" />
-
-      <div>
-        <Skeleton className="mb-2 h-3 w-20" />
-        <div className="flex gap-3">
-          <Skeleton className="h-24 flex-1 rounded-2xl" />
-          <Skeleton className="h-24 flex-1 rounded-2xl" />
-        </div>
-      </div>
 
       <Skeleton className="h-32 rounded-2xl" />
 
       <div>
-        <div className="mb-2 flex items-center justify-between">
+        <Skeleton className="mb-2.5 h-4 w-24" />
+        <Skeleton className="h-36 rounded-2xl" />
+      </div>
+
+      <div>
+        <div className="mb-2.5 flex items-center justify-between">
           <Skeleton className="h-4 w-24" />
           <Skeleton className="h-3 w-14" />
         </div>

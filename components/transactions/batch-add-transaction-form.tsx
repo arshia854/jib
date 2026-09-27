@@ -18,8 +18,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PlusIcon, TrashIcon, CheckIcon, XIcon, SpinnerIcon } from "@/components/icons";
-import { formatNumber } from "@/lib/format";
-import { toLatinDigits } from "@/lib/normalize";
+import { AmountInput } from "@/components/ui/amount-input";
+import { NaturalLanguageAmountInput } from "@/components/ui/natural-language-amount-textarea";
 import type { ParsedTransaction } from "@/lib/ai/parse-transaction";
 import { getAccountTypeIcon, type AccountOption } from "@/lib/accounts";
 import {
@@ -28,6 +28,7 @@ import {
   PARSE_RATE_LIMIT_MESSAGE,
   getMissingBankAccountLabel,
   getConfirmationHintText,
+  isSelectableCategory,
   AssetPurchaseNotice,
   submitCreateBankAccount,
   submitCreateCategory,
@@ -174,7 +175,7 @@ export function BatchAddTransactionForm({
           }
 
           const data = await res.json();
-          if (!res.ok) throw new Error(data.error || "خطا در پردازش متن.");
+          if (!res.ok) throw new Error(data.error || "متن پردازش نشد، دوباره تلاش کن.");
 
           updateRow(row.id, {
             isParsing: false,
@@ -191,7 +192,7 @@ export function BatchAddTransactionForm({
         } catch (err) {
           updateRow(row.id, {
             isParsing: false,
-            parseError: err instanceof Error ? err.message : "خطای ناشناخته رخ داد.",
+            parseError: err instanceof Error ? err.message : "یه مشکلی پیش اومد، دوباره تلاش کن.",
             lastParsedText: row.text,
           });
         }
@@ -336,17 +337,23 @@ export function BatchAddTransactionForm({
         {rows.map((row, index) => {
           const isStale = row.parsed !== null && row.text !== row.lastParsedText;
           const showPreview = row.parsed !== null && !isStale;
-          const rowCategories = showPreview ? categories.filter((c) => c.type === row.parsed!.type) : [];
+          const rowCategories = showPreview
+            ? categories.filter((c) => isSelectableCategory(c, row.parsed!.type, row.parsed!.category))
+            : [];
           const missingBankAccountLabel = showPreview ? getMissingBankAccountLabel(row.parsed, accounts) : null;
 
           return (
             <div key={row.id} className="rounded-2xl border border-border bg-surface p-3">
               <div className="flex items-center gap-2">
                 <span className="w-5 shrink-0 text-center text-xs text-muted">{index + 1}</span>
-                <input
-                  type="text"
+                {/* Same free-text "number embedded in a sentence" box as
+                    the single-transaction flow's textarea, so it gets the
+                    identical display-only separator treatment - `row.text`
+                    itself stays the plain string sent to
+                    /api/transactions/parse and stored as `rawInput`. */}
+                <NaturalLanguageAmountInput
                   value={row.text}
-                  onChange={(e) => updateRow(row.id, { text: e.target.value })}
+                  onChange={(text) => updateRow(row.id, { text })}
                   placeholder="مثلاً: ۵۰ هزار تومن ناهار خوردم"
                   disabled={isBusy}
                   className="flex-1 rounded-xl border border-border bg-background p-2.5 text-sm text-foreground outline-none focus:border-accent disabled:opacity-50"
@@ -391,7 +398,7 @@ export function BatchAddTransactionForm({
                               ? {
                                   ...r.parsed,
                                   type: t,
-                                  category: categories.find((c) => c.type === t)?.name ?? r.parsed.category,
+                                  category: categories.find((c) => isSelectableCategory(c, t, undefined))?.name ?? r.parsed.category,
                                 }
                               : r.parsed,
                           }))
@@ -406,17 +413,14 @@ export function BatchAddTransactionForm({
                   </div>
 
                   <div className="mt-2 flex gap-2">
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={formatNumber(row.parsed!.amount)}
+                    <AmountInput
+                      value={row.parsed!.amount}
                       disabled={isBusy}
-                      onChange={(e) => {
-                        const digits = toLatinDigits(e.target.value).replace(/[^0-9]/g, "");
+                      onChange={(amount) =>
                         updateRow(row.id, (r) => ({
-                          parsed: r.parsed ? { ...r.parsed, amount: digits ? Number(digits) : 0 } : r.parsed,
-                        }));
-                      }}
+                          parsed: r.parsed ? { ...r.parsed, amount } : r.parsed,
+                        }))
+                      }
                       className="w-1/2 rounded-lg border border-border bg-background p-2 text-sm tabular-fa outline-none focus:border-accent disabled:opacity-50"
                     />
                     <select

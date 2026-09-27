@@ -11,6 +11,7 @@ import {
   type AssetPurchaseInput,
 } from "@/lib/data/transactions";
 import { enrichTransactionWorkflow } from "@/lib/workflows/enrich-transaction";
+import { notifyIncomeSavingsSuggestion } from "@/lib/notifications/savings-suggestion";
 import type { CategoryType } from "@/lib/categories";
 import type { LivePricedAssetType } from "@/lib/assets";
 import {
@@ -27,6 +28,8 @@ import { checkRateLimit, TRANSACTION_PARSE_USER_RULE } from "@/lib/rate-limit";
 import { reportError } from "@/lib/observability/report-error";
 import { ERROR_TYPES } from "@/lib/observability/error-types";
 import { isPrismaErrorCode } from "@/lib/observability/classify-error";
+import { logger } from "@/lib/observability/logger"; // TEMP-LATENCY
+import { getRequestId } from "@/lib/observability/request-context"; // TEMP-LATENCY
 
 const VALID_SOURCES: TransactionSource[] = ["assistant-suggestion"];
 const LIVE_PRICED_ASSET_TYPES: LivePricedAssetType[] = ["gold", "usd", "bitcoin"];
@@ -105,7 +108,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const requestStartedAt = Date.now(); // TEMP-LATENCY
+  const getSessionStartedAt = Date.now(); // TEMP-LATENCY
   const session = await getSession();
+  const getSessionDuration = Date.now() - getSessionStartedAt; // TEMP-LATENCY
   if (!session) {
     return NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 });
   }
@@ -138,6 +144,10 @@ export async function POST(request: NextRequest) {
   // literal `true` is treated as false, same permissive-input handling as
   // every other body field above.
   const quick = body?.quick === true;
+  // Set by the add form when the user picked the date themselves on a quick
+  // submit - forwarded to the enrichment workflow so its AI pass keeps that
+  // date instead of re-deriving one from rawInput (see its keepDate option).
+  const dateIsManual = body?.dateIsManual === true;
   // See lib/data/transactions.ts's createTransaction() - set only when the
   // AI (lib/ai/parse-transaction.ts) or the user (via the add-transaction
   // form's checkbox) confirmed this transaction is an asset purchase.
@@ -162,6 +172,7 @@ export async function POST(request: NextRequest) {
   const date = dateInput && !Number.isNaN(Date.parse(dateInput)) ? new Date(dateInput) : new Date();
 
   try {
+    const createTransactionStartedAt = Date.now(); // TEMP-LATENCY
     const { asset, ...transaction } = await createTransaction(session.userId, {
       amount: Math.round(amount),
       type,
@@ -175,6 +186,7 @@ export async function POST(request: NextRequest) {
       enrichmentStatus: quick ? "pending" : undefined,
       assetPurchase,
     });
+    const createTransactionDuration = Date.now() - createTransactionStartedAt; // TEMP-LATENCY
 
     // Only fires for a transaction still actually "pending" right now -
     // this naturally covers both "not a quick submit at all" (enrichmentStatus
@@ -194,13 +206,27 @@ export async function POST(request: NextRequest) {
       try {
         const limit = checkRateLimit(`transaction-parse:user:${session.userId}`, TRANSACTION_PARSE_USER_RULE);
         if (limit.allowed) {
-          await start(enrichTransactionWorkflow, [session.userId, transaction.id, rawInput]);
+          const startWorkflowStartedAt = Date.now(); // TEMP-LATENCY
+          await start(enrichTransactionWorkflow, [session.userId, transaction.id, rawInput, { keepDate: dateIsManual }]);
+          logger.info( // TEMP-LATENCY
+            { // TEMP-LATENCY
+              requestId: getRequestId(), // TEMP-LATENCY
+              route: "transactions", // TEMP-LATENCY
+              userId: session.userId, // TEMP-LATENCY
+              step: "start(enrichTransactionWorkflow)", // TEMP-LATENCY
+              duration: Date.now() - startWorkflowStartedAt, // TEMP-LATENCY
+            }, // TEMP-LATENCY
+            "transactions POST step timing" // TEMP-LATENCY
+          ); // TEMP-LATENCY
         } else {
           // Same per-user AI-cost budget the live-preview endpoint enforces
           // (lib/rate-limit.ts) - quick-submit must not be a way around it.
           // The transaction itself is already saved either way; this just
-          // stops it spinning on "pending" forever.
-          await markEnrichmentFailed(session.userId, transaction.id);
+          // stops it spinning on "pending" forever. No AI parse was ever
+          // attempted here (unlike the workflow's own terminal-failure
+          // path), so markEnrichmentFailed's own heuristic fallback is the
+          // only correction this transaction ever gets - see its comment.
+          await markEnrichmentFailed(session.userId, transaction.id, rawInput);
         }
       } catch (enrichmentKickoffError) {
         reportError({
@@ -214,9 +240,19 @@ export async function POST(request: NextRequest) {
           error: enrichmentKickoffError,
           context: { operation: "start(enrichTransactionWorkflow)", transactionId: transaction.id },
         });
-        await markEnrichmentFailed(session.userId, transaction.id).catch(() => {});
+        await markEnrichmentFailed(session.userId, transaction.id, rawInput).catch(() => {});
       }
     }
+
+    // Phase 3 (docs/roadmap-status.md notifications work): reacts to a real
+    // income transaction (not one leg of an internal transfer) by pushing an
+    // "income_savings_suggestion" notification if the user has an active
+    // SavingsStrategy - see lib/notifications/savings-suggestion.ts's own
+    // doc comment for the full trigger conditions. Self-contained (never
+    // throws, reports its own failures) - awaited anyway, same as the
+    // enrichment-kickoff block above, since a serverless function's response
+    // can end the instance before an un-awaited promise finishes.
+    await notifyIncomeSavingsSuggestion(session.userId, transaction);
 
     // Same { transaction } shape and 201 status for a fresh create and an
     // idempotent replay (SEC-10) - deliberate: from the caller's point of
@@ -227,6 +263,17 @@ export async function POST(request: NextRequest) {
     // (null unless assetPurchase was set and this was a fresh create - see
     // createTransaction()'s own comment on why a replay can't echo it back)
     // and purely additive - no existing caller reads this key.
+    logger.info( // TEMP-LATENCY
+      { // TEMP-LATENCY
+        requestId: getRequestId(), // TEMP-LATENCY
+        route: "transactions", // TEMP-LATENCY
+        userId: session.userId, // TEMP-LATENCY
+        duration: Date.now() - requestStartedAt, // TEMP-LATENCY
+        getSessionDuration, // TEMP-LATENCY
+        createTransactionDuration, // TEMP-LATENCY
+      }, // TEMP-LATENCY
+      "Transaction create request completed" // TEMP-LATENCY
+    ); // TEMP-LATENCY
     return NextResponse.json({ transaction, asset: asset ?? null }, { status: 201 });
   } catch (error) {
     if (error instanceof InvalidCategoryError) {

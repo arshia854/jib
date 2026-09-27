@@ -4,6 +4,7 @@ vi.mock("@/lib/observability/report-error", () => ({ reportError: vi.fn() }));
 
 import { getLivePrices, LivePriceUnavailableError } from "@/lib/prices/get-live-prices";
 import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
 
 function stubEnv() {
   vi.stubEnv("NERKH_API_KEY", "test-key");
@@ -31,14 +32,28 @@ function mockNerkhFetch(prices: { gold: number; usd: number; btc: number }) {
   });
 }
 
-function fakeClient(overrides: { cached?: unknown; upsert?: ReturnType<typeof vi.fn> }) {
+function fakeClient(overrides: { cached?: unknown; upsert?: ReturnType<typeof vi.fn>; update?: ReturnType<typeof vi.fn> }) {
   return {
     livePriceCache: {
       findUnique: vi.fn().mockResolvedValue(overrides.cached ?? null),
       upsert: overrides.upsert ?? vi.fn(),
+      update: overrides.update ?? vi.fn(),
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
+}
+
+// The exact shape observed in production logs (see get-live-prices.ts's
+// QuotaExceededError comment) - all three per-symbol requests get the same
+// 460 response since nerkh.io's quota is shared across symbols, not
+// per-endpoint. A fresh Response per call, not one shared instance
+// (`mockResolvedValue` would hand out the same object to all three
+// concurrent fetchNerkhSymbol calls) - a Response body can only be read
+// once, and getSinglePrice reads it via `.text()` on the non-ok path.
+function mockQuotaExceededFetch() {
+  return vi.fn().mockImplementation(
+    () => Promise.resolve(new Response(JSON.stringify({ code: 460, error: "QuotaExceeded", message: "Daily quota exceeded" }), { status: 460 }))
+  );
 }
 
 describe("getLivePrices", () => {
@@ -198,6 +213,125 @@ describe("getLivePrices", () => {
       await getLivePrices(client);
       expect(fetchMock).toHaveBeenCalledTimes(6);
       expect(upsert).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Quota-exhaustion cooldown: once nerkh.io's specific 460/QuotaExceeded
+  // shape is seen, no further nerkh.io requests are made until the
+  // cooldown expires, and only the call that first detects it alerts.
+  describe("quota-exceeded cooldown", () => {
+    it("detects a quota-exceeded (460) response, sets quotaExceededUntil on the cache row, and fires exactly one alert", async () => {
+      stubEnv();
+      const fetchMock = mockQuotaExceededFetch();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const update = vi.fn().mockResolvedValue(undefined);
+      const client = fakeClient({
+        cached: {
+          goldGramPricePerUnit: 10n,
+          usdPricePerUnit: 20n,
+          bitcoinPricePerUnit: 30n,
+          // Older than CACHE_TTL_MS so a refresh is attempted.
+          fetchedAt: new Date(Date.now() - 60 * 60 * 1000),
+          quotaExceededUntil: null,
+        },
+        update,
+      });
+
+      const result = await getLivePrices(client);
+
+      // All three symbols were attempted (quota exhaustion is only detected
+      // once a request is actually made and 460 comes back).
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(result).toMatchObject({ goldGramPricePerUnit: 10, usdPricePerUnit: 20, bitcoinPricePerUnit: 30, stale: true });
+
+      expect(update).toHaveBeenCalledTimes(1);
+      const updateCall = update.mock.calls[0][0];
+      expect(updateCall.where).toEqual({ id: 1 });
+      expect(updateCall.data.quotaExceededUntil).toBeInstanceOf(Date);
+      expect(updateCall.data.quotaExceededUntil.getTime()).toBeGreaterThan(Date.now());
+
+      expect(reportError).toHaveBeenCalledTimes(1);
+      expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ errorType: ERROR_TYPES.QUOTA_EXCEEDED_ERROR }));
+    });
+
+    it("makes zero HTTP requests and fires zero additional alerts on a later call while still in cooldown", async () => {
+      stubEnv();
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = fakeClient({
+        cached: {
+          goldGramPricePerUnit: 10n,
+          usdPricePerUnit: 20n,
+          bitcoinPricePerUnit: 30n,
+          fetchedAt: new Date(Date.now() - 60 * 60 * 1000),
+          // Cooldown already active from an earlier exhaustion.
+          quotaExceededUntil: new Date(Date.now() + 60 * 60 * 1000),
+        },
+      });
+
+      const result = await getLivePrices(client);
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ goldGramPricePerUnit: 10, usdPricePerUnit: 20, bitcoinPricePerUnit: 30, stale: true });
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it("attempts a fresh fetch normally once the cooldown has expired", async () => {
+      stubEnv();
+      const fetchMock = mockNerkhFetch({ gold: 5_000_000, usd: 700_000, btc: 80_000_000_000 });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const upsert = vi.fn().mockImplementation(({ create }) => ({ ...create }));
+      const client = fakeClient({
+        cached: {
+          goldGramPricePerUnit: 10n,
+          usdPricePerUnit: 20n,
+          bitcoinPricePerUnit: 30n,
+          fetchedAt: new Date(Date.now() - 60 * 60 * 1000),
+          // Cooldown from an earlier exhaustion has already expired.
+          quotaExceededUntil: new Date(Date.now() - 60 * 1000),
+        },
+        upsert,
+      });
+
+      const result = await getLivePrices(client);
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(upsert).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ goldGramPricePerUnit: 5_000_000, usdPricePerUnit: 700_000, bitcoinPricePerUnit: 80_000_000_000, stale: false });
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it("leaves a non-460 failure unaffected: reports the generic API_ERROR and retries on every subsequent call", async () => {
+      stubEnv();
+      const fetchMock = vi.fn().mockResolvedValue(new Response("server error", { status: 500 }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = fakeClient({
+        cached: {
+          goldGramPricePerUnit: 10n,
+          usdPricePerUnit: 20n,
+          bitcoinPricePerUnit: 30n,
+          fetchedAt: new Date(Date.now() - 60 * 60 * 1000),
+          quotaExceededUntil: null,
+        },
+      });
+
+      const first = await getLivePrices(client);
+      expect(first).toMatchObject({ stale: true });
+      expect(reportError).toHaveBeenCalledTimes(1);
+      expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ errorType: ERROR_TYPES.API_ERROR }));
+
+      // No cooldown was recorded (this isn't a QuotaExceededError), so a
+      // second call retries the fetch again exactly as today - the whole
+      // point of this task being scoped to the 460/QuotaExceeded case only.
+      const second = await getLivePrices(client);
+      expect(second).toMatchObject({ stale: true });
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      expect(reportError).toHaveBeenCalledTimes(2);
+      expect(reportError).toHaveBeenNthCalledWith(2, expect.objectContaining({ errorType: ERROR_TYPES.API_ERROR }));
     });
   });
 });

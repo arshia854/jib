@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession, LEGACY_SESSION_COOKIE, isNextAuthSessionCookieName } from "@/lib/auth/session";
 import { checkRateLimit, getClientIp, rateLimitResponse, GENERAL_API_IP_RULE } from "@/lib/rate-limit";
-import { REQUEST_ID_HEADER, runWithRequestContext } from "@/lib/observability/request-context";
+import { REQUEST_ID_HEADER, runWithRequestContext, getRequestId } from "@/lib/observability/request-context";
+import { logger } from "@/lib/observability/logger"; // TEMP-LATENCY
 
 export async function proxy(request: NextRequest) {
   // Reuse an upstream-supplied id (a CDN/load balancer, or - in practice
@@ -63,7 +64,18 @@ async function handleProxy(request: NextRequest, { next, withRequestId }: ProxyH
     }
 
     if (pathname.startsWith("/api/admin/")) {
+      const adminGetSessionStartedAt = Date.now(); // TEMP-LATENCY
       const session = await getSession();
+      logger.info( // TEMP-LATENCY
+        { // TEMP-LATENCY
+          requestId: getRequestId(), // TEMP-LATENCY
+          route: "proxy", // TEMP-LATENCY
+          userId: session?.userId, // TEMP-LATENCY
+          step: "getSession", // TEMP-LATENCY
+          duration: Date.now() - adminGetSessionStartedAt, // TEMP-LATENCY
+        }, // TEMP-LATENCY
+        "proxy step timing" // TEMP-LATENCY
+      ); // TEMP-LATENCY
       if (!session) {
         return withRequestId(NextResponse.json({ error: "ابتدا وارد شوید." }, { status: 401 }));
       }
@@ -75,7 +87,18 @@ async function handleProxy(request: NextRequest, { next, withRequestId }: ProxyH
     return next();
   }
 
+  const pageGetSessionStartedAt = Date.now(); // TEMP-LATENCY
   const session = await getSession();
+  logger.info( // TEMP-LATENCY
+    { // TEMP-LATENCY
+      requestId: getRequestId(), // TEMP-LATENCY
+      route: "proxy", // TEMP-LATENCY
+      userId: session?.userId, // TEMP-LATENCY
+      step: "getSession", // TEMP-LATENCY
+      duration: Date.now() - pageGetSessionStartedAt, // TEMP-LATENCY
+    }, // TEMP-LATENCY
+    "proxy step timing" // TEMP-LATENCY
+  ); // TEMP-LATENCY
 
   const isAuthRoute = pathname === "/login" || pathname === "/verify";
 
