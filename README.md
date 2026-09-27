@@ -9,10 +9,11 @@ finances.
 ## Tech stack
 
 - Next.js 16 (App Router, Route Handlers, `proxy.ts`) + TypeScript
-- SQLite via Prisma ORM 7 (`@prisma/adapter-better-sqlite3`)
+- Turso (libSQL) via Prisma ORM 7 (`@prisma/adapter-libsql`)
 - Tailwind CSS v4
-- OpenRouter for all AI calls (transaction parsing + financial chat)
-- Phone/OTP auth with JWT session cookies (`jose`)
+- NVIDIA NIM for all AI calls (transaction parsing + financial chat) - an
+  OpenAI-compatible API, see `lib/nvidia-ai.ts`
+- Phone/OTP + email + Google auth (NextAuth/Auth.js v5) with JWT sessions
 - PWA: web manifest, installable (with an in-app install prompt), offline
   viewing of previously-loaded pages
 - RTL, Persian (Vazirmatn font), Jalali (Shamsi) calendar throughout
@@ -22,12 +23,22 @@ finances.
 ```bash
 npm install
 cp .env.example .env
-# edit .env: set OPENROUTER_API_KEY, and AUTH_SECRET (openssl rand -base64 48)
-
-npx prisma migrate dev   # creates dev.db and applies the schema
+# edit .env: set TURSO_DATABASE_URL/TURSO_AUTH_TOKEN, NVIDIA_API_KEY, and
+# AUTH_SECRET/OTP_SECRET/LEGACY_SESSION_SECRET (openssl rand -base64 48 each)
 
 npm run dev
 ```
+
+The database is Turso (libSQL), not a local file - get `TURSO_DATABASE_URL`/
+`TURSO_AUTH_TOKEN` for an existing dev database via the Turso CLI
+(`turso db show <db-name> --url`, `turso db tokens create <db-name>`), same
+as `.env.example` documents. **`npx prisma migrate dev` / `db push` do not
+work against this project's database** (Prisma's CLI can't parse a
+`libsql://` connection string - see `AGENTS.md` for the root cause and the
+actual process for applying schema changes). You don't need any of this
+just to run the test suite, though: `npm run test` always points at an
+isolated, disposable local SQLite file instead (`test/setup/global-setup.ts`
+applies every migration to it automatically), regardless of what's in `.env`.
 
 Open [http://localhost:3000](http://localhost:3000) for the marketing landing
 page; the app itself lives under `/app` and requires signing in from `/login`.
@@ -37,10 +48,11 @@ OTP codes are sent via Melipayamak's pattern-based SMS API once
 are all set (see `.env.example`). Until then - e.g. in dev, or before
 Melipayamak authentication is approved - `sendOtpSms` in `lib/auth/otp.ts`
 falls back to printing the code to the server console
-(`[mock SMS] OTP for 0912...: 123456`). Without `OPENROUTER_API_KEY` set,
-everything else works except the two AI-powered routes (add-transaction
-parsing and the chat assistant), which fail with a clear Persian error
-message pointing at the missing key.
+(`[mock SMS] OTP for 0912...: 123456`) outside of production, and fails
+closed in production. Without `NVIDIA_API_KEY` set, everything else works
+except the two AI-powered routes (add-transaction parsing and the chat
+assistant), which fail with a clear Persian error message pointing at the
+missing key.
 
 ## Admin access
 
@@ -79,10 +91,10 @@ app/
     chat/                         AI financial chat
   api/
     auth/                        send-otp, verify-otp, onboarding, logout
-    transactions/parse/          POST: OpenRouter -> structured transaction JSON
+    transactions/parse/          POST: NVIDIA NIM -> structured transaction JSON
     transactions/                GET/POST transactions, [id] DELETE
     categories/                   GET/POST categories, [id] PATCH/DELETE
-    chat/                         POST: streams an OpenRouter chat completion
+    chat/                         POST: streams an NVIDIA NIM chat completion
   manifest.ts                    PWA manifest
 proxy.ts                        Route protection (Next 16's middleware replacement)
 components/
@@ -93,10 +105,10 @@ lib/
   auth/                         Session (JWT/cookies), OTP, phone validation
   data/                         Server-side Prisma query helpers (all user-scoped)
   ai/parse-transaction.ts       Transaction-parsing prompt + validation
-  openrouter.ts                  OpenRouter client (chat + streaming)
+  nvidia-ai.ts                   NVIDIA NIM client (chat + streaming)
   format.ts                      Jalali date + Persian number formatting
   prisma.ts                      Prisma client singleton
-prisma/schema.prisma            User, Account, Transaction, Category, ChatMessage
+prisma/schema.prisma            User, FinanceAccount, Transaction, Category, ChatMessage, ...
 public/sw.js                    Service worker (offline page cache)
 ```
 
@@ -140,7 +152,6 @@ override:
   network-first-with-cache-fallback for full page loads, so previously-visited
   pages stay viewable offline. It does not cache Next's client-side RSC
   navigation payloads (that needs a more involved setup, e.g. Serwist).
-- **AI model**: defaults to `google/gemini-2.5-flash` via `OPENROUTER_MODEL`
-  in `.env` — change it to any OpenRouter model slug.
-# jibo
-# jibo
+- **AI model**: defaults to `meta/llama-3.1-70b-instruct` via `NVIDIA_MODEL`
+  in `.env` — change it to any model NVIDIA NIM (https://build.nvidia.com)
+  serves.

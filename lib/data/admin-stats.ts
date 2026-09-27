@@ -1,3 +1,4 @@
+import "server-only";
 import { toJalaali, toGregorian } from "jalaali-js";
 import { prisma } from "@/lib/prisma";
 import { requireAdminSession } from "@/lib/auth/session";

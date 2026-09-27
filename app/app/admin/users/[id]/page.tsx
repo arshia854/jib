@@ -1,11 +1,32 @@
 import Link from "next/link";
+import nextDynamic from "next/dynamic";
 import { notFound } from "next/navigation";
 import { getUserDetailForAdmin, AdminUserNotFoundError } from "@/lib/data/admin-users";
 import { formatJalaaliDate, formatNumber } from "@/lib/format";
 import { BackIcon } from "@/components/icons";
-import { UserDangerZone } from "@/components/admin/user-danger-zone";
+import { Skeleton } from "@/components/skeleton";
 
 export const dynamic = "force-dynamic";
+
+// Lazy-loaded (4.3.3, perf finding): a rarely-used, destructive-action
+// panel (block/unblock, delete user) - deferring it means the user's own
+// summary card above renders without waiting on this chunk too. As with
+// the default-categories-manager (see that page for the fuller note), this
+// route already has no loading.tsx of its own, and this component's chunk
+// was already excluded from non-admin routes' bundles by Next's per-route
+// code splitting regardless of this wrapping.
+const UserDangerZone = nextDynamic(
+  () => import("@/components/admin/user-danger-zone").then((mod) => mod.UserDangerZone),
+  {
+    loading: () => (
+      <div className="space-y-3 rounded-2xl border border-border bg-surface p-4">
+        <Skeleton className="h-4 w-16" />
+        <Skeleton className="h-9 w-full rounded-xl" />
+        <Skeleton className="h-9 w-full rounded-xl" />
+      </div>
+    ),
+  }
+);
 
 interface PageProps {
   params: Promise<{ id: string }>;

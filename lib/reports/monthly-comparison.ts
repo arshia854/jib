@@ -1,5 +1,6 @@
 import { toGregorian } from "jalaali-js";
 import { prisma } from "@/lib/prisma";
+import { periodToGregorianRange, type ReportGranularity } from "./period-range";
 
 export interface CategoryComparison {
   category: string;
@@ -7,6 +8,7 @@ export interface CategoryComparison {
   currentAmount: number;
   percentChange: number | null; // null when previousAmount is 0 and currentAmount is 0
   isIncrease: boolean;
+  isEssential: boolean;
 }
 
 export interface MonthlyComparisonResult {
@@ -20,8 +22,14 @@ export interface MonthlyComparisonResult {
 
 const JALAALI_MONTH_FORMAT = /^(\d{4})-(\d{2})$/;
 
-/** Gregorian [start, end) bounds of a Jalaali month given as "YYYY-MM". */
-function jalaaliMonthToGregorianRange(month: string): { start: Date; end: Date } {
+/**
+ * Gregorian [start, end) bounds of a Jalaali month given as "YYYY-MM".
+ *
+ * Exported so lib/reports/period-range.ts can delegate its "month" branch
+ * here instead of duplicating this logic — the only consumer outside this
+ * file today is periodToGregorianRange().
+ */
+export function jalaaliMonthToGregorianRange(month: string): { start: Date; end: Date } {
   const match = JALAALI_MONTH_FORMAT.exec(month);
   if (!match) {
     throw new Error(`ماه نامعتبر است: "${month}". فرمت مورد انتظار "YYYY-MM" جلالی است.`);
@@ -49,24 +57,45 @@ function computePercentChange(previousAmount: number, currentAmount: number): nu
   return Math.round(((currentAmount - previousAmount) / previousAmount) * 100);
 }
 
-async function sumExpensesByCategory(userId: number, start: Date, end: Date): Promise<Map<number, number>> {
+/**
+ * Expense totals per category over [start, end). Exported for reuse by
+ * lib/reports/today-spending.ts.
+ *
+ * Excludes Category.isTransfer categories - a transfer between the user's
+ * own accounts is not real spending, so it must not inflate these totals
+ * (or, transitively, getComparison's totalCurrent/totalPrevious and
+ * generateHighlights' savings/warning messages built on top of them).
+ */
+export async function sumExpensesByCategory(userId: number, start: Date, end: Date): Promise<Map<number, number>> {
   const groups = await prisma.transaction.groupBy({
     by: ["categoryId"],
-    where: { userId, type: "expense", date: { gte: start, lt: end } },
+    where: { userId, type: "expense", date: { gte: start, lt: end }, category: { isTransfer: false } },
     _sum: { amount: true },
   });
 
   return new Map(groups.map((g) => [g.categoryId, g._sum.amount ?? 0]));
 }
 
-export async function getMonthlyComparison(
+/**
+ * Category-by-category spending comparison between two periods of the same
+ * granularity (day/week/month/year — see lib/reports/period-range.ts for the
+ * "YYYY-MM-DD" / "YYYY-Www" / "YYYY-MM" / "YYYY" key formats).
+ *
+ * The result's `currentMonth`/`previousMonth` fields keep their original
+ * names for every granularity (not just "month") so the existing
+ * MonthlyComparisonResult shape, and everything that already consumes it
+ * (MonthlyComparisonReport, generateHighlights, getMonthlyComparison's own
+ * test suite), needs no changes.
+ */
+export async function getComparison(
   userId: string,
-  currentMonth: string,
-  previousMonth: string
+  currentPeriod: string,
+  previousPeriod: string,
+  granularity: ReportGranularity
 ): Promise<MonthlyComparisonResult> {
   const userIdNum = Number(userId);
-  const currentRange = jalaaliMonthToGregorianRange(currentMonth);
-  const previousRange = jalaaliMonthToGregorianRange(previousMonth);
+  const currentRange = periodToGregorianRange(currentPeriod, granularity);
+  const previousRange = periodToGregorianRange(previousPeriod, granularity);
 
   const [currentByCategory, previousByCategory] = await Promise.all([
     sumExpensesByCategory(userIdNum, currentRange.start, currentRange.end),
@@ -78,10 +107,10 @@ export async function getMonthlyComparison(
   const categoryRecords = categoryIds.size
     ? await prisma.category.findMany({
         where: { id: { in: [...categoryIds] } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, isEssential: true },
       })
     : [];
-  const nameById = new Map(categoryRecords.map((c) => [c.id, c.name]));
+  const recordById = new Map(categoryRecords.map((c) => [c.id, c]));
 
   const categories: CategoryComparison[] = [];
   let totalPrevious = 0;
@@ -95,23 +124,37 @@ export async function getMonthlyComparison(
 
     if (previousAmount === 0 && currentAmount === 0) continue;
 
+    const record = recordById.get(categoryId);
     categories.push({
-      category: nameById.get(categoryId) ?? "نامشخص",
+      category: record?.name ?? "نامشخص",
       previousAmount,
       currentAmount,
       percentChange: computePercentChange(previousAmount, currentAmount),
       isIncrease: currentAmount > previousAmount,
+      // Same default as Category.isEssential's own schema default (prisma/schema.prisma) -
+      // record should always be found since categoryIds is derived from these same rows,
+      // this is only a defensive fallback.
+      isEssential: record?.isEssential ?? true,
     });
   }
 
   categories.sort((a, b) => b.currentAmount - a.currentAmount);
 
   return {
-    currentMonth,
-    previousMonth,
+    currentMonth: currentPeriod,
+    previousMonth: previousPeriod,
     categories,
     totalPrevious,
     totalCurrent,
     totalPercentChange: computePercentChange(totalPrevious, totalCurrent),
   };
+}
+
+/** Thin "month" wrapper over getComparison() — kept so existing callers and tests need no changes. */
+export async function getMonthlyComparison(
+  userId: string,
+  currentMonth: string,
+  previousMonth: string
+): Promise<MonthlyComparisonResult> {
+  return getComparison(userId, currentMonth, previousMonth, "month");
 }

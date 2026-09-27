@@ -4,7 +4,7 @@ import Google from "next-auth/providers/google";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
-import { createOtpToken, verifyOtpToken, OTP_COOKIE, OTP_TTL_SECONDS, MAX_ATTEMPTS } from "@/lib/auth/otp";
+import { getOtpChallengePhone, verifyOtpChallenge, OTP_COOKIE, OTP_TTL_SECONDS } from "@/lib/auth/otp";
 import { verifyPassword } from "@/lib/auth/password";
 import { checkRateLimit, getClientIp, EMAIL_LOGIN_EMAIL_RULE, EMAIL_LOGIN_IP_RULE, OTP_VERIFY_PHONE_RULE } from "@/lib/rate-limit";
 import {
@@ -21,6 +21,72 @@ import {
 // the signIn callback - only what we actually read from it.
 interface GoogleProfile {
   email_verified?: boolean;
+}
+
+// Compared against on the email-password provider's "no such user / no
+// password set" path, so that path costs one bcrypt compare just like a
+// wrong password for a real account does - otherwise the response time
+// alone reveals whether an email is registered. Generated once with
+// bcryptjs's hashSync at cost 12 (lib/auth/password.ts's SALT_ROUNDS - the
+// cost must match real hashes for the timing to match; auth.test.ts checks
+// this) and inlined rather than computed at import time, since a cost-12
+// hashSync blocks the event loop for over a second and this module is
+// imported by every session check. The plaintext is irrelevant; the
+// result of the compare is always discarded.
+export const DUMMY_PASSWORD_HASH = "$2b$12$Dd5DroovH7yvMJunnGrfbeyBpexWL/bLf8DpPT1KYyhsX/48ZTYn.";
+
+// Extracted out of the Credentials({...}) config below (Phase 16) purely so
+// it's directly unit-testable - NextAuth's own `NextAuth({...})` call gives
+// no way to reach back into a provider's `authorize()` closure from outside
+// (it's consumed internally, not exposed on the returned `{ handlers, auth,
+// ... }`), and exercising it only through `handlers.POST` would mean
+// reimplementing NextAuth's own CSRF/cookie-encoding machinery just to
+// drive a test - exactly what the roadmap's own Phase 16 prompt says not to
+// build. This is a pure extraction: same body, same behavior, just a named
+// export instead of an inline closure, so the "phone-otp" provider below is
+// unchanged at runtime.
+export async function authorizePhoneOtp(credentials: Partial<Record<"code", unknown>> | undefined, request: Request) {
+  const code = typeof credentials?.code === "string" ? credentials.code.trim() : "";
+  if (!/^\d{6}$/.test(code)) throw new OtpInvalidFormatError();
+
+  const store = await cookies();
+  const challengeId = store.get(OTP_COOKIE)?.value ?? "";
+  const challengePhone = getOtpChallengePhone(challengeId);
+  if (!challengePhone) throw new OtpExpiredError();
+
+  const verifyLimit = checkRateLimit(`otp-verify:phone:${challengePhone}`, OTP_VERIFY_PHONE_RULE);
+  if (!verifyLimit.allowed) throw new OtpRateLimitedError();
+
+  // Code comparison and attempt counting happen entirely server-side -
+  // nothing client-supplied besides the submitted code is trusted.
+  const result = verifyOtpChallenge(challengeId, code);
+  if (result.status === "expired") throw new OtpExpiredError();
+  if (result.status === "max_attempts") {
+    store.delete(OTP_COOKIE);
+    throw new OtpMaxAttemptsError();
+  }
+  if (result.status === "wrong_code") {
+    // Same challenge id; re-set only to refresh maxAge in step with the
+    // server-side TTL, which restarts on each wrong attempt.
+    store.set(OTP_COOKIE, challengeId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: OTP_TTL_SECONDS,
+    });
+    throw new OtpWrongCodeError(result.remainingAttempts);
+  }
+
+  store.delete(OTP_COOKIE);
+
+  let user = await prisma.user.findUnique({ where: { phoneNumber: result.phone } });
+  if (!user) {
+    user = await prisma.user.create({ data: { phoneNumber: result.phone } });
+  }
+
+  void request; // available for IP/UA logging if ever needed
+  return { ...user, id: String(user.id) };
 }
 
 export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
@@ -47,45 +113,7 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
       credentials: {
         code: { label: "کد تایید", type: "text" },
       },
-      async authorize(credentials, request) {
-        const code = typeof credentials?.code === "string" ? credentials.code.trim() : "";
-        if (!/^\d{6}$/.test(code)) throw new OtpInvalidFormatError();
-
-        const store = await cookies();
-        const token = store.get(OTP_COOKIE)?.value;
-        const payload = token ? await verifyOtpToken(token) : null;
-        if (!payload) throw new OtpExpiredError();
-
-        const verifyLimit = checkRateLimit(`otp-verify:phone:${payload.phone}`, OTP_VERIFY_PHONE_RULE);
-        if (!verifyLimit.allowed) throw new OtpRateLimitedError();
-
-        if (payload.attempts >= MAX_ATTEMPTS) {
-          store.delete(OTP_COOKIE);
-          throw new OtpMaxAttemptsError();
-        }
-
-        if (payload.code !== code) {
-          const retryToken = await createOtpToken(payload.phone, payload.code, payload.attempts + 1);
-          store.set(OTP_COOKIE, retryToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            path: "/",
-            maxAge: OTP_TTL_SECONDS,
-          });
-          throw new OtpWrongCodeError(MAX_ATTEMPTS - payload.attempts - 1);
-        }
-
-        store.delete(OTP_COOKIE);
-
-        let user = await prisma.user.findUnique({ where: { phoneNumber: payload.phone } });
-        if (!user) {
-          user = await prisma.user.create({ data: { phoneNumber: payload.phone } });
-        }
-
-        void request; // available for IP/UA logging if ever needed
-        return { ...user, id: String(user.id) };
-      },
+      authorize: authorizePhoneOtp,
     }),
 
     Credentials({
@@ -106,7 +134,10 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
         if (!ipLimit.allowed || !emailLimit.allowed) throw new EmailLoginRateLimitedError();
 
         const user = await prisma.user.findUnique({ where: { email } });
-        if (!user || !user.passwordHash) throw new InvalidEmailPasswordError();
+        if (!user || !user.passwordHash) {
+          await verifyPassword(password, DUMMY_PASSWORD_HASH);
+          throw new InvalidEmailPasswordError();
+        }
 
         const valid = await verifyPassword(password, user.passwordHash);
         if (!valid) throw new InvalidEmailPasswordError();
@@ -160,8 +191,23 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
 
       // The Google email matches an existing jib account that was created
       // via phone OTP or email/password and has never linked Google before.
-      // Google has verified this email belongs to whoever is signing in, so
-      // it's safe to link the two accounts instead of creating a duplicate.
+      //
+      // Google verifying the email only proves *this* Google user owns it -
+      // not that whoever created the existing jib row did. /api/auth/register
+      // creates an email+password account with no ownership check at all
+      // (emailVerified stays null), so linking unconditionally here was an
+      // account pre-hijack: an attacker registers victim@gmail.com with a
+      // password of their choosing, the victim later signs in with Google,
+      // gets silently linked into that same row, and starts entering real
+      // financial data the attacker can still read by logging in with their
+      // known password. So only link when the existing row has no attacker-
+      // settable credential: either this app has verified its email, or it
+      // has no password at all. Otherwise refuse the sign-in (surfaces as
+      // AccessDenied on /login) - same outcome as Auth.js's own default
+      // refusal for an ambiguous email match.
+      if (!existingUser.emailVerified && existingUser.passwordHash) return false;
+
+      // Safe to link the two accounts instead of creating a duplicate.
       await prisma.account.create({
         data: {
           userId: existingUser.id,

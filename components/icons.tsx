@@ -24,10 +24,7 @@ export function HomeIcon(props: IconProps) {
 export function ListIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
-      <path d="M8 6h12M8 12h12M8 18h12" />
-      <circle cx="4" cy="6" r="1.2" fill="currentColor" stroke="none" />
-      <circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none" />
-      <circle cx="4" cy="18" r="1.2" fill="currentColor" stroke="none" />
+      <path d="M4 7h16M4 12h16M4 17h10" />
     </svg>
   );
 }
@@ -108,10 +105,29 @@ export function CheckIcon(props: IconProps) {
   );
 }
 
+export function CalendarIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="4" y="5.5" width="16" height="14.5" rx="2" />
+      <path d="M4 10h16M8.5 3.5v4M15.5 3.5v4" />
+    </svg>
+  );
+}
+
 export function FilterIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
       <path d="M4 6h16M7 12h10M10 18h4" />
+    </svg>
+  );
+}
+
+// Dropdown affordance (transaction-filter-bar.tsx's styled <select>s) - a
+// plain chevron, not ArrowDownIcon, which already means "expense" elsewhere.
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="m6 9.5 6 6 6-6" />
     </svg>
   );
 }
@@ -132,6 +148,15 @@ export function BackIcon(props: IconProps) {
   );
 }
 
+export function UserIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="8" r="3.5" />
+      <path d="M5 20c0-3.6 3.1-6.5 7-6.5s7 2.9 7 6.5" />
+    </svg>
+  );
+}
+
 export function WalletIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
@@ -147,6 +172,56 @@ export function SparklesIcon(props: IconProps) {
     <svg {...base} {...props}>
       <path d="m12 3 1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3Z" />
       <path d="M19 15.5 19.7 17.5 21.5 18 19.7 18.5 19 20.5 18.3 18.5 16.5 18 18.3 17.5 19 15.5Z" />
+    </svg>
+  );
+}
+
+// "ثبت سریع" (quick submit, see add-transaction-form.tsx) - a lightning
+// bolt reads as "instant" the same way it does everywhere else, distinct at
+// a glance from SparklesIcon's "AI-generated" meaning used on the live
+// preview above it.
+export function ZapIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M13 3 5 13.5h5.5L11 21l8-10.5h-5.5L13 3Z" strokeLinejoin="round" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function RefreshIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 12a8 8 0 0 1 14.5-4.6M20 12a8 8 0 0 1-14.5 4.6" />
+      <path d="M18.5 3v4.5H14M5.5 21v-4.5H10" />
+    </svg>
+  );
+}
+
+// "محاسبه‌گر سریع" (quick calculator, see components/assets/quick-price-calculator.tsx).
+export function CalculatorIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="6" y="3.5" width="12" height="17" rx="2" />
+      <path d="M8.5 7h7" />
+      <circle cx="8.7" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="15.3" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="8.7" cy="15.5" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="15.5" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="15.3" cy="15.5" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+// Goals tab (see app/app/dashboard/page.tsx) - a concentric-circles
+// target/bullseye reads as "aim/goal" at a glance, distinct from WalletIcon
+// (assets) and ListIcon (transactions) used alongside it in the same grid.
+export function TargetIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="5" />
+      <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
     </svg>
   );
 }
@@ -256,6 +331,44 @@ export function PhoneIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>
       <path d="M6.5 3.5h3l1.5 4-2 1.5a11 11 0 0 0 5.5 5.5l1.5-2 4 1.5v3a2 2 0 0 1-2.2 2A17.5 17.5 0 0 1 4.5 5.7a2 2 0 0 1 2-2.2Z" />
+    </svg>
+  );
+}
+
+export function LockIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="5" y="10.5" width="14" height="9" rx="2" />
+      <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+      <circle cx="12" cy="15" r="1.1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+// Phase A3 (docs/roadmap-status.md savings roadmap): two opposing
+// horizontal arrows - the internal-transfer entry point (accounts-manager.tsx)
+// and the merged transfer list row (transfer-row.tsx) both use this rather
+// than reusing ArrowUpIcon/ArrowDownIcon, which already mean "income"/
+// "expense" everywhere else in this codebase (transaction-row.tsx, month-summary-card.tsx) -
+// a transfer is neither, and reusing either would misleadingly imply it is.
+export function TransferIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 8h13M13 4l4 4-4 4" />
+      <path d="M20 16H7M11 12l-4 4 4 4" />
+    </svg>
+  );
+}
+
+// Savings-specific dashboard card icon (savings-card.tsx) - distinct from
+// WalletIcon (already balance-card.tsx's "total balance" icon) so the two
+// gradient hero cards aren't visually identical at a glance.
+export function PiggyBankIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 13a5 5 0 0 1 5-5h6.5a4.5 4.5 0 0 1 3 7.87V19h-3v-2H9v2H6v-3.3A5 5 0 0 1 4 13Z" />
+      <circle cx="15" cy="10.5" r="0.9" fill="currentColor" stroke="none" />
+      <path d="M9 8V6.5M18.5 9.5 21 8" />
     </svg>
   );
 }

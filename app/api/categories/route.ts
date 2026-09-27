@@ -2,28 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import {
   listCategoriesWithUsage,
-  listCategories,
-  listCategoriesCreatedSince,
-  findCategoryByNameAndType,
   createCategory,
+  resolveOrCreateCategoryFromSuggestion,
+  CategoryCreationRateLimitedError,
+  InvalidParentCategoryError,
+  DuplicateCategoryError,
 } from "@/lib/data/categories";
-import { findSimilarCategory, resolveNewCategoryIcon, type CategoryType } from "@/lib/categories";
-import type { CategoryOption } from "@/lib/ai/parse-transaction";
+import type { CategoryType } from "@/lib/categories";
 import { rateLimitResponse } from "@/lib/rate-limit";
-
-// The ai-suggestion path never receives a color from the client (see the
-// "Required body fields" note below), so newly-created categories there all
-// get this same slate-gray - the same generic/miscellaneous tone already
-// used for the seeded "سایر" bucket and utility subcategories (prisma/seed.ts).
-const AI_SUGGESTION_DEFAULT_COLOR = "#64748B";
-
-// Rolling-24h cap on categories created via source: "ai-suggestion" (the
-// auto-create-on-accept flow for the AI's newCategorySuggestion) - bounds
-// category sprawl from repeated acceptances. Does not apply to source:
-// "manual" (the Settings > Categories screen, components/categories/categories-manager.tsx),
-// which keeps its pre-existing, unrestricted contract.
-const MAX_CATEGORIES_PER_24H = 10;
-const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000;
+import { MAX_NAME_LENGTH, MAX_ICON_LENGTH } from "@/lib/limits";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
+import { isPrismaErrorCode } from "@/lib/observability/classify-error";
 
 // P2002 is Prisma's standard unique-constraint code for its native query
 // engine, but this project's driver adapter (@prisma/adapter-libsql, see
@@ -68,7 +58,7 @@ export async function POST(request: NextRequest) {
   const type: CategoryType | null = body?.type === "income" || body?.type === "expense" ? body.type : null;
   const source: "manual" | "ai-suggestion" = body?.source === "ai-suggestion" ? "ai-suggestion" : "manual";
 
-  if (!name || !type) {
+  if (!name || !type || name.length > MAX_NAME_LENGTH) {
     return NextResponse.json({ error: "نام و نوع دسته‌بندی الزامی هستند." }, { status: 400 });
   }
 
@@ -79,7 +69,7 @@ export async function POST(request: NextRequest) {
     const icon = typeof body?.icon === "string" ? body.icon.trim() : "";
     const color = typeof body?.color === "string" ? body.color.trim() : "";
 
-    if (!icon || !color) {
+    if (!icon || !color || icon.length > MAX_ICON_LENGTH) {
       return NextResponse.json({ error: "همه فیلدها (نام، آیکون، رنگ، نوع) الزامی هستند." }, { status: 400 });
     }
     if (!/^#[0-9A-Fa-f]{6}$/.test(color)) {
@@ -93,6 +83,18 @@ export async function POST(request: NextRequest) {
       if (isUniqueConstraintError(error)) {
         return NextResponse.json({ error: "دسته‌بندی با این نام و نوع قبلاً وجود دارد." }, { status: 409 });
       }
+      // Unhandled/unexpected only - the unique-constraint case above is an
+      // already-handled, expected outcome and isn't reported here.
+      reportError({
+        errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+        route: "categories",
+        userId: session.userId,
+        message: error instanceof Error ? error.message : "Unexpected error creating category",
+        error,
+        context: isPrismaErrorCode(error)
+          ? { operation: "createCategory", model: "Category", source: "manual", code: error.code }
+          : { operation: "createCategory", model: "Category", source: "manual" },
+      });
       throw error;
     }
   }
@@ -105,61 +107,42 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "نام دسته والد نامعتبر است." }, { status: 400 });
   }
   const parentName: string | null = typeof parentNameRaw === "string" ? parentNameRaw.trim() : null;
-
-  const since = new Date(Date.now() - RATE_LIMIT_WINDOW_MS);
-  const recentCategories = await listCategoriesCreatedSince(session.userId, since);
-  if (recentCategories.length >= MAX_CATEGORIES_PER_24H) {
-    const oldest = recentCategories[0].createdAt;
-    const retryAfterSeconds = Math.max(
-      Math.ceil((oldest.getTime() + RATE_LIMIT_WINDOW_MS - Date.now()) / 1000),
-      0
-    );
-    return rateLimitResponse(
-      { allowed: false, remaining: 0, retryAfterSeconds },
-      "در ۲۴ ساعت گذشته دسته‌بندی زیادی ساخته‌اید؛ لطفاً از دسته‌های موجود استفاده کنید."
-    );
+  if (parentName !== null && parentName.length > MAX_NAME_LENGTH) {
+    return NextResponse.json({ error: "نام دسته والد نامعتبر است." }, { status: 400 });
   }
 
-  let parentId: number | null = null;
-  if (parentName !== null) {
-    const parent = await findCategoryByNameAndType(session.userId, parentName, type);
-    if (!parent) {
-      return NextResponse.json(
-        { error: "دسته‌بندی والد یافت نشد یا با نوع این دسته‌بندی مطابقت ندارد." },
-        { status: 400 }
+  try {
+    const { category, resolvedExisting } = await resolveOrCreateCategoryFromSuggestion(session.userId, {
+      name,
+      parentName,
+      type,
+    });
+    return NextResponse.json({ category, resolvedExisting }, { status: resolvedExisting ? 200 : 201 });
+  } catch (error) {
+    if (error instanceof CategoryCreationRateLimitedError) {
+      return rateLimitResponse(
+        { allowed: false, remaining: 0, retryAfterSeconds: error.retryAfterSeconds },
+        error.message
       );
     }
-    parentId = parent.id;
-  }
-
-  const existingCategories = await listCategories(session.userId);
-  const categoryById = new Map(existingCategories.map((c) => [c.id, c]));
-  const categoryOptions: CategoryOption[] = existingCategories.map((c) => ({
-    name: c.name,
-    type: c.type as CategoryType,
-    parentName: c.parentId ? categoryById.get(c.parentId)?.name : undefined,
-  }));
-
-  const similar = findSimilarCategory({ name, parentName }, categoryOptions, type);
-  if (similar) {
-    const matchedCategory = existingCategories.find((c) => c.name === similar.name && c.type === similar.type)!;
-    return NextResponse.json({ category: matchedCategory, resolvedExisting: true }, { status: 200 });
-  }
-
-  const icon = resolveNewCategoryIcon(name);
-  try {
-    const category = await createCategory(session.userId, {
-      name,
-      icon,
-      color: AI_SUGGESTION_DEFAULT_COLOR,
-      type,
-      parentId,
-    });
-    return NextResponse.json({ category, resolvedExisting: false }, { status: 201 });
-  } catch (error) {
-    if (isUniqueConstraintError(error)) {
-      return NextResponse.json({ error: "دسته‌بندی با این نام و نوع قبلاً وجود دارد." }, { status: 409 });
+    if (error instanceof InvalidParentCategoryError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
+    if (error instanceof DuplicateCategoryError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    // Unhandled/unexpected only - the domain outcomes above are already
+    // handled, expected results and aren't reported here.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "categories",
+      userId: session.userId,
+      message: error instanceof Error ? error.message : "Unexpected error creating category",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "createCategory", model: "Category", source: "ai-suggestion", code: error.code }
+        : { operation: "createCategory", model: "Category", source: "ai-suggestion" },
+    });
     throw error;
   }
 }

@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { normalizeText } from "@/lib/normalize";
+import { normalizeText, toLatinDigits } from "@/lib/normalize";
 import { DEFAULT_MERCHANTS, type DefaultMerchant } from "@/lib/merchants";
 import type { CategoryType } from "@/lib/categories";
 
@@ -14,6 +14,14 @@ export interface MerchantLookupResult {
   // Sourced from the matched merchant/category, never parsed from text -
   // lets callers skip AI-based type inference entirely on a match.
   type?: CategoryType;
+  // Which findBestMatch tier actually resolved this (1 = exact, 2 = alias/
+  // token-sequence, 3 = loose substring) - Phase 8's confidence model needs
+  // to tell an exact global-merchant hit apart from a fuzzier alias/
+  // substring one, which findBestMatch already computes internally but
+  // never surfaced past this module before. Undefined for a "keyword"-
+  // source result (matchKeywordOverride doesn't go through findBestMatch at
+  // all - a curated keyword trigger isn't tier-based) and for "none".
+  matchTier?: 1 | 2 | 3;
 }
 
 const NO_MATCH: MerchantLookupResult = { source: "none" };
@@ -88,6 +96,80 @@ function findBestMatch<T>(normalizedInput: string, candidates: MatchCandidate<T>
   return best;
 }
 
+const DIGIT_TOKEN = /^[0-9]+$/;
+
+// The same closed set of relative-date phrases lib/extract-date.ts treats
+// as unambiguous day-offset signals (امروز/دیروز/پریروز/"هفته پیش") -
+// reused here rather than reinvented, so the two stay in lockstep. "هفته"/
+// "پیش" are stripped as individual tokens rather than requiring the exact
+// two-token phrase: a merchantKey only needs to generalize across date
+// variance, not parse an actual date, so dropping either word alone is
+// safe for that narrower purpose and keeps this a plain token-membership
+// check instead of duplicating containsTokenSequence's phrase matching.
+const RELATIVE_DATE_TOKENS = new Set(["امروز", "دیروز", "پریروز", "هفته", "پیش"]);
+
+// Derives the value stored in / matched against MerchantMapping.merchantKey
+// from a transaction's raw input text. Write-side only - updateTransaction
+// (lib/data/transactions.ts) is the one caller. lookupUserMapping below
+// still matches a *stored* candidate's token sequence against the *new*,
+// unstripped input (see findBestMatch/containsTokenSequence, tiers 2/3),
+// which already tolerates extra tokens - like a trailing amount - in the
+// haystack, so the read side needs no change for this to work.
+//
+// Bug this fixes (docs/roadmap-status.md, Phase 7/8 correction): the key
+// used to be the entire raw SMS/typed text, amount included -
+// normalizeText() never strips digits (see its own comment) - so two
+// transactions at the same real merchant for two different amounts
+// produced two different keys, and a learned mapping only ever re-matched
+// an identical amount. Strips the two things that legitimately vary
+// per-transaction at the same merchant and would otherwise get baked into
+// the stored key: amount digits, and the closed set of relative-date words
+// above. Word order of whatever tokens remain is preserved, so distinct
+// merchants with differently-worded text still key differently (see
+// lib/merchant-lookup.test.ts's false-positive guard).
+//
+// Known limit: a merchant name that itself contains one of the 5 stripped
+// words (e.g. a shop literally named "امروز") would have that word dropped
+// from its key too - accepted here for the same reason extractDate.ts
+// already treats these five words as unambiguous, non-merchant signals
+// wherever they appear, not something newly introduced by this function.
+// Also known: only the amount's own digits are stripped, not a spelled-out
+// scale word next to them (هزار/میلیون) - "۸۰ هزار تومن" and "۸۰۰۰۰ تومن"
+// for the same purchase can still key differently. Out of scope here: the
+// bug this fixes is specifically that digits were never stripped at all
+// (normalizeText's own comment), not scale-word phrasing.
+//
+// Splits on digit/date tokens and keeps the *longest* remaining run,
+// rather than filtering them out of the whole token list and rejoining
+// what's left. Filter-and-rejoin would glue together tokens that were
+// never adjacent in the original text - e.g. "فروشگاه ... هشتاد ۳۰۰۰۰
+// تومن" would naively become "... هشتاد تومن", a false adjacency that a
+// *different* amount's later mention (still carrying its own amount token
+// between those two words) would never reproduce, since findBestMatch's
+// tier 2 requires the stored candidate to appear as an exact contiguous
+// run (see that function's own top-of-file comment, unchanged by this
+// fix). Splitting into runs and keeping only the longest never invents an
+// adjacency that wasn't already there, and as a side effect usually drops
+// a trailing currency word (تومن/ریال) entirely, which is harmless since
+// it carries no merchant-identifying signal anyway.
+export function buildMerchantKey(rawInput: string): string {
+  const tokens = normalizeText(toLatinDigits(rawInput))
+    .split(" ")
+    .filter(Boolean);
+
+  const runs: string[][] = [[]];
+  for (const token of tokens) {
+    if (DIGIT_TOKEN.test(token) || RELATIVE_DATE_TOKENS.has(token)) {
+      runs.push([]);
+    } else {
+      runs[runs.length - 1].push(token);
+    }
+  }
+
+  const longestRun = runs.reduce((best, run) => (run.length > best.length ? run : best), []);
+  return longestRun.join(" ");
+}
+
 const GLOBAL_CANDIDATES: MatchCandidate<DefaultMerchant>[] = DEFAULT_MERCHANTS.flatMap((merchant) => [
   { text: normalizeText(merchant.name), payload: merchant },
   ...merchant.aliases.map((alias) => ({ text: normalizeText(alias), payload: merchant })),
@@ -134,6 +216,7 @@ export function lookupGlobalMerchant(rawText: string): MerchantLookupResult {
     merchantName: merchant.name,
     matchedText: match.text,
     type: merchant.type,
+    matchTier: match.tier,
   };
 }
 
@@ -160,6 +243,7 @@ async function lookupUserMapping(userId: number, normalizedInput: string): Promi
     merchantName: match.payload.merchantKey,
     matchedText: match.text,
     type: category.type as CategoryType,
+    matchTier: match.tier,
   };
 }
 

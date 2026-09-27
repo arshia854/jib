@@ -27,6 +27,21 @@ export interface AccountOption {
   type: string;
 }
 
+// Default endpoints for the "do this transfer now" shortcut (savings page's
+// per-strategy button, dashboard's income-reaction banner): into the first
+// savings-type account, out of the first non-savings one. Either can be
+// undefined (no savings account yet / only savings accounts), in which case
+// callers omit the shortcut rather than linking to a half-filled transfer.
+export function pickDefaultTransferAccounts(accounts: AccountOption[]): {
+  from: AccountOption | undefined;
+  to: AccountOption | undefined;
+} {
+  return {
+    from: accounts.find((a) => a.type !== "savings"),
+    to: accounts.find((a) => a.type === "savings"),
+  };
+}
+
 export function findMatchingAccount(accounts: AccountOption[], bankLabel: string): AccountOption | null {
   return accounts.find((a) => a.type === "bank" && a.name === bankLabel) ?? null;
 }

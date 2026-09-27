@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { listAccountsWithUsage, createAccount } from "@/lib/data/accounts";
 import { ACCOUNT_TYPES } from "@/lib/accounts";
+import { MAX_NAME_LENGTH, MAX_ACCOUNT_BALANCE_MAGNITUDE } from "@/lib/limits";
 
 export async function GET() {
   const session = await getSession();
@@ -26,10 +27,10 @@ export async function POST(request: NextRequest) {
   const initialBalance =
     initialBalanceInput === undefined || initialBalanceInput === null ? 0 : Number(initialBalanceInput);
 
-  if (!name || !ACCOUNT_TYPES.some((t) => t.value === type)) {
+  if (!name || name.length > MAX_NAME_LENGTH || !ACCOUNT_TYPES.some((t) => t.value === type)) {
     return NextResponse.json({ error: "نام و نوع حساب الزامی هستند." }, { status: 400 });
   }
-  if (!Number.isFinite(initialBalance)) {
+  if (!Number.isFinite(initialBalance) || Math.abs(initialBalance) > MAX_ACCOUNT_BALANCE_MAGNITUDE) {
     return NextResponse.json({ error: "موجودی اولیه نامعتبر است." }, { status: 400 });
   }
 

@@ -1,31 +1,29 @@
 -- AlterTable
-ALTER TABLE "User" ADD COLUMN     "blockedAt" TIMESTAMP(3),
-ADD COLUMN     "role" TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE "User" ADD COLUMN "role" TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE "User" ADD COLUMN "blockedAt" DATETIME;
 
 -- CreateTable
 CREATE TABLE "ErrorLog" (
-    "id" SERIAL NOT NULL,
-    "timestamp" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "timestamp" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "route" TEXT NOT NULL,
     "message" TEXT NOT NULL,
     "stack" TEXT,
     "userId" INTEGER,
-
-    CONSTRAINT "ErrorLog_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "ErrorLog_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
 -- CreateTable
 CREATE TABLE "DefaultCategory" (
-    "id" SERIAL NOT NULL,
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "name" TEXT NOT NULL,
     "icon" TEXT NOT NULL,
     "color" TEXT NOT NULL,
     "type" TEXT NOT NULL,
     "isTransfer" BOOLEAN NOT NULL DEFAULT false,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "parentId" INTEGER,
-
-    CONSTRAINT "DefaultCategory_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "DefaultCategory_parentId_fkey" FOREIGN KEY ("parentId") REFERENCES "DefaultCategory" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
 
 -- CreateIndex
@@ -39,12 +37,6 @@ CREATE INDEX "DefaultCategory_parentId_idx" ON "DefaultCategory"("parentId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "DefaultCategory_name_type_key" ON "DefaultCategory"("name", "type");
-
--- AddForeignKey
-ALTER TABLE "ErrorLog" ADD CONSTRAINT "ErrorLog_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "DefaultCategory" ADD CONSTRAINT "DefaultCategory_parentId_fkey" FOREIGN KEY ("parentId") REFERENCES "DefaultCategory"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- CreateData
 -- Seed data: preserves the exact default categories previously

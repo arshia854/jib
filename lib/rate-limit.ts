@@ -20,8 +20,21 @@ const store = new Map<string, RateLimitEntry>();
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 let lastSweepAt = 0;
 
-function sweepExpired(now: number) {
-  if (now - lastSweepAt < SWEEP_INTERVAL_MS) return;
+// Hard cap on distinct keys tracked at once. Without this, a flood of
+// requests using many distinct keys (e.g. many spoofed IPs hitting
+// GENERAL_API_IP_RULE - see the getClientIp() caveat below) could grow
+// this Map without bound between scheduled sweeps, exhausting process
+// memory. Exported so tests can reference it instead of duplicating the
+// number.
+export const MAX_STORE_SIZE = 20_000;
+
+// Test-only introspection - not used by any production code path.
+export function __getStoreSizeForTests(): number {
+  return store.size;
+}
+
+function sweepExpired(now: number, force = false) {
+  if (!force && now - lastSweepAt < SWEEP_INTERVAL_MS) return;
   lastSweepAt = now;
   for (const [key, entry] of store) {
     if (entry.resetAt <= now) store.delete(key);
@@ -45,6 +58,19 @@ export function checkRateLimit(key: string, rule: RateLimitRule, now: number = D
   const entry = store.get(key);
 
   if (!entry || entry.resetAt <= now) {
+    if (store.size >= MAX_STORE_SIZE) {
+      // Reclaim anything actually expired first, out of the normal
+      // 5-minute schedule.
+      sweepExpired(now, true);
+      if (store.size >= MAX_STORE_SIZE) {
+        // Still full after reclaiming expired entries - evict the
+        // oldest-inserted key rather than let the store grow unbounded.
+        // Map iteration order is insertion order, so the first key
+        // yielded is the oldest.
+        const oldestKey = store.keys().next().value;
+        if (oldestKey !== undefined) store.delete(oldestKey);
+      }
+    }
     store.set(key, { count: 1, resetAt: now + rule.windowSeconds * 1000 });
     return { allowed: true, remaining: rule.limit - 1, retryAfterSeconds: 0 };
   }
@@ -57,14 +83,44 @@ export function checkRateLimit(key: string, rule: RateLimitRule, now: number = D
   return { allowed: true, remaining: rule.limit - entry.count, retryAfterSeconds: 0 };
 }
 
+// Every IP-keyed rate limit in the app (OTP send/verify cost control,
+// email-login brute force protection, the general per-IP API backstop)
+// depends on this function returning the real client IP rather than one
+// an attacker can freely set. Both `X-Forwarded-For` and `X-Real-IP` are
+// request headers set by *whoever connects to us* - they are ONLY
+// trustworthy if a reverse proxy in front of this app overwrites them
+// with the real TCP peer address on every request, stripping/discarding
+// whatever the client itself sent. That proxy config is infrastructure
+// outside this repo and, as of this writing, is NOT yet in place for
+// Jib's deployment - so this function alone does not make rate limiting
+// spoof-proof; it becomes effective only once the reverse proxy is
+// configured to match. Required config once a proxy is added:
+//   nginx:  proxy_set_header X-Real-IP $remote_addr;
+//   Caddy:  reverse_proxy already sets X-Real-IP to the immediate peer by
+//           default; just don't pass through an upstream client's header.
+//
+// Trust order once that's in place:
+// 1. X-Real-IP - a single scalar value the proxy overwrites outright, no
+//    list-parsing ambiguity.
+// 2. The LAST entry of X-Forwarded-For - each hop *appends* to this list
+//    (nginx's $proxy_add_x_forwarded_for, Caddy's default), so the last
+//    entry is the one added by our own proxy; the first entry is
+//    whatever the client itself sent and is fully attacker-controlled.
 export function getClientIp(headers: Headers): string {
+  const realIp = headers.get("x-real-ip");
+  if (realIp) {
+    const trimmed = realIp.trim();
+    if (trimmed) return trimmed;
+  }
   const forwardedFor = headers.get("x-forwarded-for");
   if (forwardedFor) {
-    const first = forwardedFor.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = forwardedFor
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) return last;
   }
-  const realIp = headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
   return "unknown";
 }
 
@@ -88,7 +144,7 @@ export const OTP_REQUEST_PHONE_RULE: RateLimitRule = { limit: 4, windowSeconds: 
 export const OTP_REQUEST_IP_RULE: RateLimitRule = { limit: 15, windowSeconds: 60 * 60 };
 
 // Additional defense-in-depth on top of the per-code attempt cap already
-// enforced via the signed OTP cookie (see lib/auth/otp.ts MAX_ATTEMPTS) -
+// enforced by the server-side OTP challenge store (see lib/auth/otp.ts MAX_ATTEMPTS) -
 // bounds total verify volume per phone across multiple requested codes.
 export const OTP_VERIFY_PHONE_RULE: RateLimitRule = { limit: 8, windowSeconds: 15 * 60 };
 
@@ -104,8 +160,36 @@ export const OTP_VERIFY_PHONE_RULE: RateLimitRule = { limit: 8, windowSeconds: 1
 export const TRANSACTION_PARSE_USER_RULE: RateLimitRule = { limit: 60, windowSeconds: 5 * 60 };
 export const CHAT_USER_RULE: RateLimitRule = { limit: 15, windowSeconds: 5 * 60 };
 
+// GOAL_STRATEGY_USER_RULE covers POST /api/goals/[id]/strategy - one
+// explicit "دریافت استراتژی" button press per call, not a debounced/
+// typing-triggered flow like TRANSACTION_PARSE_USER_RULE. Modeled closer to
+// CHAT_USER_RULE's cadence (a deliberate, occasional user action) than
+// reused outright, since a legitimate session could reasonably regenerate a
+// strategy a few times across several goals in one sitting (comparing
+// goals, retrying after a transient AI hiccup) - 10 per 10 minutes covers
+// that comfortably while still bounding a runaway/compromised client to a
+// small, cheap number of NVIDIA NIM calls.
+export const GOAL_STRATEGY_USER_RULE: RateLimitRule = { limit: 10, windowSeconds: 10 * 60 };
+
 // Generous coarse backstop applied per-IP across all API routes.
 export const GENERAL_API_IP_RULE: RateLimitRule = { limit: 200, windowSeconds: 5 * 60 };
+
+// POST /api/log-error is unauthenticated by necessity (see that route's
+// own comment) and every accepted call is a DB write, so it gets its own
+// limits well under GENERAL_API_IP_RULE. A legitimate client only posts
+// here when an error boundary fires - one page crash is one call, and even
+// a render loop that trips a boundary repeatedly stays within a handful -
+// so 20 per 5 minutes per IP leaves room for a real burst while capping
+// one IP's ErrorLog writes at 1/10th of what GENERAL_API_IP_RULE allows.
+export const CLIENT_ERROR_LOG_IP_RULE: RateLimitRule = { limit: 20, windowSeconds: 5 * 60 };
+// Shared across every caller under one fixed key, regardless of IP. Until
+// the reverse proxy is configured (see getClientIp()'s caveat above and
+// docs/deploy-runbook.md §4) the IP is spoofable, so cycling fake IPs
+// would otherwise bypass CLIENT_ERROR_LOG_IP_RULE entirely - this bounds
+// total ErrorLog writes from this route either way. Trade-off: a flood can
+// exhaust it and drop real client errors for the rest of the window,
+// which is preferable to unbounded writes.
+export const CLIENT_ERROR_LOG_GLOBAL_RULE: RateLimitRule = { limit: 500, windowSeconds: 5 * 60 };
 
 // Email/password auth - bounds brute-force guessing per account and per IP.
 export const EMAIL_LOGIN_EMAIL_RULE: RateLimitRule = { limit: 8, windowSeconds: 15 * 60 };

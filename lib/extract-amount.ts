@@ -1,31 +1,43 @@
 import { normalizeText, toLatinDigits } from "@/lib/normalize";
+import { normalizePersianNumberWords } from "@/lib/persian-number-words";
 
 const SCALE_WORDS: Record<string, number> = {
   هزار: 1_000,
   میلیون: 1_000_000,
 };
 
-const TOMAN_WORDS = new Set(["تومان", "تومن"]);
 const RIAL = "ریال";
 const NUMBER_TOKEN = /^\d+$/;
-const BARE_MAX = 999;
+// Two distinct bounds, deliberately not shared - conflating them was a
+// real trap (see git history): raising the single-number bound to widen
+// the everyday-shorthand range must NOT also raise the "X و Y" combined-pair
+// bound, or a stray adjacent pair like "۱۳۰۰ و ۵" would resolve as
+// 1300x1,000,000 + 5x1,000 instead of bailing to null.
+const BARE_SINGLE_MAX = 9_999;
+const COMBINED_PART_MAX = 999;
 
 // Mirrors the AI prompt's own amount rules exactly (see buildSystemPrompt's
 // قوانین section) - the two must stay in lockstep:
-//   - no unit at all, value 1-999      -> value x 1,000 (e.g. "80" -> 80000)
-//   - no unit at all, value >= 1,000   -> same number, unchanged
-//   - explicit تومان/تومن               -> same number, unchanged
+//   - no recognized scale word at all (no هزار/میلیون/ریال) - whether the
+//     number is completely bare, or only followed by plain تومان/تومن -
+//     value 1-9,999      -> value x 1,000 (e.g. "80" or "80 تومن" -> 80000)
+//   - same case, value >= 10,000       -> same number, unchanged
 //   - "X و Y" / "X.Y" (both parts 1-999, nothing else in the text)
 //                                      -> X x 1,000,000 + Y x 1,000
 //   - هزار/میلیون                       -> x1,000 / x1,000,000
 //   - ریال                              -> ÷10
 //
-// This reverses the file's original "no unit -> same number" default: that
-// was a deliberate choice to never guess an implicit scale, but beta
-// feedback showed users overwhelmingly type bare numbers expecting them to
-// mean thousands (e.g. "80" meaning 80,000 toman), so face-value
-// resolution was silently undercounting real transactions by 1000x. This
-// is a considered reversal of that tradeoff, not a bug fix.
+// This is the second reversal of this file's default. The first (see git
+// history) already established that a bare number should mean thousands,
+// not single tomans. This one goes further, for two reasons users actually
+// hit under today's inflation: (1) saying "تومن" out loud no longer signals
+// a literal single-toman count either - "۵۰ تومن ناهار" means 50,000, not
+// 50 - so a trailing تومان/تومن no longer opts a small number out of the
+// x1,000 rule; (2) the old 1-999 ceiling was too low for how people
+// actually write amounts today - "۱۳۰۰ شام" means 1,300,000, not 1,300 -
+// so the ceiling is raised to 9,999. The ceiling still has to stop
+// somewhere: someone who types a full 5-digit number ("۵۰۰۰۰ تومن") means
+// that literally, and must not be inflated again into 50 million.
 //
 // Only resolves when the text contains exactly one numeric token, or
 // exactly two in one of the combining shapes above - anything else bails
@@ -44,7 +56,9 @@ const BARE_MAX = 999;
 // is the backstop once a case like this is identified as needing
 // rejection.
 export function extractAmount(rawText: string): number | null {
-  const tokens = normalizeText(toLatinDigits(rawText))
+  const tokens = splitDigitLetterBoundaries(
+    normalizeText(toLatinDigits(normalizePersianNumberWords(rawText)))
+  )
     .split(" ")
     .filter(Boolean);
 
@@ -72,10 +86,27 @@ export function extractAmount(rawText: string): number | null {
   }
 
   if (scaleWord === RIAL) return Math.round(value / 10);
-  if (scaleWord && TOMAN_WORDS.has(scaleWord)) return Math.round(value);
 
-  // No recognized unit at all - the new bare-number default.
-  return Math.round(value <= BARE_MAX ? value * 1_000 : value);
+  // No هزار/میلیون/ریال scale word - either no unit at all, or only a
+  // plain تومان/تومن, which no longer opts out of the bare-number
+  // magnitude heuristic (see the doc comment above).
+  return Math.round(value <= BARE_SINGLE_MAX ? value * 1_000 : value);
+}
+
+// normalizeText already turns punctuation into spaces, so the only glued
+// case left by the time we get here is a digit run directly touching a
+// non-digit, non-space character (in either direction), e.g. "۱۰۰هزارتومن"
+// or "ناهار۸۰". Insert a space at every such boundary so the later
+// .split(" ") tokenizes them the same as if the user had typed the space
+// themselves. Scoped to this file's tokenization only - not a general
+// normalizeText rule, since other call sites (merchant matching, etc.)
+// don't want digit/letter runs split apart.
+function splitDigitLetterBoundaries(text: string): string {
+  return text
+    .replace(/(\d)(?=[^\d\s])/g, "$1 ")
+    .replace(/([^\d\s])(?=\d)/g, "$1 ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // Handles "X و Y" (two numeric tokens joined by a literal "و") and "X.Y"
@@ -94,7 +125,7 @@ function resolveCombinedPair(tokens: string[], firstIdx: number, secondIdx: numb
   const x = Number(tokens[firstIdx]);
   const y = Number(tokens[secondIdx]);
   if (!Number.isFinite(x) || !Number.isFinite(y) || x <= 0 || y <= 0) return null;
-  if (x > BARE_MAX || y > BARE_MAX) return null;
+  if (x > COMBINED_PART_MAX || y > COMBINED_PART_MAX) return null;
 
   return Math.round(x * 1_000_000 + y * 1_000);
 }

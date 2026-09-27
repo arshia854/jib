@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-typecheck-test:
+    runs-on: ubuntu-latest
+    env:
+      # Dummy, non-secret values for CI only - never used against a real
+      # deployment. vitest.config.ts always overrides TURSO_DATABASE_URL /
+      # TURSO_AUTH_TOKEN to an isolated local SQLite file regardless of what
+      # (if anything) is set here (see test/setup/global-setup.ts), and
+      # every test that would otherwise call the OpenRouter API mocks the
+      # network call instead of hitting it for real (lib/nvidia-ai.test.ts
+      # and friends). These four just need to be *some* non-empty string so
+      # the functions that read them at call time (lib/auth/otp.ts,
+      # lib/auth/session.ts) don't throw their "not configured" errors
+      # during the auth test suite.
+      AUTH_SECRET: ci-dummy-auth-secret
+      OTP_SECRET: ci-dummy-otp-secret
+      LEGACY_SESSION_SECRET: ci-dummy-legacy-session-secret
+      OPENROUTER_API_KEY: ci-dummy-openrouter-key
+      OPENROUTER_BASE_URL: https://openrouter.invalid/v1
+      OPENROUTER_MODEL: ci-dummy-model
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm run test

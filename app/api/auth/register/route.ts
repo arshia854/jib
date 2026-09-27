@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashPassword } from "@/lib/auth/password";
 import { checkRateLimit, getClientIp, rateLimitResponse, EMAIL_REGISTER_IP_RULE } from "@/lib/rate-limit";
+import { MAX_EMAIL_LENGTH, MAX_PASSWORD_BYTES } from "@/lib/limits";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -18,19 +19,25 @@ export async function POST(request: NextRequest) {
   const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
   const password = typeof body?.password === "string" ? body.password : "";
 
-  if (!EMAIL_RE.test(email)) {
+  if (!EMAIL_RE.test(email) || email.length > MAX_EMAIL_LENGTH) {
     return NextResponse.json({ error: "ایمیل نامعتبر است." }, { status: 400 });
   }
   if (password.length < 8) {
     return NextResponse.json({ error: "رمز عبور باید حداقل ۸ کاراکتر باشد." }, { status: 400 });
   }
+  // bcrypt silently truncates at 72 bytes (see lib/limits.ts) - reject
+  // before hashing rather than let two different passwords past that
+  // length collide onto the same hash.
+  if (Buffer.byteLength(password, "utf8") > MAX_PASSWORD_BYTES) {
+    return NextResponse.json({ error: "رمز عبور بیش از حد طولانی است." }, { status: 400 });
+  }
 
   const existing = await prisma.user.findUnique({ where: { email } });
+  // One identical message regardless of how the existing account signed up
+  // (password vs. Google) - a differing message would let anyone probe not
+  // just whether an email is registered but which sign-in method it uses.
   if (existing) {
-    const message = existing.passwordHash
-      ? "این ایمیل قبلاً ثبت‌نام کرده است."
-      : "این ایمیل قبلاً با روش دیگری (مثلاً گوگل) ثبت‌نام کرده است.";
-    return NextResponse.json({ error: message }, { status: 409 });
+    return NextResponse.json({ error: "این ایمیل قبلاً ثبت‌نام شده است." }, { status: 409 });
   }
 
   const passwordHash = await hashPassword(password);

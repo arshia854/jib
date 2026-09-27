@@ -9,6 +9,7 @@ vi.mock("@/lib/auth/session", () => ({
 
 import { getSession } from "@/lib/auth/session";
 import { POST } from "@/app/api/categories/route";
+import { MAX_NAME_LENGTH, MAX_ICON_LENGTH } from "@/lib/limits";
 
 const mockedGetSession = vi.mocked(getSession);
 
@@ -79,6 +80,49 @@ describe("POST /api/categories", () => {
     it("manual source: rejects a non-hex color (400)", async () => {
       mockedGetSession.mockResolvedValue(asSession(userId));
       const res = await POST(makeRequest({ name: "رنگ نامعتبر", type: "expense", icon: "🧪", color: "blue" }));
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("length limits", () => {
+    it("rejects a name over MAX_NAME_LENGTH (400)", async () => {
+      mockedGetSession.mockResolvedValue(asSession(userId));
+      const res = await POST(
+        makeRequest({ name: "الف".repeat(MAX_NAME_LENGTH + 1), type: "expense", icon: "🧪", color: "#3B82F6" })
+      );
+      expect(res.status).toBe(400);
+    });
+
+    it("accepts a name exactly at MAX_NAME_LENGTH", async () => {
+      mockedGetSession.mockResolvedValue(asSession(userId));
+      const name = "ب".repeat(MAX_NAME_LENGTH);
+      const res = await POST(makeRequest({ name, type: "expense", icon: "🧪", color: "#3B82F6" }));
+      expect(res.status).toBe(201);
+    });
+
+    it("manual source: rejects an icon over MAX_ICON_LENGTH (400)", async () => {
+      mockedGetSession.mockResolvedValue(asSession(userId));
+      const res = await POST(
+        makeRequest({
+          name: "آیکون طولانی",
+          type: "expense",
+          icon: "🧪".repeat(MAX_ICON_LENGTH + 1),
+          color: "#3B82F6",
+        })
+      );
+      expect(res.status).toBe(400);
+    });
+
+    it("ai-suggestion source: rejects a parentName over MAX_NAME_LENGTH (400)", async () => {
+      mockedGetSession.mockResolvedValue(asSession(userId));
+      const res = await POST(
+        makeRequest({
+          name: "زیردسته با والد طولانی",
+          type: "expense",
+          parentName: "پ".repeat(MAX_NAME_LENGTH + 1),
+          source: "ai-suggestion",
+        })
+      );
       expect(res.status).toBe(400);
     });
   });

@@ -26,7 +26,23 @@ const LABEL_SEPARATOR_SUFFIX = /[\s:]+$/;
 
 // Keywords whose number is the transaction amount, vs. keywords whose
 // number is a running/available balance that must never be picked.
-const TRANSACTION_KEYWORDS = ["برداشت", "خرید", "واریز"];
+//
+// Phase 7.1 fix: this list must stay a superset-compatible match with
+// extract-bank-type.ts's own TYPE_KEYWORDS (خرید/برداشت/پرداخت for
+// expense, واریز/انتقال for income) — "پرداخت" and "انتقال" were missing
+// here even though extractBankType already recognizes both as valid
+// transaction-type signals. A real "پرداخت:430,000"-shaped SMS (e.g.
+// Parsian, whose own bank-patterns.ts rule is literally named
+// "parsian-payment" with keyword "پرداخت") would detect its bank and type
+// correctly but still fail amount extraction entirely — parseBankSms is
+// all-or-nothing, so that silently forced every such message down to the
+// AI fallback instead of resolving deterministically like every other
+// bank's "keyword:amount" format. "از حساب شما پرید" is deliberately not
+// added here even though it's also in TYPE_KEYWORDS.expense — it's a
+// trailing narrative phrase handled separately by
+// TRANSACTION_TRAILING_PHRASES below, not a "keyword:number" label this
+// same-line/direct-attachment logic is meant to match.
+const TRANSACTION_KEYWORDS = ["برداشت", "خرید", "واریز", "پرداخت", "انتقال"];
 const BALANCE_KEYWORDS = ["مانده", "موجودی"];
 
 // Narrative phrases that signal "this message is a transaction" without a

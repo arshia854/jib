@@ -6,6 +6,9 @@ import {
   CannotModifySelfError,
 } from "@/lib/data/admin-users";
 import { NotAdminError } from "@/lib/auth/session";
+import { reportError } from "@/lib/observability/report-error";
+import { ERROR_TYPES } from "@/lib/observability/error-types";
+import { isPrismaErrorCode } from "@/lib/observability/classify-error";
 
 // Admin-ness is already enforced in proxy.ts (see /api/admin/* gate) and
 // re-checked independently inside setUserBlocked/deleteUserAsAdmin
@@ -38,6 +41,23 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (error instanceof NotAdminError) {
       return NextResponse.json({ error: error.message }, { status: 403 });
     }
+    // No `userId` field attached (that field means the authenticated actor
+    // elsewhere in these logs; this route relies on proxy.ts's own admin
+    // gate rather than calling getSession() itself, so the acting admin's
+    // id isn't available here without an extra DB read - see
+    // app/api/admin/default-categories/route.ts's GET handler comment).
+    // `userId` from this route's own params - the *target* user being
+    // blocked/unblocked, not the actor - is included under context instead,
+    // clearly distinguished as targetUserId.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "admin/users/[id]",
+      message: error instanceof Error ? error.message : "Unexpected error setting user blocked state",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "setUserBlocked", model: "User", targetUserId: userId, code: error.code }
+        : { operation: "setUserBlocked", model: "User", targetUserId: userId },
+    });
     throw error;
   }
 }
@@ -62,6 +82,16 @@ export async function DELETE(_request: NextRequest, { params }: { params: Promis
     if (error instanceof NotAdminError) {
       return NextResponse.json({ error: error.message }, { status: 403 });
     }
+    // No `userId` field attached - see the PATCH handler's comment above.
+    reportError({
+      errorType: isPrismaErrorCode(error) ? ERROR_TYPES.DB_ERROR : ERROR_TYPES.API_ERROR,
+      route: "admin/users/[id]",
+      message: error instanceof Error ? error.message : "Unexpected error deleting user",
+      error,
+      context: isPrismaErrorCode(error)
+        ? { operation: "deleteUserAsAdmin", model: "User", targetUserId: userId, code: error.code }
+        : { operation: "deleteUserAsAdmin", model: "User", targetUserId: userId },
+    });
     throw error;
   }
 }

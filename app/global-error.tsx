@@ -26,7 +26,7 @@ export default function GlobalError({
           <p className="text-sm text-muted">خطای غیرمنتظره‌ای رخ داد. لطفاً دوباره تلاش کنید.</p>
           <button
             onClick={() => unstable_retry()}
-            className="mt-2 rounded-2xl bg-primary-darker px-6 py-3 text-sm font-semibold text-white"
+            className="mt-2 rounded-2xl bg-primary px-6 py-3 text-sm font-semibold text-on-primary"
           >
             تلاش مجدد
           </button>

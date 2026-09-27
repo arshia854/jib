@@ -8,37 +8,61 @@ datasource db {
 }
 
 model User {
-  id            Int       @id @default(autoincrement())
+  id                  Int       @id @default(autoincrement())
   // Optional now that email/Google-only users may not have a phone.
-  phoneNumber   String?   @unique
-  email         String?   @unique
-  emailVerified DateTime?
+  phoneNumber         String?   @unique
+  email               String?   @unique
+  emailVerified       DateTime?
   // bcrypt hash, set only for users who registered via email + password.
-  passwordHash  String?
+  passwordHash        String?
   // Google avatar - populated by the OAuth profile on sign-in.
-  image         String?
-  name          String?
-  age           Int?
+  image               String?
+  name                String?
+  age                 Int?
   // "user" | "admin". Plain string (not a Prisma enum) to match every other
   // type-like field in this schema (FinanceAccount.type, Category.type,
-  // Transaction.type). No self-serve way to become "admin" - see README.md.
-  role          String    @default("user")
+  // Transaction.type) - this installed Prisma version (7.9.1) also has no
+  // `@check`/`@@check` attribute at all (confirmed via `prisma validate`,
+  // not assumed), so a schema-level constraint isn't expressible here
+  // either way. No self-serve way to become "admin" - see README.md.
+  // Restricted to these two values at the DB level by a hand-written CHECK
+  // constraint (see prisma/migrations/20260822213426_add_user_role_check_constraint
+  // - necessarily hand-written, not `migrate diff` output, since there's
+  // nothing about this line for it to diff) and at the application level by
+  // lib/auth/session.ts's isValidRole().
+  role                String    @default("user")
   // Set to block a user; enforced in lib/auth/session.ts's getSession() so a
   // blocked user is signed out (session treated as null) on their next
   // request, same as a deleted user.
-  blockedAt     DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  blockedAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  // Settings toggle (opt-in, default off) - when true, the dashboard
+  // (app/app/page.tsx, via lib/data/dashboard.ts) also shows the user's
+  // totalBalance converted into equivalent grams of 18k gold / USD, using
+  // the same live prices as the Assets feature (lib/prices/get-live-prices.ts).
+  // Purely a display preference - never affects any stored amount, and
+  // getLivePrices() is only ever called for a user who has this on, so
+  // opting out costs nothing against brsapi.ir's daily free-tier quota.
+  showBalanceInAssets Boolean   @default(false)
 
-  financeAccounts  FinanceAccount[]
-  categories       Category[]
-  transactions     Transaction[]
-  chatMessages     ChatMessage[]
-  merchantMappings MerchantMapping[]
+  financeAccounts      FinanceAccount[]
+  categories           Category[]
+  transactions         Transaction[]
+  conversations        Conversation[]
+  chatMessages         ChatMessage[]
+  merchantMappings     MerchantMapping[]
   // OAuth provider links (Google, etc). Named/modeled to match what
   // @auth/prisma-adapter expects - see lib/auth/config.ts.
-  oauthAccounts    Account[]
-  errorLogs        ErrorLog[]
+  oauthAccounts        Account[]
+  errorLogs            ErrorLog[]
+  spendingSummaryCache SpendingSummaryCache[]
+  facts                UserFact[]
+  assets               Asset[]
+  goals                Goal[]
+  savingsStrategies    SavingsStrategy[]
+  pushSubscriptions    PushSubscription[]
+  notificationLogs     NotificationLog[]
 }
 
 // NextAuth/Auth.js OAuth provider link table (required shape + field names
@@ -79,18 +103,33 @@ model FinanceAccount {
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   transactions Transaction[]
+  goals        Goal[]
 
   @@index([userId])
 }
 
 model Category {
-  id         Int      @id @default(autoincrement())
-  name       String
-  icon       String
-  color      String
-  type       String
-  isTransfer Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  name        String
+  icon        String
+  color       String
+  type        String
+  isTransfer  Boolean  @default(false)
+  // Whether spending in this category counts as "essential" vs
+  // "discretionary" (see lib/analytics/spending-summary.ts's
+  // discretionaryExpense/topDiscretionaryCategories). Defaults to true so a
+  // newly-created category with no explicit classification isn't silently
+  // counted as wasteful spending.
+  isEssential Boolean  @default(true)
+  // Retired from *new*-transaction selection only - hidden from the AI
+  // prompt/resolution (lib/ai/parse-transaction.ts), new-category dedup
+  // (lib/data/categories.ts) and the add-transaction pickers, but still a
+  // normal row otherwise: existing Transaction/MerchantMapping rows keep
+  // pointing at it (both FKs are onDelete: Restrict) and keep displaying
+  // its real name. Archiving a top-level category also retires its
+  // children (see excludeArchived in lib/categories.ts).
+  isArchived  Boolean  @default(false)
+  createdAt   DateTime @default(now())
 
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -107,14 +146,87 @@ model Category {
 }
 
 model Transaction {
-  id          Int      @id @default(autoincrement())
-  amount      Int
-  type        String
-  description String?
-  rawInput    String
-  date        DateTime @default(now())
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                          Int      @id @default(autoincrement())
+  amount                      Int
+  type                        String
+  description                 String?
+  rawInput                    String
+  date                        DateTime @default(now())
+  // Provenance of how this transaction was created. Null for the app's
+  // original manual-entry/AI-parse-preview flow (POST /api/transactions
+  // without a source, the only path that existed before this field) -
+  // deliberately not backfilled to a literal "manual" string on existing
+  // rows, since null already means exactly that and doing so would be a
+  // needless bulk write. Only other value in use so far:
+  // "assistant-suggestion" (components/chat/chat-interface.tsx's "بله"
+  // confirm action and its "ویرایش کن" -> AddTransactionForm handoff, both
+  // going through the same createTransaction() call - see
+  // lib/data/transactions.ts).
+  source                      String?
+  // SEC-10 (docs/roadmap-status.md): optional client-generated idempotency
+  // key for POST /api/transactions - a repeat create request carrying a
+  // key already used by this same user returns the existing row instead of
+  // creating a duplicate (see createTransaction() in lib/data/transactions.ts).
+  // Null for every caller that doesn't send one (the field is optional
+  // precisely so older/cached PWA clients that predate this change keep
+  // working unmodified - see that function's own comment on how a null key
+  // skips the idempotency check entirely). Not backfilled on existing rows
+  // for the same reason `source` above wasn't: null already means "no key
+  // was used," so a bulk write here would be a needless live-DB mutation.
+  idempotencyKey              String?
+  // Background AI-enrichment state for a "quick submit" transaction (see
+  // lib/workflows/enrich-transaction.ts). Null for every transaction created
+  // through the normal AI-preview-then-confirm flow, which is already fully
+  // parsed before the row exists - this column only ever gets set by the
+  // quick-submit path (POST /api/transactions with `quick: true`).
+  //   "pending" -> workflow enqueued/running; amount/category are a
+  //                deterministic best-guess, UI shows a subtle indicator.
+  //   "failed"  -> AI enrichment exhausted retries (or was skipped by the
+  //                rate limit); best-guess values stand, UI nudges the user
+  //                to double-check/edit instead of spinning forever.
+  // Cleared back to null once enrichment succeeds (see
+  // applyTransactionEnrichment), or as soon as the user manually edits the
+  // transaction first (see updateTransaction) - a slow-finishing background
+  // job must never clobber a manual correction.
+  enrichmentStatus            String?
+  // The AI's brand-new-category proposal (lib/ai/parse-transaction.ts's
+  // SuggestedCategoryWithIcon) from a "quick submit" transaction's
+  // background enrichment (lib/workflows/enrich-transaction.ts), for the
+  // cases where applyTransactionEnrichment could not resolve it to an
+  // existing category - mirrors SuggestedCategoryWithIcon field-for-field
+  // (suggestedCategoryName -> name, suggestedCategoryParentName ->
+  // parentName, suggestedCategoryReason -> reason, suggestedCategoryIcon ->
+  // icon). All four are always set together, or all left null - there is
+  // no partial state. Null for every transaction created through the
+  // normal AI-preview-then-confirm flow (the user already saw and resolved
+  // this exact suggestion via that flow's own "بسازمش؟" button before the
+  // row was ever created), and for a quick-submit transaction whose
+  // background parse either found no suggestion or matched one to an
+  // existing category outright.
+  //
+  // Cleared back to null once the user accepts (POST
+  // /api/transactions/[id]/suggested-category with {action: "accept"}) or
+  // dismisses ({action: "dismiss"}) the suggestion, or as soon as
+  // updateTransaction runs - the same "a manual edit wins" reasoning
+  // already documented on enrichmentStatus above: a user who has already
+  // hand-corrected this transaction's category has implicitly resolved
+  // whatever the AI would have suggested, so the banner must not linger.
+  suggestedCategoryName       String?
+  suggestedCategoryParentName String?
+  suggestedCategoryReason     String?
+  suggestedCategoryIcon       String?
+  // Links the two rows (one expense, one income) that together make up a
+  // single internal transfer between the user's own FinanceAccounts - e.g.
+  // moving money from a checking account to a savings account is one
+  // expense Transaction on the source account and one income Transaction
+  // on the destination account, both sharing the same transferGroupId so
+  // they can be recognized as a pair rather than counted as real
+  // spending/income. Null for every regular income/expense Transaction -
+  // the vast majority of rows, and the only value that existed before this
+  // field was added.
+  transferGroupId             String?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
 
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -125,10 +237,26 @@ model Transaction {
   categoryId Int
   category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
+  @@unique([userId, idempotencyKey])
   @@index([userId, date])
   @@index([type])
   @@index([categoryId])
   @@index([accountId])
+  @@index([transferGroupId])
+  // Phase 17 (docs/roadmap-status.md): serves
+  // lib/data/accounts.ts's getTotalBalance() -
+  // transaction.groupBy({ by: ["accountId", "type"], where: { userId },
+  // _sum: { amount } }) - added alongside that query, not speculatively.
+  // Measured against the local SQLite test DB (20,000 seeded rows): without
+  // this index, the query already used [userId, date]'s userId prefix to
+  // find the user's own rows, but still needed a temp B-tree to satisfy
+  // GROUP BY accountId, type (~32-40ms). With this index (column order
+  // matches the query's WHERE-then-GROUP-BY shape, `amount` trailing so the
+  // index alone covers the SUM without a row lookup), SQLite's own EXPLAIN
+  // QUERY PLAN switches from "USE TEMP B-TREE FOR GROUP BY" to "SEARCH
+  // Transaction USING COVERING INDEX" - no temp sort, no table access at
+  // all - measured at ~6ms, roughly 6-7x faster on that same seeded data.
+  @@index([userId, accountId, type, amount])
 }
 
 model MerchantMapping {
@@ -147,16 +275,124 @@ model MerchantMapping {
   @@index([categoryId])
 }
 
+// One chat thread between a user and the financial assistant
+// («جیب‌یار» - see app/api/chat/route.ts). The assistant used to have a
+// single endless thread per user; conversations give each thread its own
+// bounded message history and its own AI context, so nothing bleeds
+// between them (the prompt history in app/api/chat/route.ts is scoped by
+// conversationId, never by userId alone).
+model Conversation {
+  id Int @id @default(autoincrement())
+
+  // Null until the first exchange auto-titles it from the user's opening
+  // message (see maybeAutoTitle in lib/data/conversations.ts). Never
+  // written by the user directly - there's no rename UI.
+  title         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  // Bumped after every successful assistant reply, and the sort key the
+  // history list is ordered by. Deliberately separate from `updatedAt`:
+  // @updatedAt moves on any column write (e.g. the auto-title), which
+  // isn't the same thing as "the thread had activity".
+  lastMessageAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  messages ChatMessage[]
+
+  @@index([userId, lastMessageAt])
+}
+
 model ChatMessage {
   id        Int      @id @default(autoincrement())
   role      String
   content   String
   timestamp DateTime @default(now())
 
+  // Kept alongside conversationId (which already implies the owner) on
+  // purpose - same denormalized-userId pattern every other per-user model
+  // in this schema uses, so a direct `where: { userId }` query/cleanup and
+  // the User -> ChatMessage cascade both still work without a join.
   userId Int
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  conversationId Int
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // Still used by the userId prefix alone: the User cascade delete, and
+  // per-user cleanup (`chatMessage.deleteMany({ where: { userId } })`).
+  // No query orders by [userId, timestamp] any more - the chat prompt's
+  // own history read is scoped by conversation now (see below).
   @@index([userId, timestamp])
+  // Serves listMessages() in lib/data/conversations.ts - the "most recent
+  // N messages of this conversation" read on every chat turn and page load.
+  @@index([conversationId, timestamp])
+}
+
+// Cache of a previous (already-closed) Jalali month's spending summary, used
+// by the financial chat assistant (see lib/analytics/spending-summary.ts) to
+// avoid re-running a full transaction aggregation on every chat message.
+// Previous-month data is immutable in practice - users don't edit month-old
+// transactions often - so it's safe to cache. The current, still-in-progress
+// month is never cached here and is always computed live.
+model SpendingSummaryCache {
+  id         Int      @id @default(autoincrement())
+  // Jalali "YYYY-MM", e.g. "1404-05".
+  monthKey   String
+  // JSON-serialized MonthSummary (see lib/analytics/spending-summary.ts).
+  payload    String
+  computedAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, monthKey])
+}
+
+// A single known fact about a user - either stated explicitly by them or
+// inferred from their transaction history - used by the financial chat
+// assistant (see lib/facts/user-facts.ts, lib/facts/infer-facts.ts, and its
+// injection into the chat prompt in lib/data/chat-context.ts) so it stops
+// repeating advice/comparisons that don't fit the user's actual life (e.g.
+// suggesting they cut gas spending when they don't own a car). `key` is
+// restricted to a small fixed vocabulary registered in
+// lib/facts/known-facts.ts, not free text. One row per (user, key) - a
+// re-statement or re-inference updates the existing row rather than
+// accumulating history, since only the current value matters here.
+model UserFact {
+  id Int @id @default(autoincrement())
+
+  // Small fixed vocabulary, e.g. "has_car", "is_renter",
+  // "income_regularity" - validated against lib/facts/known-facts.ts before
+  // every write, never invented ad-hoc at the call site.
+  key        String
+  // Interpretation depends on `key` (e.g. "true"/"false", or an
+  // enum-like string such as "regular"/"irregular") - see
+  // lib/facts/known-facts.ts for each key's allowed values.
+  value      String
+  // "user_stated" | "inferred". user_stated is always authoritative: it's
+  // written once the user says something explicitly and is never
+  // overwritten by a later inference for the same key (see
+  // lib/facts/user-facts.ts's setInferredFact).
+  source     String
+  // Null for user_stated (certain by definition, no probability to
+  // express). 0-1 for inferred facts - lib/facts/user-facts.ts's
+  // formatFactsForPrompt only surfaces high-enough-confidence inferred
+  // facts to the LLM.
+  confidence Float?
+  // Optional short human-readable justification, e.g. "no gas/parking
+  // transactions in 90 days" - for admin/debugging visibility only, never
+  // shown to the end user verbatim.
+  note       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
 }
 
 // Minimal error log for admin operational visibility (see app/app/admin).
@@ -186,13 +422,21 @@ model ErrorLog {
 // per-user Category model above, with the same hierarchy/uniqueness shape
 // minus the userId scope.
 model DefaultCategory {
-  id         Int      @id @default(autoincrement())
-  name       String
-  icon       String
-  color      String
-  type       String
-  isTransfer Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  name        String
+  icon        String
+  color       String
+  type        String
+  isTransfer  Boolean  @default(false)
+  // Copied onto each new user's own Category.isEssential at onboarding (see
+  // lib/data/onboarding.ts) - same meaning/default as Category.isEssential
+  // above.
+  isEssential Boolean  @default(true)
+  // Skipped by onboarding (lib/data/onboarding.ts) - same meaning as
+  // Category.isArchived above. Not copied onto the user's own Category rows:
+  // an archived default is simply never seeded.
+  isArchived  Boolean  @default(false)
+  createdAt   DateTime @default(now())
 
   parentId Int?
   parent   DefaultCategory?  @relation("DefaultCategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
@@ -200,4 +444,252 @@ model DefaultCategory {
 
   @@unique([name, type])
   @@index([parentId])
+}
+
+// One purchase ("lot") of an asset the user tracks outside their regular
+// accounts/transactions - gold/usd/bitcoin (live-priced, see
+// lib/prices/get-live-prices.ts) or a manually-priced "custom" asset (a
+// stock, a car, ...). Lot-based (one row per purchase) rather than one
+// aggregated row per type with a weighted-average cost basis, so buying the
+// same asset at different times/prices stays simple to record, edit, and
+// delete individually while still summing cleanly for a per-type/portfolio
+// total in lib/data/assets.ts's listAssetsWithValue().
+model Asset {
+  id   Int    @id @default(autoincrement())
+  // "gold" | "usd" | "bitcoin" | "custom" - same plain-string-enum
+  // convention as User.role/FinanceAccount.type/Category.type above.
+  type String
+
+  // Only set (and only meaningful) for type="custom" - the user's own label
+  // for a manually-tracked asset (e.g. "سهام فولاد", "خودرو"). Null for
+  // gold/usd/bitcoin, which get their display label from ASSET_TYPES
+  // (lib/assets.ts) instead.
+  name String?
+
+  // Amount held, in the asset's natural unit: grams for gold, whole dollars
+  // for usd, BTC for bitcoin, an arbitrary count for custom.
+  quantity Float
+
+  // Purchase price per unit, in Toman, at the time this lot was bought.
+  // BigInt (not Int, unlike Transaction.amount/FinanceAccount.initialBalance)
+  // because a per-BTC Toman price routinely exceeds Int32's ~2.147 billion
+  // ceiling that Prisma actually enforces client-side - see the "Applying a
+  // new schema change" note in AGENTS.md's history for this project's
+  // existing Int-range precedent (MAX_TRANSACTION_AMOUNT/
+  // MAX_ACCOUNT_BALANCE_MAGNITUDE in lib/limits.ts). SQLite stores both Int
+  // and BigInt the same way (an untyped INTEGER column) so this doesn't
+  // change how the value is stored, only what range Prisma Client accepts.
+  purchasePricePerUnit BigInt
+  purchaseDate         DateTime @default(now())
+
+  // Only set/updated for type="custom" - the current per-unit value the
+  // user enters/updates by hand, since there's no live price feed for an
+  // arbitrary asset. Always null for gold/usd/bitcoin, whose current price
+  // always comes live from lib/prices/get-live-prices.ts instead of being
+  // stored per-row.
+  currentPricePerUnit BigInt?
+
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// A user-defined savings goal (e.g. "MacBook, 60,000,000 Toman, in 6
+// months") - Phase 1 (docs/roadmap-status.md): this model plus the
+// deterministic feasibility engine (lib/goals/feasibility.ts) and a minimal
+// CRUD API (lib/data/goals.ts, app/api/goals/) is the whole of this phase.
+// No AI-generated strategy text and no dedicated tracking-dashboard UI yet -
+// both are later phases.
+model Goal {
+  id Int @id @default(autoincrement())
+
+  // Capped at MAX_NAME_LENGTH (lib/limits.ts) - same ceiling as
+  // FinanceAccount.name/Category.name, no goal-specific reason for a
+  // different one.
+  name String
+
+  // Plain string enum - "device" | "travel" | "car" | "emergency_fund" |
+  // "home_down_payment" | "other". Same convention as every other
+  // type-like field in this schema (User.role, FinanceAccount.type,
+  // Category.type, Asset.type) - enforced at the application level only
+  // (lib/data/goals.ts), not by a DB-level constraint (see User.role's own
+  // comment on why: this installed Prisma version has no
+  // `@check`/`@@check` attribute at all).
+  category String
+
+  // Toman - same Int precedent as Transaction.amount/FinanceAccount.
+  // initialBalance. Bounded by MAX_GOAL_TARGET_AMOUNT (lib/limits.ts),
+  // Int32's own range, same reasoning as MAX_TRANSACTION_AMOUNT.
+  targetAmount Int
+
+  // Optional starting balance the user already had saved toward this goal
+  // before creating it in Jib (e.g. "I already have 10,000,000 Toman set
+  // aside"). Distinct from lib/goals/feasibility.ts's own "alreadySaved"
+  // input, which layers whatever progress this phase can attribute to the
+  // user's tracked net cash flow *since* the goal was created on top of
+  // this starting number - see that file's doc comment.
+  initialAmount Int @default(0)
+
+  deadline DateTime
+
+  // "active" | "achieved" | "abandoned" - same plain-string-enum
+  // convention as `category` above. Defaults to "active" since every goal
+  // starts out that way; this phase never transitions it automatically -
+  // "achieved"/"abandoned" are only ever set by an explicit user edit
+  // (PATCH /api/goals/[id]).
+  status String @default("active")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Phase B1 (savings roadmap): optional link to one of the user's own
+  // FinanceAccounts, whose real tracked balance then drives this goal's
+  // alreadySaved/availableBalance (lib/goals/feasibility.ts's
+  // getGoalFeasibilityContext / lib/data/goals.ts's listGoalsWithFeasibility)
+  // instead of a shared, evenly-split availableBalancePerActiveGoal. Nullable
+  // - most goals still have no dedicated account - and SetNull (not Cascade
+  // or Restrict) on delete, same "the weaker side goes away quietly, the
+  // stronger side survives" shape as ErrorLog.userId above: deleting the
+  // linked FinanceAccount unlinks the goal (it falls back to shared-pool
+  // apportionment) rather than deleting the goal itself or blocking the
+  // account deletion.
+  savingsAccountId Int?
+  savingsAccount   FinanceAccount? @relation(fields: [savingsAccountId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([savingsAccountId])
+}
+
+// Shared (not per-user - market prices don't depend on who's asking) cache
+// of the latest gold/usd/bitcoin Toman prices fetched from brsapi.ir (see
+// lib/prices/get-live-prices.ts), so concurrent page loads from any number
+// of users reuse one fetch instead of each hitting the external API - keeps
+// usage well inside its free-tier daily request cap. Same caching motive as
+// SpendingSummaryCache above, for a different kind of value. Single-row
+// table - id is always 1.
+model LivePriceCache {
+  id                   Int      @id @default(1)
+  goldGramPricePerUnit BigInt
+  usdPricePerUnit      BigInt
+  bitcoinPricePerUnit  BigInt
+  fetchedAt            DateTime
+
+  // Set (to a future time) when the most recent fetch attempt hit
+  // nerkh.io's quota-exhausted response (QuotaExceededError, see
+  // lib/prices/get-live-prices.ts). While this is non-null and in the
+  // future, getLivePrices skips the network fetch entirely and serves this
+  // row with `stale: true` instead of re-attempting (and re-failing)
+  // against an already-exhausted quota every CACHE_TTL_MS cycle. Cleared
+  // (left null) again the next time a fetch is attempted after expiry -
+  // there's no separate "cooldown active" boolean, this column is both.
+  quotaExceededUntil DateTime?
+}
+
+// Schema-only groundwork for the savings-formulas feature (first phase -
+// no API route or UI reads/writes this yet). Deliberately decoupled from
+// Transaction and Goal for now: unlike Goal.savingsAccountId (Phase B) or
+// the transfer pair on Transaction (Phase A), this model has no relation to
+// either - a SavingsStrategy is just a standalone record of which formula
+// the user picked, until a later phase wires it into actual money movement.
+model SavingsStrategy {
+  id Int @id @default(autoincrement())
+
+  // "fifty_thirty_twenty" | "pay_yourself_first" | "leftover" | "roundup" |
+  // "custom" - same plain-string-enum convention as every other type-like
+  // field in this schema (User.role, FinanceAccount.type, Category.type,
+  // Asset.type, Goal.category/status).
+  formulaType String
+
+  // Percent (0-100) for a percent-based formula (e.g.
+  // "fifty_thirty_twenty"). Exactly one of targetPercent/targetAmount is
+  // set, matching whichever formulaType this is - a percent-based formula
+  // sets this and leaves targetAmount null, an amount-based one is the
+  // reverse.
+  targetPercent Float?
+
+  // Toman, for a fixed-amount formula (e.g. "pay_yourself_first"). Same Int
+  // precedent as Goal.targetAmount/Transaction.amount elsewhere in this
+  // schema. Exactly one of targetPercent/targetAmount is set - see
+  // targetPercent above.
+  targetAmount Int?
+
+  // "active" | "paused" | "abandoned" - same plain-string-enum convention
+  // as Goal.status. Defaults to "active" since every strategy starts out
+  // that way.
+  status String @default("active")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// One Web Push subscription (a single browser/device registration) for a
+// user - the endpoint/keys shape the Web Push protocol itself defines
+// (PushSubscription.toJSON() on the client), persisted so the server can
+// push to it later. A user can have several of these at once (one per
+// browser/device they've enabled notifications on); `endpoint` is unique on
+// its own (not scoped to userId) since it's already a globally unique URL
+// assigned by the browser's push service, and re-subscribing the same
+// device must not create a duplicate row.
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Backs both the in-app notification center (read/unread state) and
+// push-delivery logging (dedupe/audit) for a single notification sent to a
+// user - one row per notification regardless of whether it was actually
+// delivered via push.
+model NotificationLog {
+  id Int @id @default(autoincrement())
+
+  // "income_savings_suggestion" | "nightly_reminder" - same plain-string-enum
+  // convention as every other type-like field in this schema (User.role,
+  // FinanceAccount.type, Category.type, Asset.type, Goal.category/status,
+  // SavingsStrategy.formulaType/status).
+  type String
+
+  title String
+  body  String
+
+  // Whether the user has seen/dismissed this in the in-app notification
+  // center. Defaults to false since every notification starts unread.
+  read Boolean @default(false)
+
+  // Whether this notification was (also) delivered via a Web Push message,
+  // as opposed to only ever appearing in the in-app notification center.
+  // Defaults to false since a row is written regardless of push-delivery
+  // outcome - see this model's own doc comment above.
+  sentViaPush Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Serves the unread-count/unread-list read in the in-app notification
+  // center (`where: { userId, read: false }`).
+  @@index([userId, read])
+  // Serves the notification center's "most recent first" list read.
+  @@index([userId, createdAt])
 }

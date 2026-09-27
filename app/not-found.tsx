@@ -11,7 +11,7 @@ export default function NotFound() {
       <p className="text-sm text-muted">آدرسی که دنبالش بودید وجود نداره یا جابه‌جا شده.</p>
       <Link
         href="/app"
-        className="mt-2 inline-flex items-center justify-center rounded-2xl bg-primary-darker px-6 py-3 text-sm font-semibold text-white"
+        className="mt-2 inline-flex items-center justify-center rounded-2xl bg-primary px-6 py-3 text-sm font-semibold text-on-primary"
       >
         رفتن به داشبورد
       </Link>

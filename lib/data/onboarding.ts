@@ -1,3 +1,4 @@
+import "server-only";
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_ACCOUNT } from "@/lib/categories";
 
@@ -12,9 +13,13 @@ export async function seedDefaultsForUser(userId: number) {
 // (see prisma/backfill-categories.ts) can copy DefaultCategory rows into a
 // user's Category table without also re-creating their FinanceAccount.
 export async function seedDefaultCategoriesForUser(userId: number) {
+  // Archived defaults (DefaultCategory.isArchived) are never seeded.
+  // Removing an entry from prisma/default-categories.ts alone doesn't retire
+  // it: prisma/seed.ts only ever upserts, so its already-seeded row stays in
+  // the live DefaultCategory table until it's flagged here.
   const defaultMains = await prisma.defaultCategory.findMany({
-    where: { parentId: null },
-    include: { children: true },
+    where: { parentId: null, isArchived: false },
+    include: { children: { where: { isArchived: false } } },
     orderBy: { id: "asc" },
   });
 
@@ -27,6 +32,7 @@ export async function seedDefaultCategoriesForUser(userId: number) {
           color: main.color,
           type: main.type,
           isTransfer: main.isTransfer,
+          isEssential: main.isEssential,
           userId,
         },
       });
@@ -39,6 +45,7 @@ export async function seedDefaultCategoriesForUser(userId: number) {
             color: sub.color,
             type: sub.type,
             isTransfer: sub.isTransfer,
+            isEssential: sub.isEssential,
             parentId: parent.id,
             userId,
           })),

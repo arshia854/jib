@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { PlusIcon, EditIcon, TrashIcon, XIcon, CheckIcon, SpinnerIcon } from "@/components/icons";
+import Link from "next/link";
+import { PlusIcon, EditIcon, TrashIcon, XIcon, CheckIcon, SpinnerIcon, TransferIcon } from "@/components/icons";
 import { ACCOUNT_TYPES, getAccountTypeIcon, type AccountType } from "@/lib/accounts";
+import { AmountInput } from "@/components/ui/amount-input";
 
 interface Account {
   id: number;
@@ -94,10 +96,23 @@ export function AccountsManager({ accounts }: { accounts: Account[] }) {
     <div className="space-y-6 px-4 pb-8 pt-6">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-bold text-foreground">حساب‌ها</h1>
-        <button onClick={openCreate} className="flex items-center gap-1 text-xs font-medium text-accent">
-          <PlusIcon className="h-3.5 w-3.5" />
-          افزودن
-        </button>
+        <div className="flex items-center gap-3">
+          {/* Phase A3 (docs/roadmap-status.md savings roadmap): entry point
+              for creating a transfer - matches add-transaction's own
+              button-to-dedicated-route convention (see app/app/transfer/page.tsx
+              and components/layout/fab.tsx), placed here rather than as a
+              second global FAB since this page already has the account
+              list a transfer needs, and is the natural place to think
+              "move money between these." */}
+          <Link href="/app/transfer" className="flex items-center gap-1 text-xs font-medium text-accent">
+            <TransferIcon className="h-3.5 w-3.5" />
+            انتقال
+          </Link>
+          <button onClick={openCreate} className="flex items-center gap-1 text-xs font-medium text-accent">
+            <PlusIcon className="h-3.5 w-3.5" />
+            افزودن
+          </button>
+        </div>
       </header>
 
       {deleteError && <p className="rounded-xl bg-warning/10 p-3 text-xs text-warning">{deleteError}</p>}
@@ -146,7 +161,7 @@ export function AccountsManager({ accounts }: { accounts: Account[] }) {
 
       {form && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm"
           onClick={() => !saving && setForm(null)}
         >
           <div className="w-full max-w-md rounded-t-3xl bg-surface p-5 pb-8" onClick={(e) => e.stopPropagation()}>
@@ -173,7 +188,7 @@ export function AccountsManager({ accounts }: { accounts: Account[] }) {
                   type="button"
                   onClick={() => setForm({ ...form, type: t.value })}
                   className={`flex items-center justify-center gap-1.5 rounded-xl py-2 text-sm font-medium ${
-                    form.type === t.value ? "bg-primary-darker text-white" : "bg-background text-muted"
+                    form.type === t.value ? "bg-primary text-on-primary" : "bg-background text-muted"
                   }`}
                 >
                   <span>{t.icon}</span>
@@ -183,11 +198,9 @@ export function AccountsManager({ accounts }: { accounts: Account[] }) {
             </div>
 
             <label className="mt-4 block text-xs text-muted">موجودی اولیه (تومان)</label>
-            <input
-              type="number"
-              value={form.initialBalance}
-              onChange={(e) => setForm({ ...form, initialBalance: e.target.value })}
-              className="mt-1 w-full rounded-xl border border-border bg-background p-3 text-sm tabular-fa outline-none focus:border-accent"
+            <AmountInput
+              value={Number(form.initialBalance) || 0}
+              onChange={(next) => setForm({ ...form, initialBalance: next ? String(next) : "" })}
             />
 
             {error && <p className="mt-3 text-xs text-warning">{error}</p>}
@@ -195,7 +208,7 @@ export function AccountsManager({ accounts }: { accounts: Account[] }) {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary-darker py-3.5 text-sm font-semibold text-white disabled:opacity-50"
+              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 text-sm font-semibold text-on-primary disabled:opacity-50"
             >
               {saving ? <SpinnerIcon className="h-4 w-4 animate-spin" /> : <CheckIcon className="h-4 w-4" />}
               ذخیره

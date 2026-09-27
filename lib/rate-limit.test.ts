@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { checkRateLimit, getClientIp, rateLimitResponse, type RateLimitRule } from "@/lib/rate-limit";
+import {
+  checkRateLimit,
+  getClientIp,
+  rateLimitResponse,
+  MAX_STORE_SIZE,
+  __getStoreSizeForTests,
+  type RateLimitRule,
+} from "@/lib/rate-limit";
 
 const RULE: RateLimitRule = { limit: 3, windowSeconds: 60 };
 
@@ -79,18 +86,43 @@ describe("checkRateLimit", () => {
 });
 
 describe("getClientIp", () => {
-  it("prefers the first address in X-Forwarded-For", () => {
-    const headers = new Headers({ "x-forwarded-for": "203.0.113.5, 10.0.0.1" });
-    expect(getClientIp(headers)).toBe("203.0.113.5");
+  it("prefers X-Real-IP over X-Forwarded-For when both are present", () => {
+    const headers = new Headers({
+      "x-real-ip": "198.51.100.7",
+      "x-forwarded-for": "203.0.113.5, 10.0.0.1",
+    });
+    expect(getClientIp(headers)).toBe("198.51.100.7");
   });
 
-  it("falls back to X-Real-IP when X-Forwarded-For is absent", () => {
-    const headers = new Headers({ "x-real-ip": "198.51.100.7" });
-    expect(getClientIp(headers)).toBe("198.51.100.7");
+  it("falls back to X-Forwarded-For when X-Real-IP is absent", () => {
+    const headers = new Headers({ "x-forwarded-for": "203.0.113.5, 10.0.0.1" });
+    expect(getClientIp(headers)).toBe("10.0.0.1");
+  });
+
+  it("prefers the LAST address in X-Forwarded-For, not the client-supplied first one", () => {
+    // Simulates a client spoofing an arbitrary leading entry; the last
+    // entry is the one our own reverse proxy appended.
+    const headers = new Headers({ "x-forwarded-for": "1.2.3.4, 5.6.7.8, 203.0.113.9" });
+    expect(getClientIp(headers)).toBe("203.0.113.9");
+  });
+
+  it("handles a single-entry X-Forwarded-For (no comma)", () => {
+    const headers = new Headers({ "x-forwarded-for": "203.0.113.5" });
+    expect(getClientIp(headers)).toBe("203.0.113.5");
   });
 
   it("falls back to 'unknown' when no IP header is present", () => {
     expect(getClientIp(new Headers())).toBe("unknown");
+  });
+});
+
+describe("checkRateLimit store size cap", () => {
+  it("never grows past MAX_STORE_SIZE even when flooded with many distinct keys", () => {
+    const now = 5_000_000;
+    for (let i = 0; i < MAX_STORE_SIZE + 1000; i++) {
+      checkRateLimit(`test:flood:${i}`, RULE, now);
+    }
+    expect(__getStoreSizeForTests()).toBeLessThanOrEqual(MAX_STORE_SIZE);
   });
 });
 

@@ -13,6 +13,15 @@ interface Props {
   amount: number;
   type: string;
   category: { name: string; icon: string; color: string };
+  enrichmentStatus?: string | null;
+  // See schema.prisma's own comment on Transaction.suggestedCategoryName -
+  // parentName/reason aren't needed here: the accept action just tells the
+  // server "resolve this transaction's own suggestion" and the route reads
+  // them straight off the row itself (see POST
+  // /api/transactions/[id]/suggested-category), so the client never needs
+  // to round-trip them back.
+  suggestedCategoryName?: string | null;
+  suggestedCategoryIcon?: string | null;
 }
 
 export function TransactionListItem(props: Props) {
@@ -20,6 +29,8 @@ export function TransactionListItem(props: Props) {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resolvingSuggestion, setResolvingSuggestion] = useState(false);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
 
   async function handleDelete() {
     setDeleting(true);
@@ -36,6 +47,31 @@ export function TransactionListItem(props: Props) {
     }
   }
 
+  // Shared by both suggested-category actions below - only `action` and the
+  // fallback error message differ. router.refresh() (rather than local
+  // state) is what actually makes the banner disappear on success: the
+  // server has cleared suggestedCategoryName by then, so the next render of
+  // this (server-fetched) prop is simply absent, same as handleDelete
+  // above relying on router.refresh() rather than an optimistic local
+  // removal.
+  async function submitSuggestedCategoryAction(action: "accept" | "dismiss", fallbackMessage: string) {
+    setResolvingSuggestion(true);
+    setSuggestionError(null);
+    try {
+      const res = await fetch(`/api/transactions/${props.id}/suggested-category`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || fallbackMessage);
+      router.refresh();
+    } catch (err) {
+      setSuggestionError(err instanceof Error ? err.message : "خطای ناشناخته رخ داد.");
+      setResolvingSuggestion(false);
+    }
+  }
+
   return (
     <div>
       <div className="flex items-center gap-2">
@@ -47,6 +83,17 @@ export function TransactionListItem(props: Props) {
             amount={props.amount}
             type={props.type}
             category={props.category}
+            enrichmentStatus={props.enrichmentStatus}
+            suggestedCategoryName={props.suggestedCategoryName}
+            suggestedCategoryIcon={props.suggestedCategoryIcon}
+            onAcceptSuggestedCategory={() =>
+              submitSuggestedCategoryAction("accept", "دسته‌بندی ساخته نشد، دوباره تلاش کن.")
+            }
+            onDismissSuggestedCategory={() =>
+              submitSuggestedCategoryAction("dismiss", "خطا در رد کردن پیشنهاد.")
+            }
+            isResolvingSuggestedCategory={resolvingSuggestion}
+            suggestedCategoryError={suggestionError}
           />
         </div>
         {confirming ? (

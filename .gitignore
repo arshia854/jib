@@ -23,6 +23,7 @@
 # misc
 .DS_Store
 *.pem
+*.bak
 
 # debug
 npm-debug.log*
@@ -47,3 +48,13 @@ next-env.d.ts
 /dev.db-journal
 /prisma/dev.db
 /prisma/dev.db-journal
+
+# isolated test DB (see test/setup/global-setup.ts) - recreated every test run
+/.vitest-test.db
+/.vitest-test.db-wal
+/.vitest-test.db-shm
+/.vitest-test.db-journal
+/.swc
+
+# Live DB backups (scripts/backup-live-db.ts) - contains real user financial data
+/backups/

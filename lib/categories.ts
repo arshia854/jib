@@ -15,6 +15,50 @@ export const DEFAULT_ACCOUNT = {
   initialBalance: 0,
 };
 
+// The generic "nothing else fits" bucket each user's category list is
+// seeded with (see prisma/seed.ts's DEFAULT_CATEGORIES) - one per type,
+// since "سایر هزینه‌ها" is expense-only and "سایر درآمدها" is income-only.
+// Named as constants (rather than inlined at each fallback site) so this
+// can't silently drift out of sync with the seed in more than one place.
+//
+// Defined here (not in lib/ai/parse-transaction.ts, which re-exports these
+// for backward compatibility) specifically so lib/merchants.ts can import
+// the real values too, for merchant entries (e.g. payment gateways) that
+// have no better category than "whatever the fallback bucket is". Importing
+// them from parse-transaction.ts directly would create a circular import -
+// parse-transaction.ts -> lib/merchant-lookup.ts -> lib/merchants.ts ->
+// back to parse-transaction.ts - which is not just a lint smell here: it
+// was verified to actually throw
+// "ReferenceError: Cannot access 'FALLBACK_EXPENSE_CATEGORY' before
+// initialization" at runtime whenever something imports parse-transaction.ts
+// before merchants.ts (the realistic order, since API routes import
+// parseTransactionWithAI directly). lib/categories.ts has no runtime
+// dependency back on parse-transaction.ts (only a `import type`, erased at
+// compile time) or on merchants.ts/merchant-lookup.ts, so it's a safe
+// shared home for both sides.
+export const FALLBACK_EXPENSE_CATEGORY = "سایر هزینه‌ها";
+export const FALLBACK_INCOME_CATEGORY = "سایر درآمدها";
+
+// Drops every category a NEW transaction must not land on: one flagged
+// Category.isArchived itself, or a child of an archived top-level category
+// (archiving a parent retires its whole subtree - otherwise its children
+// would still be reachable through a merchant override or findSimilarCategory
+// even though formatCategoryTree no longer lists them under any parent).
+// Existing transactions keep pointing at archived rows untouched - this is
+// only ever applied to candidate lists for new selection/suggestion, never
+// to anything that displays history. Replaces the old name-based
+// DEPRECATED_CATEGORY_NAMES list; see prisma/archive-retired-categories.ts
+// for the one-off backfill that flagged its only entry
+// ("واریز به حساب پس‌انداز") on existing users' rows.
+export function excludeArchived<T extends CategoryOption>(categories: T[]): T[] {
+  const archivedTopLevel = new Set(
+    categories.filter((c) => c.isArchived && !c.parentName).map((c) => `${c.type}:${c.name}`)
+  );
+  return categories.filter(
+    (c) => !c.isArchived && !(c.parentName && archivedTopLevel.has(`${c.type}:${c.parentName}`))
+  );
+}
+
 // Below this shared-token ratio (intersection size / size of the shorter
 // name's token set), an overlap is treated as coincidental - e.g. sharing
 // one generic word - rather than a genuine near-match, so stage 3 below
@@ -67,7 +111,23 @@ function findTokenOverlapMatch(
 // response is never trusted for this (sanitizeNewCategorySuggestion
 // already drops a hallucinated `icon` key before this is ever called).
 // Same style as CATEGORY_ALIASES: a small lookup table over known names,
-// with a generic fallback for anything not listed here.
+// with a generic fallback (DEFAULT_NEW_CATEGORY_ICON) for anything not
+// listed here.
+//
+// Covers concepts genuinely likely to still have no match among the
+// 23-top-level/59-subcategory default tree (see prisma/default-categories.ts)
+// even after findSimilarCategory's alias/token-overlap passes - not an
+// attempt to enumerate every possible category, which would just be a
+// second, worse copy of the real tree. The goal is to make
+// DEFAULT_NEW_CATEGORY_ICON's box rare, not to eliminate it - a genuine
+// long tail is still expected to fall through to it.
+//
+// Keys must be written in already-normalized form: resolveNewCategoryIcon
+// looks up normalizeText(name), and normalizeText (lib/normalize.ts)
+// replaces a ZWNJ/half-space (e.g. the one in "شرط‌بندی") with a plain
+// space - so a key containing a literal ZWNJ would never match. Every
+// multi-word key below is written with a plain space for this reason, even
+// where the "correct" Persian spelling conventionally uses a half-space.
 const NEW_CATEGORY_ICONS: Record<string, string> = {
   "دخانیات": "🚬",
   "لوازم حیوان خانگی": "🐾",
@@ -75,6 +135,49 @@ const NEW_CATEGORY_ICONS: Record<string, string> = {
   "بیمه": "🛡️",
   "خیریه": "❤️",
   "اشتراک": "🔄",
+
+  // Personal care / beauty - specific enough not to get caught by «خدمات
+  // شخصی و زیبایی»'s own subcategories (آرایشگاه و سالن زیبایی, لوازم
+  // آرایشی و بهداشتی, خشکشویی) via findSimilarCategory first.
+  "مانیکور": "💅",
+  "پدیکور": "💅",
+  "تتو": "🎨",
+  "جراحی زیبایی": "💉",
+  "لوازم آرایشی": "💄",
+
+  // Entertainment / lifestyle
+  "بازی ویدیویی": "🎮",
+  "کافه گردی": "☕",
+
+  // Finance / speculative - none of these fit «پس‌انداز و سرمایه‌گذاری»
+  // (a deliberate, held investment), so they're kept distinct rather than
+  // folded in there.
+  "کریپتو": "🪙",
+  "رمزارز": "🪙",
+  "قمار و شرط بندی": "🎰",
+  "بلیط بخت آزمایی": "🎟️",
+
+  // Religious / charitable - distinct from «هدیه و خیریه»'s own خیریه و
+  // صدقه subcategory, which is generic giving rather than a specific
+  // religious practice/obligation.
+  "مذهبی": "🙏",
+  "زکات": "🕌",
+
+  // Family / childcare
+  "شهریه مهدکودک": "🧸",
+  "لوازم بچه": "👶",
+  "کلاس موسیقی": "🎵",
+
+  // Transport / errands - none of «حمل‌ونقل»'s own subcategories (بنزین,
+  // تاکسی و اسنپ, تعمیر و سرویس خودرو, مترو و اتوبوس, پارکینگ و جریمه)
+  // cover "someone else delivering something to me" or "renting a car for
+  // a while".
+  "پیک موتوری": "🛵",
+  "اجاره خودرو": "🔑",
+
+  // Home services - distinct from «تعمیر و نگهداری منزل», which is
+  // repair/upkeep rather than routine cleaning.
+  "کارگر نظافت": "🧹",
 };
 
 const DEFAULT_NEW_CATEGORY_ICON = "📦";

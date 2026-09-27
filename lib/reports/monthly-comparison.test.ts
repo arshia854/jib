@@ -12,6 +12,7 @@ describe("getMonthlyComparison", () => {
   const INSURANCE_NAME = "بیمه تست";
   const UNUSED_NAME = "دسته بدون تراکنش در بازه تست";
   const INCOME_NAME = "درآمد تست";
+  const TRANSFER_NAME = "انتقال تست";
 
   // Crosses a Jalaali year boundary: اسفند ۱۴۰۲ -> فروردین ۱۴۰۳.
   const PREVIOUS_MONTH = "1402-12";
@@ -28,21 +29,26 @@ describe("getMonthlyComparison", () => {
     });
     accountId = account.id;
 
-    const [food, transport, insurance, unused, income] = await Promise.all([
+    const [food, transport, insurance, unused, income, transfer] = await Promise.all([
+      // Discretionary (isEssential: false), set explicitly rather than relying on the schema default.
       prisma.category.create({
-        data: { userId, name: FOOD_NAME, icon: "🍔", color: "#000001", type: "expense" },
+        data: { userId, name: FOOD_NAME, icon: "🍔", color: "#000001", type: "expense", isEssential: false },
       }),
       prisma.category.create({
         data: { userId, name: TRANSPORT_NAME, icon: "🚌", color: "#000002", type: "expense" },
       }),
+      // Essential (isEssential: true), set explicitly rather than relying on the schema default.
       prisma.category.create({
-        data: { userId, name: INSURANCE_NAME, icon: "🛡️", color: "#000003", type: "expense" },
+        data: { userId, name: INSURANCE_NAME, icon: "🛡️", color: "#000003", type: "expense", isEssential: true },
       }),
       prisma.category.create({
         data: { userId, name: UNUSED_NAME, icon: "❓", color: "#000004", type: "expense" },
       }),
       prisma.category.create({
         data: { userId, name: INCOME_NAME, icon: "💰", color: "#000005", type: "income" },
+      }),
+      prisma.category.create({
+        data: { userId, name: TRANSFER_NAME, icon: "🔄", color: "#000006", type: "expense", isTransfer: true },
       }),
     ]);
 
@@ -69,6 +75,13 @@ describe("getMonthlyComparison", () => {
       // Income in both months -> must not be treated as "spending"
       makeTxn(income.id, "income", 500000, jalaaliToDateObject(1402, 12, 1)),
       makeTxn(income.id, "income", 500000, jalaaliToDateObject(1403, 1, 1)),
+
+      // A transfer between the user's own accounts -> must not be treated
+      // as spending either, despite being type "expense" like food/transport
+      // above. Deliberately a large amount, so if the exclusion regresses,
+      // "sums totals..." below would fail loudly rather than by a
+      // hard-to-notice small drift.
+      makeTxn(transfer.id, "expense", 999999, jalaaliToDateObject(1403, 1, 12)),
     ]);
   });
 
@@ -89,6 +102,7 @@ describe("getMonthlyComparison", () => {
     expect(food?.currentAmount).toBe(150000);
     expect(food?.percentChange).toBe(50);
     expect(food?.isIncrease).toBe(true);
+    expect(food?.isEssential).toBe(false);
   });
 
   it("caps percentChange at 100 when previousAmount is 0 and currentAmount > 0", async () => {
@@ -111,6 +125,7 @@ describe("getMonthlyComparison", () => {
     expect(insurance?.currentAmount).toBe(0);
     expect(insurance?.percentChange).toBe(-100);
     expect(insurance?.isIncrease).toBe(false);
+    expect(insurance?.isEssential).toBe(true);
   });
 
   it("excludes a category entirely when both previousAmount and currentAmount are 0", async () => {
@@ -121,6 +136,11 @@ describe("getMonthlyComparison", () => {
   it("excludes income transactions from the spending comparison", async () => {
     const result = await getMonthlyComparison(String(userId), CURRENT_MONTH, PREVIOUS_MONTH);
     expect(result.categories.find((c) => c.category === INCOME_NAME)).toBeUndefined();
+  });
+
+  it("excludes Category.isTransfer categories from the spending comparison", async () => {
+    const result = await getMonthlyComparison(String(userId), CURRENT_MONTH, PREVIOUS_MONTH);
+    expect(result.categories.find((c) => c.category === TRANSFER_NAME)).toBeUndefined();
   });
 
   it("sums totals across all categories and computes the overall percent change", async () => {

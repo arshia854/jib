@@ -1,21 +1,124 @@
 @import "tailwindcss";
-@import "@fontsource-variable/vazirmatn/wght.css";
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-Thin.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-Thin.woff") format("woff");
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-Light.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-Light.woff") format("woff");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-Regular.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-Regular.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-SemiBold.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-SemiBold.woff") format("woff");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-Bold.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-ExtraBold.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-ExtraBold.woff") format("woff");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-Black.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-Black.woff") format("woff");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Yekan Bakh";
+  src:
+    url("/fonts/yekan-bakh/YekanBakh-ExtraBlack.woff2") format("woff2"),
+    url("/fonts/yekan-bakh/YekanBakh-ExtraBlack.woff") format("woff");
+  font-weight: 950;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
-  --background: #f8fafc;
-  --surface: #ffffff;
-  --foreground: #0f172a;
-  --primary-bg: #FFFCF0;
-  --primary-subtle: #FEF3C7;
-  --primary-soft: #FDD97C;
-  --primary: #F5A11A;
-  --primary-dark: #C9820F;
-  --primary-darker: #A1680C;
-  --accent: #FCB92E;
-  --success: #10b981;
-  --warning: #ef4444;
-  --muted: #64748b;
-  --border: #e2e8f0;
+  --background: #000000;
+  --surface: #141414;
+  --foreground: #fafafa;
+  --primary-bg: #241f0a;
+  --primary-subtle: #332b0c;
+  --primary-soft: #f2c230;
+  --primary: #ffd400;
+  --primary-dark: #e6bf00;
+  --primary-darker: #cca800;
+  --on-primary: #000000;
+  --accent: #ffd400;
+  --success: #22c55e;
+  --warning: #f87171;
+  --muted: #a1a1aa;
+  --border: rgba(255, 255, 255, 0.1);
+}
+
+/* Light theme - see lib/theme.ts / components/settings/theme-toggle.tsx.
+   Set on <html data-theme="light"> by the blocking script in app/layout.tsx
+   (or server-side from the jib-theme cookie); overrides every variable
+   above. Keeps the same #ffd400 brand primary/accent, tuned for WCAG AA
+   contrast against the light --foreground/--background pair. */
+[data-theme="light"] {
+  --background: #ffffff;
+  --surface: #f4f4f6;
+  --foreground: #14141a;
+  --primary-bg: #fff8dc;
+  --primary-subtle: #fff1b8;
+  --primary-soft: #b8860b;
+  --primary: #ffd400;
+  --primary-dark: #e6bf00;
+  --primary-darker: #cca800;
+  --on-primary: #000000;
+  --accent: #ffd400;
+  --success: #16a34a;
+  --warning: #dc2626;
+  --muted: #6b7280;
+  --border: rgba(0, 0, 0, 0.1);
 }
 
 @theme inline {
@@ -28,12 +131,13 @@
   --color-primary: var(--primary);
   --color-primary-dark: var(--primary-dark);
   --color-primary-darker: var(--primary-darker);
+  --color-on-primary: var(--on-primary);
   --color-accent: var(--accent);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-muted: var(--muted);
   --color-border: var(--border);
-  --font-sans: "Vazirmatn Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Yekan Bakh", ui-sans-serif, system-ui, sans-serif;
 }
 
 html {
@@ -98,4 +202,61 @@ body {
   .reveal.pre-reveal {
     opacity: 1;
   }
+}
+
+/* Hero floating mock-UI cards (see components/landing/phone-mockup.tsx):
+   a one-shot "settle in" entrance chained into an infinite gentle drift, so
+   the cards feel alive rather than a static screenshot. Per-card stagger is
+   set by each instance via inline `animation-delay` (a two-value list
+   matching the two animation-names below) - never via the `animation`
+   shorthand, so this media query can still zero out animation-name
+   regardless of what delay an instance sets (same technique as
+   .reveal/.reveal.is-visible above). */
+@keyframes card-settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes card-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+.hero-floating-card {
+  opacity: 0;
+  animation-name: card-settle-in, card-float;
+  animation-duration: 0.6s, 5s;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1), ease-in-out;
+  animation-iteration-count: 1, infinite;
+  animation-fill-mode: both, none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-floating-card {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Landing hero backdrop (components/landing/hero-section.tsx): a faint grid
+   drawn in the theme's own --border token, so it follows light/dark without
+   a per-theme override. The fade-out toward the edges is a Tailwind
+   mask-radial-* utility on the element itself. */
+.landing-grid {
+  background-image:
+    linear-gradient(to right, var(--border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+  background-size: 44px 44px;
 }

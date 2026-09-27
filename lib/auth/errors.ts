@@ -1,3 +1,4 @@
+import "server-only";
 import { CredentialsSignin } from "next-auth";
 
 // Each `.code` value shows up as the ?code= param on the client-side

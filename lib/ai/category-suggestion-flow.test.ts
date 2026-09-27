@@ -8,6 +8,7 @@ import { findMerchant } from "@/lib/merchant-lookup";
 
 vi.mock("@/lib/nvidia-ai", () => ({
   chatCompletion: vi.fn(),
+  AI_PROVIDER: "nvidia-nim",
 }));
 vi.mock("@/lib/auth/session", () => ({
   getSession: vi.fn(),
@@ -15,7 +16,7 @@ vi.mock("@/lib/auth/session", () => ({
 
 import { chatCompletion } from "@/lib/nvidia-ai";
 import { getSession } from "@/lib/auth/session";
-import { parseTransactionWithAI, type CategoryOption } from "@/lib/ai/parse-transaction";
+import { parseTransactionWithAI, FALLBACK_EXPENSE_CATEGORY, type CategoryOption } from "@/lib/ai/parse-transaction";
 import { POST } from "@/app/api/categories/route";
 
 const mockedGetSession = vi.mocked(getSession);
@@ -89,7 +90,7 @@ describe("category-suggestion pipeline (Phase 10 integration)", () => {
       });
       accountId = account.id;
       const sayer = await prisma.category.create({
-        data: { userId, name: "سایر", icon: "📦", color: "#64748B", type: "expense" },
+        data: { userId, name: FALLBACK_EXPENSE_CATEGORY, icon: "📦", color: "#64748B", type: "expense" },
       });
       sayerCategoryId = sayer.id;
     });
@@ -105,7 +106,11 @@ describe("category-suggestion pipeline (Phase 10 integration)", () => {
       // test-file load against the real DB.
       // Step 1: unrecognized merchant + concept with no fitting existing
       // category - the AI's only escape hatch is newCategorySuggestion;
-      // category itself still falls back to سایر (buildSystemPrompt's قوانین).
+      // category itself still falls back to FALLBACK_EXPENSE_CATEGORY
+      // (buildSystemPrompt's قوانین tells the AI to emit the bare "سایر"
+      // string here, which resolveAiCategory then treats as an invalid/
+      // unmatched category regardless of confidence, landing on the real
+      // fallback name).
       vi.mocked(chatCompletion).mockResolvedValueOnce(
         JSON.stringify({
           amount: 80000,
@@ -128,7 +133,7 @@ describe("category-suggestion pipeline (Phase 10 integration)", () => {
       const firstParse = await parseTransactionWithAI(userId, rawInput, categoriesBeforeCreation);
 
       expect(chatCompletion).toHaveBeenCalledTimes(1);
-      expect(firstParse.category).toBe("سایر");
+      expect(firstParse.category).toBe(FALLBACK_EXPENSE_CATEGORY);
       expect(firstParse.suggestedCategory).toEqual({
         name: "دخانیات",
         parentName: null,
@@ -213,7 +218,7 @@ describe("category-suggestion pipeline (Phase 10 integration)", () => {
     beforeAll(async () => {
       userId = await createTestUser("alias-match");
       await prisma.category.create({
-        data: { userId, name: "سایر", icon: "📦", color: "#64748B", type: "expense" },
+        data: { userId, name: FALLBACK_EXPENSE_CATEGORY, icon: "📦", color: "#64748B", type: "expense" },
       });
       const dokhaniyat = await prisma.category.create({
         data: { userId, name: "دخانیات", icon: "🚬", color: "#64748B", type: "expense" },
@@ -283,15 +288,22 @@ describe("category-suggestion pipeline (Phase 10 integration)", () => {
 مانده:134,866 ریال`;
 
     // No fixture rows exist for this id, so findMerchant's lookupUserMapping
-    // just returns [] - no real User/Category rows are needed at all here,
-    // since buildBankSmsResult never reads the categories array it's passed.
+    // just returns [] - no real User/Category DB rows are needed at all
+    // here. The in-memory categories array below still needs
+    // FALLBACK_EXPENSE_CATEGORY present, though: buildBankSmsResult never
+    // uses it to resolve the category (that's always
+    // resolveFallbackCategory(bankResult.type)), but it does read the list
+    // for warnIfFallbackCategoryMissing's dev-only sanity check, and an
+    // empty list would otherwise trip that warning here for no reason.
     const NO_MAPPING_USER_ID = 999999;
 
     it("resolves deterministically via parseBankSms, confirming chatCompletion is never called end-to-end", async () => {
-      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, TEJARAT_SMS, []);
+      const result = await parseTransactionWithAI(NO_MAPPING_USER_ID, TEJARAT_SMS, [
+        { name: FALLBACK_EXPENSE_CATEGORY, type: "expense" },
+      ]);
 
       expect(result.source).toBe("bank-sms");
-      expect(result.category).toBe("سایر");
+      expect(result.category).toBe(FALLBACK_EXPENSE_CATEGORY);
       expect(result.needsConfirmation).toBe(true);
       expect(chatCompletion).not.toHaveBeenCalled();
     });
